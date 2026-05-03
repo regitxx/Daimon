@@ -201,6 +201,8 @@ daimon.memory.import({
   document: ExportDocument,
   verify_signature: boolean  // default true
 }) → { imported: number, skipped: number }
+
+daimon.memory.delete({ id: string }) → { deleted: boolean }
 ```
 
 #### Context
@@ -369,15 +371,20 @@ $DAIMON_HOME/  (default: ~/.daimon/)
 
 ---
 
-## 11. Open questions (must resolve before v0.1 freeze)
+## 11. v0.1 defaults (resolved)
 
-- **Embedding model**: confirm `nomic-embed-text` as default. Fallback if Ollama not present?
-- **Default LLM context budget**: how many tokens of memory to inject per call? Adaptive?
-- **`daimon.context.get` policy**: rule-based (similarity + recency) or model-driven? v0.1 should ship the simpler version.
-- **Memory aging / retention**: do memories expire? User-controlled? Default off in v0.1?
-- **Multiple principals on one machine**: deferred. v0.1 = one principal per daimon-core process.
-- **Synchronous vs streaming responses**: provider.invoke supports streaming via SSE / WebSocket?
-- **CLI ergonomics**: what does `daimon` command-line surface look like for a non-developer user?
+The following defaults are locked in for v0.1. Each was an open question; each now has a chosen answer with a brief rationale.
+
+| Question | Decision | Rationale |
+|---|---|---|
+| Embedding model | `nomic-embed-text` (768 dim) via local Ollama | Keeps memory creation 100% local. No third-party API call. |
+| Fallback if Ollama absent | Semantic search disabled; key-value memory still functions | A daimon must run on machines without local model infra. |
+| Memory injection budget | 2000 tokens default per `context.get`, configurable per request | Reasonable default for most chat use. Adaptive logic is post-v0.1. |
+| `context.get` policy | `score = 0.7 × cosine_sim + 0.3 × exp(−age_days/30)` | Simple, deterministic, predictable. Model-driven retrieval is post-v0.1. |
+| Memory retention | No automatic expiration. Deletion is user-initiated via `daimon.memory.delete` | Daimon never deletes the principal's data without their action. |
+| Multi-principal | Deferred. One principal per daimond process. Multiple principals = multiple processes with separate `$DAIMON_HOME`. | Keeps v0.1 simple. Multi-tenancy is a different security model. |
+| Streaming | HTTPS transport supports Server-Sent Events. Unix socket synchronous-only in v0.1. | Streaming matters for chat UIs; SSE is sufficient. |
+| CLI surface | `daimon init`, `daimon unlock`, `daimon memory`, `daimon provider`, `daimon chat`. Subcommand details in v0.1.1. | Establishes ergonomic shape; specifics iterate during implementation. |
 
 ---
 

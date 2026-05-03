@@ -78,3 +78,32 @@ Alternatives considered: Anima (Latin, soul) and Vellum (signed parchment). Daim
 2. Resolve the open questions in SPEC §11 — pick defaults, lock v0.1.
 3. Begin reference implementation: `cmd/daimond` skeleton, `internal/identity` (DID generation + keystore), then `internal/memory`.
 
+---
+
+## 2026-05-03 — Day Zero, third session
+
+**SPEC §11 resolved.** All seven open questions answered. Defaults locked for v0.1:
+
+| Question | Decision |
+|---|---|
+| Embedding model | `nomic-embed-text` via local Ollama (graceful degrade if absent) |
+| Context budget | 2000 tokens default per `context.get`, per-request override |
+| Context retrieval policy | `0.7 × cosine + 0.3 × exp(−age_days/30)` — deterministic |
+| Retention | No auto-expiration. Deletion is user-initiated. |
+| Multi-principal | Deferred. One principal per `daimond` process. |
+| Streaming | SSE on HTTPS transport. Unix socket sync-only. |
+| CLI surface | `daimon init / unlock / memory / provider / chat` |
+
+Added `daimon.memory.delete` to the RPC surface as a consequence of the retention decision.
+
+**Go skeleton in place.** Project compiles, `daimond` runs and prints banner.
+
+- `go.mod` — module `github.com/regitxx/Daimon`, Go 1.22 minimum
+- `cmd/daimond/main.go` — version banner, no functionality yet
+- `Makefile` — build, test, fmt, vet, run, clean targets
+- Verified: Go 1.26.1 on darwin/arm64. `make build` produces `bin/daimond` ~2.5 MB.
+
+**Decision on Go module path:** chose `github.com/regitxx/Daimon` (capital D) to exactly match the GitHub repo URL. If we later rename the GH repo to lowercase, we update the module path with it. Convention prefers lowercase but exact match avoids resolution surprises.
+
+**Next session begins with:** identity primitive in `internal/identity` — DID generation (Ed25519, did:key), encrypted keystore using Argon2id-derived key. Passkey/WebAuthn-PRF integration is v0.1.x. This unlocks everything else (signing memory writes, signing activity log, did:web `.well-known/agent.json` later).
+

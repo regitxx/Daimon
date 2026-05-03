@@ -4,9 +4,10 @@
 > Then read JOURNAL.md for full history. Then begin work.
 
 **Last updated:** 2026-05-03
-**Phase:** Day Zero complete — vision, name, and SPEC v0.1 shipped. Implementation next.
+**Phase:** Day Zero — vision, name, SPEC v0.1 shipped. Defaults resolved. Go skeleton in place. Implementation begins next session.
 
 **Repository:** https://github.com/regitxx/Daimon.git
+**Build status:** `make build` produces `bin/daimond` (~2.5 MB). Runs and prints banner.
 
 ---
 
@@ -67,16 +68,16 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 1. ~~Draft `SPEC.md` v0.1~~ ✅ shipped 2026-05-03
 2. ~~Draft `README.md`~~ ✅ shipped 2026-05-03
 3. ~~Stand up `git init`, first commit~~ ✅ shipped 2026-05-03
-4. Resolve open questions in SPEC §11 — lock v0.1 defaults
-5. Skeleton Go project for daimon-core (`cmd/daimond/main.go` + `internal/`)
-6. First primitive: identity (`internal/identity` — DID generation, keystore, Argon2id-based encryption)
+4. ~~Resolve open questions in SPEC §11 — lock v0.1 defaults~~ ✅ shipped 2026-05-03
+5. ~~Skeleton Go project (go.mod, cmd/daimond/main.go, Makefile)~~ ✅ shipped 2026-05-03
+6. **First primitive: identity** (`internal/identity` — DID generation, keystore, Argon2id-based encryption) ← *next session starts here*
 7. Second primitive: memory (`internal/memory` — SQLCipher init, schema, basic write/read)
 8. Third primitive: activity log (`internal/activity` — append + verify)
 9. RPC server (`internal/server` — JSON-RPC 2.0 over Unix socket)
 10. First provider adapter (Claude)
 11. CLI (`cmd/daimon` — wraps RPC for terminal use)
 12. End-to-end demo: switch providers mid-task, memory persists
-13. Apply to NLnet NGI Zero (deadline: rolling, every 2 months — application drafted in parallel with code work)
+13. Apply to NLnet NGI Zero (rolling deadline every 2 months — drafted in parallel with code work)
 
 ## Working rhythm
 

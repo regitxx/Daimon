@@ -5,8 +5,9 @@
 *.exe
 *.test
 *.out
-daimond
-daimon
+# Built binaries at repo root only (not the cmd/* source dirs)
+/daimond
+/daimon
 
 # Daimon runtime data — NEVER commit user state
 .daimon/
