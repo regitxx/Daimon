@@ -20,9 +20,6 @@
 //     sufficient for the v0.1 single-machine target.
 //   - Batch requests
 //   - Server-Sent Events streaming (SPEC §11; HTTPS-only)
-//   - daimon.provider.* methods — these land with the provider-adapter
-//     primitive and are intentionally absent here. Calling them returns
-//     CodeMethodNotFound, which is the honest signal.
 package server
 
 import (

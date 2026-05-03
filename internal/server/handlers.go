@@ -13,15 +13,15 @@ import (
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
+	"github.com/regitxx/Daimon/internal/provider"
 )
 
 // registerMethods wires the SPEC §6.1 surface to the bound primitives.
 //
-// The provider.* methods are intentionally absent in this build — they land
-// with the provider-adapter primitive. Calling them returns the JSON-RPC
-// standard CodeMethodNotFound, which is the honest signal for "not in this
-// build" (vs. CodeNotImplemented, which we reserve for methods that exist in
-// the table but are stubbed).
+// daimon.provider.{list,invoke} are registered unconditionally. When the
+// server has no Provider Registry attached, the handlers return a structured
+// error explaining that no providers are configured — distinct from the
+// JSON-RPC CodeMethodNotFound we'd return if the method itself were missing.
 func (s *Server) registerMethods() {
 	s.methods = map[string]methodHandler{
 		"daimon.identity.get":    s.handleIdentityGet,
@@ -34,6 +34,8 @@ func (s *Server) registerMethods() {
 		"daimon.context.get":     s.handleContextGet,
 		"daimon.activity.append": s.handleActivityAppend,
 		"daimon.activity.query":  s.handleActivityQuery,
+		"daimon.provider.list":   s.handleProviderList,
+		"daimon.provider.invoke": s.handleProviderInvoke,
 	}
 }
 
@@ -253,25 +255,30 @@ type contextGetResult struct {
 //
 //	score = 0.7 × cosine + 0.3 × exp(−age_days/30)
 //
-// It runs a single search across all kinds (filtered post-hoc when the caller
-// supplies a kinds[] allowlist), re-scores with the recency boost, sorts, and
-// formats the top-K under the token budget into a markdown-ish block.
+// The actual retrieval and formatting lives in runContextRetrieval so the
+// provider.invoke handler can reuse it for the inject_context flow.
 func (s *Server) handleContextGet(ctx context.Context, params json.RawMessage) (any, *RPCError) {
 	var p contextGetParams
 	if rpcErr := decodeParams(params, &p); rpcErr != nil {
 		return nil, rpcErr
 	}
-	maxTokens := p.MaxTokens
+	return s.runContextRetrieval(ctx, p.Query, p.MaxTokens, p.Kinds)
+}
+
+// runContextRetrieval pulls candidates from memory.Search, re-ranks with the
+// SPEC §11 recency boost, applies the optional kinds[] allowlist, and formats
+// the top-K under the token budget into a numbered "[i] (kind) content" block.
+func (s *Server) runContextRetrieval(ctx context.Context, query string, maxTokens int, kinds []string) (contextGetResult, *RPCError) {
 	if maxTokens <= 0 {
 		maxTokens = 2000 // SPEC §11 default
 	}
 	// Pull more candidates than we'll keep so the recency re-rank has room.
-	hits, err := s.store.Search(ctx, p.Query, memory.SearchOptions{Limit: 50})
+	hits, err := s.store.Search(ctx, query, memory.SearchOptions{Limit: 50})
 	if err != nil {
-		return nil, mapMemoryError(err, "context.get")
+		return contextGetResult{}, mapMemoryError(err, "context.get")
 	}
 
-	allow := kindAllowlist(p.Kinds)
+	allow := kindAllowlist(kinds)
 	now := time.Now().UnixMilli()
 
 	type scored struct {
@@ -320,6 +327,116 @@ func (s *Server) handleContextGet(ctx context.Context, params json.RawMessage) (
 		MemoryIDs:     ids,
 		TokenEstimate: tokens,
 	}, nil
+}
+
+// --- daimon.provider.list ----------------------------------------------------
+
+type providerListEntry struct {
+	Name       string           `json:"name"`
+	Models     []provider.Model `json:"models"`
+	Configured bool             `json:"configured"`
+}
+
+func (s *Server) handleProviderList(_ context.Context, _ json.RawMessage) (any, *RPCError) {
+	if s.providers == nil {
+		return []providerListEntry{}, nil
+	}
+	list := s.providers.List()
+	out := make([]providerListEntry, 0, len(list))
+	for _, p := range list {
+		configured := false
+		if s.creds != nil {
+			configured = s.creds.Has(p.Name())
+		}
+		out = append(out, providerListEntry{
+			Name:       p.Name(),
+			Models:     p.Models(),
+			Configured: configured,
+		})
+	}
+	return out, nil
+}
+
+// --- daimon.provider.invoke --------------------------------------------------
+
+type providerInjectContext struct {
+	Query     string   `json:"query"`
+	MaxTokens int      `json:"max_tokens,omitempty"`
+	Kinds     []string `json:"kinds,omitempty"`
+}
+
+type providerInvokeParams struct {
+	Provider      string                 `json:"provider"`
+	Request       provider.Request       `json:"request"`
+	InjectContext *providerInjectContext `json:"inject_context,omitempty"`
+}
+
+func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessage) (any, *RPCError) {
+	var p providerInvokeParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Provider == "" {
+		return nil, newError(CodeInvalidParams, "provider is required")
+	}
+	if s.providers == nil {
+		return nil, newError(CodeNotFound, "no provider registry attached to this daimon")
+	}
+	prov, err := s.providers.Get(p.Provider)
+	if err != nil {
+		return nil, newError(CodeNotFound, err.Error())
+	}
+
+	req := p.Request
+	var injectedIDs []string
+	if p.InjectContext != nil {
+		// Run the SPEC §11 retrieval, then prepend the formatted block to
+		// the system prompt — daimon's job is to enrich the prompt before
+		// the provider sees it. Empty retrieval is silent, not an error.
+		ctxResult, rpcErr := s.runContextRetrieval(ctx, p.InjectContext.Query, p.InjectContext.MaxTokens, p.InjectContext.Kinds)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		if ctxResult.Context != "" {
+			if req.System != "" {
+				req.System = ctxResult.Context + "\n\n" + req.System
+			} else {
+				req.System = ctxResult.Context
+			}
+			injectedIDs = ctxResult.MemoryIDs
+		}
+	}
+
+	start := time.Now()
+	resp, err := prov.Invoke(ctx, req)
+	elapsed := time.Since(start)
+	if err != nil {
+		// Provider-level failures map to internal-error; the upstream message
+		// carries the diagnostic detail. We do not classify HTTP 4xx as
+		// CodeInvalidParams because the validity is the provider's call, not
+		// ours.
+		return nil, newError(CodeInternalError, fmt.Sprintf("provider.%s.invoke: %v", p.Provider, err))
+	}
+
+	// SPEC §8.2: every provider call is logged in mediated mode. We do not
+	// log the prompt itself — that would defeat the purpose of keeping
+	// memory local. We log who, what model, what counted, why it stopped.
+	logPayload := map[string]any{
+		"provider":      p.Provider,
+		"model":         resp.Model,
+		"input_tokens":  resp.Usage.InputTokens,
+		"output_tokens": resp.Usage.OutputTokens,
+		"stop_reason":   string(resp.StopReason),
+		"duration_ms":   elapsed.Milliseconds(),
+	}
+	if len(injectedIDs) > 0 {
+		logPayload["injected_memory_ids"] = injectedIDs
+	}
+	if _, err := s.alog.Append(ctx, activity.KindProviderInvoke, logPayload); err != nil {
+		s.logf("activity append (provider.invoke %s): %v", p.Provider, err)
+	}
+
+	return resp, nil
 }
 
 // --- daimon.activity.append --------------------------------------------------

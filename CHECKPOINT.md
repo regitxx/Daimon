@@ -4,10 +4,10 @@
 > Then read JOURNAL.md for full history. Then begin work.
 
 **Last updated:** 2026-05-03
-**Phase:** Day Zero — vision, SPEC v0.1, defaults resolved, Go skeleton in place. **Identity, memory, activity-log, and RPC server all landed.** SQLCipher + Ollama embedder + first provider adapter (Claude) next.
+**Phase:** Day Zero — vision, SPEC v0.1, defaults resolved, Go skeleton in place. **Identity, memory, activity-log, RPC server, the first provider adapter (Claude), and the Ollama embedder all landed. Mediated mode is real; the cosine retrieval path is live when Ollama is running.** A second provider adapter (OpenAI) and SQLCipher at-rest encryption are the next two milestones.
 
 **Repository:** https://github.com/regitxx/Daimon.git
-**Build status:** `make build` → `bin/daimond` (~10.4 MB). 51/51 tests pass in ~3s (8 identity + 14 memory + 11 activity + 18 server), race-clean. Demo run generates a `did:key:z6Mk…` DID, opens a SQLite memory store and a BLAKE3-chained activity log, writes three signed memories (each emitting a signed activity entry), exports a signed memory document, re-imports it into a fresh-identity store, verifies the activity chain end-to-end, then **stands up the JSON-RPC 2.0 server on a Unix socket and self-calls `daimon.identity.get`** — every signature checks out and the RPC roundtrip succeeds.
+**Build status:** `make build` → `bin/daimond` (~14.4 MB). 100/100 tests pass in ~10s (8 identity + 14 memory + 11 activity + 29 server + 12 provider + 10 claude adapter + 12 ollama embedder), race-clean. Demo run generates a `did:key:z6Mk…` DID, **probes a local Ollama server and falls back to `NullEmbedder` per SPEC §11 if absent**, opens a SQLite memory store and a BLAKE3-chained activity log, writes three signed memories (each emitting a signed activity entry), **runs a memory search and labels the top hit's retrieval path (cosine vs substring fallback)**, exports a signed memory document, re-imports it into a fresh-identity store, verifies the activity chain end-to-end, builds a provider registry (Claude registers iff `ANTHROPIC_API_KEY` is set), then **stands up the JSON-RPC 2.0 server on a Unix socket and self-calls `daimon.identity.get` + `daimon.provider.list`** — every signature checks out, the RPC roundtrips succeed, and the registered Claude adapter advertises three models with `configured=true`.
 
 ---
 
@@ -74,12 +74,14 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 7. ~~Second primitive: memory (`internal/memory` — schema per SPEC §5.2, signed write/read, cosine search, signed export/import)~~ ✅ shipped 2026-05-03
 8. ~~Third primitive: activity log (`internal/activity` — append-only JSONL, BLAKE3 hash-chained, Ed25519-signed, full chain Verify)~~ ✅ shipped 2026-05-03
 9. ~~RPC server (`internal/server` — JSON-RPC 2.0 over Unix socket; wires identity, memory, activity, context.get to the SPEC §6.1 method surface)~~ ✅ shipped 2026-05-03
-10. **SQLCipher at-rest encryption** for the memory store — swap the driver, pipe keystore-derived key through Open. Spec-faithful pass over §5.1. ← *next session candidate*
-11. **Real Ollama embedder** behind the existing `Embedder` interface — unblocks cosine search in the demo, makes `context.get` non-trivial. ← *next session candidate*
-12. **First provider adapter (Claude)** + the `daimon.provider.*` RPC surface — this is what makes mediated mode real. ← *next session candidate*
-13. CLI (`cmd/daimon` — wraps RPC for terminal use)
-14. End-to-end demo: switch providers mid-task, memory persists
-15. Apply to NLnet NGI Zero (rolling deadline every 2 months — drafted in parallel with code work)
+10. ~~First provider adapter (Claude) + the `daimon.provider.{list,invoke}` RPC surface — what makes mediated mode real~~ ✅ shipped 2026-05-03
+11. ~~Real Ollama embedder behind the existing `Embedder` interface — unblocks cosine search and makes `context.get` non-trivial.~~ ✅ shipped 2026-05-03
+12. **Second provider adapter (OpenAI)** — proves the Provider interface generalises. With three adapters in tree (Claude / OpenAI / Ollama-chat), interface bends — if any — become visible. ← *next session candidate*
+13. **SQLCipher at-rest encryption** for the memory store — closes SPEC §5.1. Genuine architectural fork: pure-Go modernc.org/sqlite has no SQLCipher; choices are CGO + mattn/go-sqlite3-with-SQLCipher, application-level row encryption (encrypt content/metadata blobs before write), or a separate KEK-derived encrypted page store. Pick deliberately, not under time pressure. ← *next session candidate*
+14. **Ollama chat adapter** — second provider adapter against the same local server we now embed against. Closes the "switch Claude → GPT → local Llama mid-task" loop. ← *next session candidate*
+15. CLI (`cmd/daimon` — wraps RPC for terminal use; SPEC §11 surface: `init / unlock / memory / provider / chat`)
+16. End-to-end demo: switch Claude → OpenAI → Ollama mid-task, memory persists
+17. Apply to NLnet NGI Zero (rolling deadline every 2 months — drafted in parallel with code work)
 
 ## Working rhythm
 

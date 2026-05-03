@@ -14,14 +14,24 @@ import (
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
+	"github.com/regitxx/Daimon/internal/provider"
 )
 
-// Options bundles the dependencies a Server needs. All three primitives are
-// required; the server is the orchestrator, not their owner.
+// Options bundles the dependencies a Server needs. Identity, Store, and Log
+// are required; the server is the orchestrator, not their owner.
+//
+// Providers and Credentials are optional. When Providers is nil, the
+// daimon.provider.* methods return CodeMethodNotFound — same honest signal as
+// any unregistered method. When Credentials is nil, daimon.provider.list
+// reports every registered adapter as unconfigured (since we have no way to
+// observe credential presence). Both are typically supplied together by the
+// daemon main, but server tests can exercise either independently.
 type Options struct {
-	Identity *identity.Identity
-	Store    *memory.Store
-	Log      *activity.Log
+	Identity    *identity.Identity
+	Store       *memory.Store
+	Log         *activity.Log
+	Providers   *provider.Registry
+	Credentials *provider.CredentialStore
 
 	// Logger is the destination for operational messages (accept errors,
 	// activity-log append failures, etc.). Nil disables logging.
@@ -35,9 +45,11 @@ type Options struct {
 // idempotent and safe to call from any goroutine; it cancels in-flight handler
 // contexts and drops the socket file.
 type Server struct {
-	id    *identity.Identity
-	store *memory.Store
-	alog  *activity.Log
+	id        *identity.Identity
+	store     *memory.Store
+	alog      *activity.Log
+	providers *provider.Registry
+	creds     *provider.CredentialStore
 
 	logger *log.Logger
 
@@ -77,10 +89,12 @@ func New(opts Options) (*Server, error) {
 		return nil, errors.New("server: Log is required")
 	}
 	s := &Server{
-		id:     opts.Identity,
-		store:  opts.Store,
-		alog:   opts.Log,
-		logger: opts.Logger,
+		id:        opts.Identity,
+		store:     opts.Store,
+		alog:      opts.Log,
+		providers: opts.Providers,
+		creds:     opts.Credentials,
+		logger:    opts.Logger,
 	}
 	s.registerMethods()
 	return s, nil

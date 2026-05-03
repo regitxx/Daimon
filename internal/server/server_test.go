@@ -504,18 +504,10 @@ func TestUnknownMethodReturnsMethodNotFound(t *testing.T) {
 	}
 }
 
-func TestProviderMethodsAreNotRegistered(t *testing.T) {
-	// SPEC §6.1 includes provider.list and provider.invoke; this build
-	// deliberately leaves them out until the adapter primitive lands.
-	// CodeMethodNotFound is the honest signal.
-	f := newFixture(t)
-	for _, m := range []string{"daimon.provider.list", "daimon.provider.invoke"} {
-		resp := f.call(t, m, nil)
-		if resp.Error == nil || resp.Error.Code != CodeMethodNotFound {
-			t.Errorf("%s: expected MethodNotFound, got %+v", m, resp.Error)
-		}
-	}
-}
+// Provider methods are registered unconditionally now that the adapter
+// primitive has landed; their behaviour without a registry attached is
+// covered by TestProviderList_Empty and TestProviderInvoke_NoRegistry in
+// provider_handlers_test.go.
 
 func TestInvalidJSONRPCVersionRejected(t *testing.T) {
 	f := newFixture(t)
