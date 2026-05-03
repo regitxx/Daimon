@@ -71,3 +71,7 @@ A single daimon running on your machine. Holds your identity and memory. Routes 
 No VC. No commercial pressure. Foundation- and grant-funded (NLnet NGI Zero, Sovereign Tech Fund). Long-term target: Linux Foundation handoff once adoption justifies it.
 
 The protocol is the public good. Anyone can implement it. No party owns it.
+
+## Author
+
+Created by **Johannes Christian Koeleman** ([@regitxx](https://github.com/regitxx)) — 2026.
