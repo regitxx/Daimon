@@ -20,6 +20,7 @@ import (
 	"github.com/regitxx/Daimon/internal/memory/ollama"
 	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/provider/claude"
+	"github.com/regitxx/Daimon/internal/provider/openai"
 	"github.com/regitxx/Daimon/internal/server"
 )
 
@@ -159,8 +160,9 @@ func run() error {
 	}
 
 	fmt.Fprintln(os.Stderr)
-	fmt.Fprintln(os.Stderr, "Mediated mode is real and the cosine path is live when Ollama is running locally.")
-	fmt.Fprintln(os.Stderr, "Next: OpenAI provider adapter, then SQLCipher at-rest encryption.")
+	fmt.Fprintln(os.Stderr, "Mediated mode is real, cosine retrieval is live when Ollama runs, and the Provider")
+	fmt.Fprintln(os.Stderr, "interface is now exercised against two wire formats (Anthropic Messages + OpenAI Responses).")
+	fmt.Fprintln(os.Stderr, "Next: SQLCipher at-rest encryption, then the Ollama chat adapter.")
 	return nil
 }
 
@@ -193,9 +195,9 @@ func pickEmbedder(parent context.Context) memory.Embedder {
 
 // buildProviderRegistry returns the provider registry and credential store
 // the daimon will expose via daimon.provider.{list,invoke}. v0.1 ships with
-// the Claude adapter; we register it only when ANTHROPIC_API_KEY is set in
-// the environment so the demo is safe to run without keys (and never spends
-// money on its own).
+// the Claude and OpenAI adapters; each is registered only when its API key
+// is set in the environment so the demo is safe to run without keys (and
+// never spends money on its own).
 func buildProviderRegistry() (*provider.Registry, *provider.CredentialStore) {
 	reg := provider.NewRegistry()
 	creds := provider.NewCredentialStore()
@@ -210,7 +212,24 @@ func buildProviderRegistry() (*provider.Registry, *provider.CredentialStore) {
 			fmt.Fprintf(os.Stderr, "      Registered: %s (%d models)\n", ad.Name(), len(ad.Models()))
 		}
 	} else {
-		fmt.Fprintln(os.Stderr, "      ANTHROPIC_API_KEY not set; Claude adapter not registered (demo will list zero providers)")
+		fmt.Fprintln(os.Stderr, "      ANTHROPIC_API_KEY not set; Claude adapter not registered")
+	}
+
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		ad, err := openai.New(key)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "      ! openai adapter: %v (skipping)\n", err)
+		} else {
+			reg.Register(ad)
+			creds.Set(ad.Name(), key)
+			fmt.Fprintf(os.Stderr, "      Registered: %s (%d models)\n", ad.Name(), len(ad.Models()))
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "      OPENAI_API_KEY not set; OpenAI adapter not registered")
+	}
+
+	if reg.Len() == 0 {
+		fmt.Fprintln(os.Stderr, "      (no providers configured; demo will list zero adapters)")
 	}
 	return reg, creds
 }
