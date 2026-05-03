@@ -107,3 +107,36 @@ Added `daimon.memory.delete` to the RPC surface as a consequence of the retentio
 
 **Next session begins with:** identity primitive in `internal/identity` — DID generation (Ed25519, did:key), encrypted keystore using Argon2id-derived key. Passkey/WebAuthn-PRF integration is v0.1.x. This unlocks everything else (signing memory writes, signing activity log, did:web `.well-known/agent.json` later).
 
+---
+
+## 2026-05-03 — Day Zero, fourth session: identity primitive landed
+
+**`internal/identity` package shipped.** Four files, ~450 lines of Go, 8 tests passing.
+
+**Files:**
+- `did.go` — did:key encoding/decoding. multicodec prefix (`0xed 0x01` for ed25519-pub) + multibase base58btc + 'z' prefix. Includes `MultibaseFragment` helper for DID document construction.
+- `keystore.go` — Argon2id (64 MiB / 3 iters / 4 parallel / 32-byte key) → AES-256-GCM. JSON keystore format with versioning. File mode 0600.
+- `identity.go` — public API: `Generate`, `LoadFromKeystore`, `SaveToKeystore`, `DID`, `PublicKey`, `Sign`, `Verify`, `DIDDocument` (Ed25519VerificationKey2020 suite).
+- `identity_test.go` — covers generate, sign/verify (with tampered-message rejection), did:key roundtrip, malformed did rejection, keystore roundtrip with 0600 perm check, wrong-password rejection, corrupted-ciphertext rejection, DID document JSON shape.
+
+**Dependencies added:**
+- `golang.org/x/crypto/argon2` — for Argon2id KDF
+- `github.com/mr-tron/base58` — for did:key multibase encoding
+
+**Wired into `cmd/daimond/main.go`:** running the binary now generates an ephemeral Ed25519 identity, prints its `did:key`, signs a test message, and verifies. End-to-end demonstration that the primitive compiles, links, and works.
+
+**Sample DID from a demo run:** `did:key:z6MkgHPbnonFyfAaEqu3qbjPYb8NkENPmcfBxfMLvsv2FKkA` (the `z6Mk` prefix is canonical for Ed25519-based did:key — it's the multibase + multicodec encoding of the public key).
+
+**Performance**: Argon2id at the SPEC §4.2 minimum parameters (64 MiB / 3 iters / 4 parallel) runs in 50–70ms per derivation on M-series Apple Silicon. Acceptable.
+
+**Test runtime**: 1.17s for the full identity package suite. Fast enough.
+
+**Decisions made this session:**
+- DID document uses `Ed25519VerificationKey2020` suite (not the older 2018 form). Aligns with current W3C specs.
+- Argon2id parameters match SPEC §4.2 minimums exactly. Hardcoded for v0.1; configurable later.
+- Keystore is JSON with base64-encoded fields. Debuggable, portable across architectures. Format versioned.
+- No passkey/WebAuthn integration in v0.1 — password-only. Passkey support is v0.1.x (requires a UI layer).
+- Public API surface kept narrow. No exported field on `Identity` (private key is locked inside).
+
+**Next session begins with:** memory primitive in `internal/memory` — SQLCipher-encrypted SQLite with `sqlite-vec` extension for vector search. Schema from SPEC §5.2. Memory writes signed by the identity (ties memory to identity at the cryptographic level). Test plan: write/read roundtrip, signature verification on read, semantic search behavior, export/import roundtrip with signature verification.
+

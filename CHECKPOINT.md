@@ -4,10 +4,10 @@
 > Then read JOURNAL.md for full history. Then begin work.
 
 **Last updated:** 2026-05-03
-**Phase:** Day Zero — vision, name, SPEC v0.1 shipped. Defaults resolved. Go skeleton in place. Implementation begins next session.
+**Phase:** Day Zero — vision, SPEC v0.1, defaults resolved, Go skeleton in place. **Identity primitive landed.** Memory primitive next.
 
 **Repository:** https://github.com/regitxx/Daimon.git
-**Build status:** `make build` produces `bin/daimond` (~2.5 MB). Runs and prints banner.
+**Build status:** `make build` → `bin/daimond` (~2.7 MB). 8/8 identity tests pass in 1.2s. Demo run produces a real `did:key:z6Mk…` DID, signs and verifies.
 
 ---
 
@@ -70,8 +70,8 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 3. ~~Stand up `git init`, first commit~~ ✅ shipped 2026-05-03
 4. ~~Resolve open questions in SPEC §11 — lock v0.1 defaults~~ ✅ shipped 2026-05-03
 5. ~~Skeleton Go project (go.mod, cmd/daimond/main.go, Makefile)~~ ✅ shipped 2026-05-03
-6. **First primitive: identity** (`internal/identity` — DID generation, keystore, Argon2id-based encryption) ← *next session starts here*
-7. Second primitive: memory (`internal/memory` — SQLCipher init, schema, basic write/read)
+6. ~~First primitive: identity (Ed25519 keypair, did:key, Argon2id+AES-GCM keystore, DID document)~~ ✅ shipped 2026-05-03
+7. **Second primitive: memory** (`internal/memory` — SQLCipher init, schema, signed write/read, sqlite-vec for embeddings) ← *next session starts here*
 8. Third primitive: activity log (`internal/activity` — append + verify)
 9. RPC server (`internal/server` — JSON-RPC 2.0 over Unix socket)
 10. First provider adapter (Claude)
