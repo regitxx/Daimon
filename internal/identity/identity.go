@@ -3,9 +3,13 @@ package identity
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+
+	"golang.org/x/crypto/hkdf"
 )
 
 var ErrIdentityLocked = errors.New("identity is locked")
@@ -64,6 +68,38 @@ func (i *Identity) Sign(msg []byte) ([]byte, error) {
 // Verify reports whether sig is a valid signature over msg by this identity.
 func (i *Identity) Verify(msg, sig []byte) bool {
 	return ed25519.Verify(i.PublicKey(), msg, sig)
+}
+
+// DeriveSubkey derives a domain-separated symmetric key from the principal's
+// Ed25519 seed via HKDF-SHA256.
+//
+// Use a distinct, stable info label per consumer (e.g. the memory store's
+// row-encryption key uses "daimon-memory-encryption-v1"). The derivation is
+// deterministic — the same identity always produces the same subkey for the
+// same label — so an unlocked daimon can re-open data it wrote previously
+// without storing the subkey to disk.
+//
+// The seed never leaves this function; only the derived bytes are returned.
+// HKDF-SHA256 over a 32-byte uniformly-random Ed25519 seed produces output
+// statistically independent of the signing operations performed with the
+// underlying key.
+func (i *Identity) DeriveSubkey(label string, length int) ([]byte, error) {
+	if i.priv == nil {
+		return nil, ErrIdentityLocked
+	}
+	if label == "" {
+		return nil, errors.New("identity: empty subkey label")
+	}
+	if length <= 0 {
+		return nil, errors.New("identity: subkey length must be positive")
+	}
+	seed := i.priv.Seed()
+	r := hkdf.New(sha256.New, seed, nil, []byte(label))
+	out := make([]byte, length)
+	if _, err := io.ReadFull(r, out); err != nil {
+		return nil, fmt.Errorf("derive subkey: %w", err)
+	}
+	return out, nil
 }
 
 // DIDDocument returns a minimal W3C DID document for this identity using

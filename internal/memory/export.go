@@ -125,13 +125,30 @@ func (s *Store) Import(ctx context.Context, doc *ExportDocument, opts ImportOpti
 	return res, nil
 }
 
+// insertImported encrypts plaintext content / metadata / source under this
+// receiver Store's row-encryption key before insertion. The per-memory
+// signature is unchanged — it is over plaintext (id || content || metadata),
+// produced by the source identity, and verified against the export DID before
+// this function is called.
 func (s *Store) insertImported(ctx context.Context, mem *Memory, skipExisting bool) (bool, error) {
-	_, err := s.db.ExecContext(ctx, `
+	contentCT, err := encryptField(s.key, []byte(mem.Content), mem.ID, "content")
+	if err != nil {
+		return false, fmt.Errorf("import: encrypt content: %w", err)
+	}
+	metaCT, err := encryptField(s.key, mem.Metadata, mem.ID, "metadata")
+	if err != nil {
+		return false, fmt.Errorf("import: encrypt metadata: %w", err)
+	}
+	sourceCT, err := encryptField(s.key, []byte(mem.Source), mem.ID, "source")
+	if err != nil {
+		return false, fmt.Errorf("import: encrypt source: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
         INSERT INTO memories (id, created_at, updated_at, kind, content, metadata, embedding, source, signature)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		mem.ID, mem.CreatedAt, mem.UpdatedAt, string(mem.Kind),
-		mem.Content, nullableBytes(mem.Metadata), nullableBytes(mem.Embedding),
-		nullableString(mem.Source), mem.Signature,
+		nullableBytes(contentCT), nullableBytes(metaCT), nullableBytes(mem.Embedding),
+		nullableBytes(sourceCT), mem.Signature,
 	)
 	if err == nil {
 		return true, nil

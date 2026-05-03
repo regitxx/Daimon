@@ -121,20 +121,146 @@ func TestWriteRejectsEmptyContent(t *testing.T) {
 	}
 }
 
-func TestReadDetectsTampering(t *testing.T) {
+func TestRowsAreEncryptedAtRest(t *testing.T) {
+	// SPEC §5.1: content, metadata, and source must not be readable in the
+	// database file without the principal's identity. This test asserts the
+	// load-bearing property by reading the columns directly via SQL and
+	// checking they don't contain the plaintext.
+	store, _ := newTestStore(t, nil)
+	ctx := context.Background()
+	plaintext := "highly distinctive secret content string xyz123"
+	plaintextSource := "distinctive-source-marker"
+	plaintextMeta := "distinctive-metadata-tag"
+	mem, err := store.Write(ctx, WriteRequest{
+		Kind:     KindFact,
+		Content:  plaintext,
+		Metadata: map[string]any{"tag": plaintextMeta},
+		Source:   plaintextSource,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var (
+		contentBlob []byte
+		metaBlob    []byte
+		sourceBlob  []byte
+	)
+	row := store.db.QueryRowContext(ctx, `SELECT content, metadata, source FROM memories WHERE id = ?`, mem.ID)
+	if err := row.Scan(&contentBlob, &metaBlob, &sourceBlob); err != nil {
+		t.Fatalf("raw scan: %v", err)
+	}
+
+	if strings.Contains(string(contentBlob), plaintext) {
+		t.Error("content blob contains plaintext at rest")
+	}
+	if strings.Contains(string(metaBlob), plaintextMeta) {
+		t.Error("metadata blob contains plaintext tag at rest")
+	}
+	if strings.Contains(string(sourceBlob), plaintextSource) {
+		t.Error("source blob contains plaintext at rest")
+	}
+	if len(contentBlob) == 0 || contentBlob[0] != rowCryptoVersion {
+		t.Errorf("content blob missing v1 framing byte (got first byte 0x%02x, want 0x%02x)",
+			func() byte {
+				if len(contentBlob) == 0 {
+					return 0
+				}
+				return contentBlob[0]
+			}(),
+			rowCryptoVersion)
+	}
+}
+
+func TestForeignIdentityCannotDecrypt(t *testing.T) {
+	// A second daimon's identity must not be able to read a store written by
+	// the first. This is the disk-theft / backup-exfiltration property: even
+	// with full read access to the SQLite file, you need the principal's
+	// passphrase (or the unlocked private key) to recover content.
+	dbPath := filepath.Join(t.TempDir(), "shared.db")
+	srcID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src, err := Open(dbPath, srcID, nil)
+	if err != nil {
+		t.Fatalf("Open src: %v", err)
+	}
+	ctx := context.Background()
+	written, err := src.Write(ctx, WriteRequest{Kind: KindFact, Content: "secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = src.Close()
+
+	// Open the same file with a fresh (foreign) identity and try to read.
+	foreignID, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := Open(dbPath, foreignID, nil)
+	if err != nil {
+		t.Fatalf("Open foreign: %v", err)
+	}
+	t.Cleanup(func() { _ = foreign.Close() })
+	_, err = foreign.Read(ctx, written.ID)
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("expected foreign-identity Read to fail with ErrInvalidCiphertext, got %v", err)
+	}
+
+	// Same identity reopens the same file successfully — round-trips work
+	// across process restarts because the key is deterministic in the seed.
+	src2, err := Open(dbPath, srcID, nil)
+	if err != nil {
+		t.Fatalf("Open src2: %v", err)
+	}
+	t.Cleanup(func() { _ = src2.Close() })
+	got, err := src2.Read(ctx, written.ID)
+	if err != nil {
+		t.Fatalf("reopened-store Read: %v", err)
+	}
+	if got.Content != "secret" {
+		t.Errorf("reopened-store Content = %q, want %q", got.Content, "secret")
+	}
+}
+
+func TestReadDetectsContentTampering(t *testing.T) {
+	// Out-of-band write to the encrypted content column. With application-level
+	// row encryption (SPEC §5.1), this is caught by AEAD authentication before
+	// signature verification ever runs — surfaced as ErrInvalidCiphertext.
 	store, _ := newTestStore(t, nil)
 	ctx := context.Background()
 	mem, err := store.Write(ctx, WriteRequest{Kind: KindFact, Content: "original"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Tamper with the row out-of-band.
 	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET content = ? WHERE id = ?`, "tampered", mem.ID); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.Read(ctx, mem.ID)
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("expected ErrInvalidCiphertext on tampered ciphertext, got %v", err)
+	}
+}
+
+func TestReadDetectsSignatureTampering(t *testing.T) {
+	// Tamper with a clear column the signature covers indirectly. The signature
+	// column itself is in clear; flipping it must be caught by signature
+	// verification after the row decrypts cleanly.
+	store, _ := newTestStore(t, nil)
+	ctx := context.Background()
+	mem, err := store.Write(ctx, WriteRequest{Kind: KindFact, Content: "original"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tamperedSig := append([]byte(nil), mem.Signature...)
+	tamperedSig[0] ^= 0x01
+	if _, err := store.db.ExecContext(ctx, `UPDATE memories SET signature = ? WHERE id = ?`, tamperedSig, mem.ID); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.Read(ctx, mem.ID)
 	if !errors.Is(err, ErrSignatureFailed) {
-		t.Fatalf("expected ErrSignatureFailed on tampered row, got %v", err)
+		t.Fatalf("expected ErrSignatureFailed on tampered signature, got %v", err)
 	}
 }
 

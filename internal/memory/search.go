@@ -51,15 +51,21 @@ func (s *Store) Search(ctx context.Context, query string, opts SearchOptions) ([
 	return s.searchCosine(ctx, qVec, opts.Kind, limit)
 }
 
+// searchSubstring loads candidate rows (filtered by kind) and substring-matches
+// the query against decrypted content in Go. With application-level row
+// encryption (SPEC §5.1), SQL LIKE against the content column would match
+// ciphertext bytes — useless. The cost is one full-table scan + decrypt per
+// query when no embedder is configured; for v0.1 single-user scale this is
+// well under 10ms even for thousands of rows. The cosine path remains the
+// recommended retrieval whenever an embedder is available.
 func (s *Store) searchSubstring(ctx context.Context, query string, kind Kind, limit int) ([]SearchResult, error) {
-	q := selectColumns + ` WHERE LOWER(content) LIKE ?`
-	args := []any{"%" + strings.ToLower(query) + "%"}
+	q := selectColumns
+	args := []any{}
 	if kind != "" {
-		q += ` AND kind = ?`
+		q += ` WHERE kind = ?`
 		args = append(args, string(kind))
 	}
-	q += ` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, limit)
+	q += ` ORDER BY created_at DESC`
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -67,24 +73,30 @@ func (s *Store) searchSubstring(ctx context.Context, query string, kind Kind, li
 	}
 	defer rows.Close()
 
+	needle := strings.ToLower(query)
 	var out []SearchResult
 	var sigErrs []error
 	for rows.Next() {
-		mem, err := scanMemory(rows)
+		mem, err := s.scanMemory(rows)
 		if err != nil {
 			return nil, err
+		}
+		if !strings.Contains(strings.ToLower(mem.Content), needle) {
+			continue
 		}
 		if !s.id.Verify(mem.SigningInput(), mem.Signature) {
 			sigErrs = append(sigErrs, fmt.Errorf("%w: id=%s", ErrSignatureFailed, mem.ID))
 			continue
 		}
-		// Substring path returns a coarse score: 1.0 if the query appears as a
-		// whole word, 0.5 otherwise. Useful only for stable ordering tests.
+		// Coarse score: 1.0 if the query appears as a whole word, 0.5 otherwise.
 		score := 0.5
 		if containsWord(mem.Content, query) {
 			score = 1.0
 		}
 		out = append(out, SearchResult{Memory: mem, Score: score})
+		if len(out) >= limit {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -114,7 +126,7 @@ func (s *Store) searchCosine(ctx context.Context, qVec []float32, kind Kind, lim
 		qNorm   = norm(qVec)
 	)
 	for rows.Next() {
-		mem, err := scanMemory(rows)
+		mem, err := s.scanMemory(rows)
 		if err != nil {
 			return nil, err
 		}

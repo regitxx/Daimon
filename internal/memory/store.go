@@ -17,14 +17,23 @@ import (
 // Store is the local memory database for a single principal. It binds an
 // SQLite database file to an Identity that signs every write.
 //
-// In v0.1 the file is plain SQLite (CGO-free, fast iteration). SQLCipher slots
-// in here without changing the public API: swap the driver and pass the
-// passkey-derived key in via the connection string. The schema, write path,
-// and signature semantics stay identical.
+// At-rest confidentiality (SPEC §5.1) is provided by application-level row
+// encryption: content, metadata, and source columns are AES-256-GCM ciphertext
+// with per-row random nonces and AAD bound to (memoryID, fieldName). The
+// 32-byte AES key is derived from the bound identity's Ed25519 seed via
+// HKDF-SHA256 with label MemoryEncryptionKeyLabel — see crypto.go. The id,
+// timestamps, kind, embedding, and signature columns remain in clear (the
+// signature is over plaintext id||content||metadata; embeddings are a
+// one-way function of plaintext content; ids/timestamps/kinds are needed for
+// indexing without unlock). Pure-Go SQLite (modernc.org/sqlite) is preserved.
+//
+// SQLCipher remains a v0.2+ option if page-level guarantees ever become
+// load-bearing; the seam is `Open`, identical to the path SQLCipher would use.
 type Store struct {
-	db *sql.DB
-	id *identity.Identity
-	e  Embedder
+	db  *sql.DB
+	id  *identity.Identity
+	e   Embedder
+	key []byte // 32-byte AES key derived from the bound identity; nil disables encryption
 }
 
 const schema = `
@@ -46,12 +55,21 @@ CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
 
 // Open opens (or creates) the memory store at path, bound to the given identity.
 // If embedder is nil, NullEmbedder is used. The path may be ":memory:" for tests.
+//
+// The row-encryption key is derived from the identity's Ed25519 seed via HKDF
+// (MemoryEncryptionKeyLabel) and held in process memory for the life of the
+// Store. The same identity will rederive the same key on subsequent opens,
+// allowing rows written in one process to be read in the next.
 func Open(path string, id *identity.Identity, embedder Embedder) (*Store, error) {
 	if id == nil {
 		return nil, errors.New("memory: identity is required")
 	}
 	if embedder == nil {
 		embedder = NullEmbedder{}
+	}
+	key, err := id.DeriveSubkey(MemoryEncryptionKeyLabel, rowKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("derive memory key: %w", err)
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -64,7 +82,7 @@ func Open(path string, id *identity.Identity, embedder Embedder) (*Store, error)
 		_ = db.Close()
 		return nil, fmt.Errorf("init schema: %w", err)
 	}
-	return &Store{db: db, id: id, e: embedder}, nil
+	return &Store{db: db, id: id, e: embedder, key: key}, nil
 }
 
 // Close releases the underlying database handle.
@@ -119,12 +137,25 @@ func (s *Store) Write(ctx context.Context, req WriteRequest) (*Memory, error) {
 	}
 	mem.Signature = sig
 
+	contentCT, err := encryptField(s.key, []byte(mem.Content), mem.ID, "content")
+	if err != nil {
+		return nil, fmt.Errorf("encrypt content: %w", err)
+	}
+	metaCT, err := encryptField(s.key, metaBytes, mem.ID, "metadata")
+	if err != nil {
+		return nil, fmt.Errorf("encrypt metadata: %w", err)
+	}
+	sourceCT, err := encryptField(s.key, []byte(mem.Source), mem.ID, "source")
+	if err != nil {
+		return nil, fmt.Errorf("encrypt source: %w", err)
+	}
+
 	if _, err := s.db.ExecContext(ctx, `
         INSERT INTO memories (id, created_at, updated_at, kind, content, metadata, embedding, source, signature)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		mem.ID, mem.CreatedAt, mem.UpdatedAt, string(mem.Kind),
-		mem.Content, nullableBytes(metaBytes), nullableBytes(mem.Embedding),
-		nullableString(mem.Source), mem.Signature,
+		nullableBytes(contentCT), nullableBytes(metaCT), nullableBytes(mem.Embedding),
+		nullableBytes(sourceCT), mem.Signature,
 	); err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
@@ -135,7 +166,7 @@ func (s *Store) Write(ctx context.Context, req WriteRequest) (*Memory, error) {
 // the bound identity's public key; ErrSignatureFailed is returned on tamper.
 func (s *Store) Read(ctx context.Context, id string) (*Memory, error) {
 	row := s.db.QueryRowContext(ctx, selectColumns+` WHERE id = ?`, id)
-	mem, err := scanMemory(row)
+	mem, err := s.scanMemory(row)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +221,7 @@ func (s *Store) List(ctx context.Context, opts ListOptions) ([]*Memory, error) {
 	var out []*Memory
 	var sigErrs []error
 	for rows.Next() {
-		mem, err := scanMemory(rows)
+		mem, err := s.scanMemory(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -218,17 +249,26 @@ type scanRow interface {
 	Scan(dest ...any) error
 }
 
-func scanMemory(r scanRow) (*Memory, error) {
+// scanMemory reads one row and decrypts content / metadata / source in place
+// using the Store's row-encryption key. The returned Memory has plaintext
+// fields ready for signature verification and consumption by callers.
+//
+// A row that fails to decrypt under the bound key surfaces ErrInvalidCiphertext;
+// the caller treats this the same as a tamper or foreign-store mismatch.
+func (s *Store) scanMemory(r scanRow) (*Memory, error) {
 	var (
-		mem     Memory
-		kindStr string
-		meta    []byte
-		embed   []byte
-		source  sql.NullString
+		mem        Memory
+		kindStr    string
+		contentCT  []byte
+		metaCT     []byte
+		embed      []byte
+		sourceCT   []byte
+		nullSource sql.RawBytes // unused; kept for column-count parity
 	)
+	_ = nullSource
 	err := r.Scan(
 		&mem.ID, &mem.CreatedAt, &mem.UpdatedAt, &kindStr,
-		&mem.Content, &meta, &embed, &source, &mem.Signature,
+		&contentCT, &metaCT, &embed, &sourceCT, &mem.Signature,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -237,14 +277,29 @@ func scanMemory(r scanRow) (*Memory, error) {
 		return nil, fmt.Errorf("scan memory: %w", err)
 	}
 	mem.Kind = Kind(kindStr)
-	if len(meta) > 0 {
-		mem.Metadata = meta
+
+	contentPT, err := decryptField(s.key, contentCT, mem.ID, "content")
+	if err != nil {
+		return nil, fmt.Errorf("decrypt content for id=%s: %w", mem.ID, err)
 	}
+	mem.Content = string(contentPT)
+
+	metaPT, err := decryptField(s.key, metaCT, mem.ID, "metadata")
+	if err != nil {
+		return nil, fmt.Errorf("decrypt metadata for id=%s: %w", mem.ID, err)
+	}
+	if len(metaPT) > 0 {
+		mem.Metadata = metaPT
+	}
+
+	sourcePT, err := decryptField(s.key, sourceCT, mem.ID, "source")
+	if err != nil {
+		return nil, fmt.Errorf("decrypt source for id=%s: %w", mem.ID, err)
+	}
+	mem.Source = string(sourcePT)
+
 	if len(embed) > 0 {
 		mem.Embedding = embed
-	}
-	if source.Valid {
-		mem.Source = source.String
 	}
 	return &mem, nil
 }

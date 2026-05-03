@@ -185,3 +185,68 @@ func TestDIDDocument(t *testing.T) {
 		t.Errorf("verificationMethod.controller = %v, want %s", method["controller"], id.DID())
 	}
 }
+
+func TestDeriveSubkey(t *testing.T) {
+	id1, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate id1: %v", err)
+	}
+	id2, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate id2: %v", err)
+	}
+
+	// Determinism: same identity + same label + same length → same key.
+	a1, err := id1.DeriveSubkey("daimon-memory-encryption-v1", 32)
+	if err != nil {
+		t.Fatalf("DeriveSubkey a1: %v", err)
+	}
+	a2, err := id1.DeriveSubkey("daimon-memory-encryption-v1", 32)
+	if err != nil {
+		t.Fatalf("DeriveSubkey a2: %v", err)
+	}
+	if !bytes.Equal(a1, a2) {
+		t.Error("DeriveSubkey is not deterministic for the same identity")
+	}
+	if len(a1) != 32 {
+		t.Errorf("DeriveSubkey length = %d, want 32", len(a1))
+	}
+
+	// Different identity → different key.
+	b, err := id2.DeriveSubkey("daimon-memory-encryption-v1", 32)
+	if err != nil {
+		t.Fatalf("DeriveSubkey b: %v", err)
+	}
+	if bytes.Equal(a1, b) {
+		t.Error("DeriveSubkey produced identical keys for distinct identities")
+	}
+
+	// Different label → different key (domain separation).
+	c, err := id1.DeriveSubkey("daimon-something-else-v1", 32)
+	if err != nil {
+		t.Fatalf("DeriveSubkey c: %v", err)
+	}
+	if bytes.Equal(a1, c) {
+		t.Error("DeriveSubkey returned identical keys for distinct labels")
+	}
+
+	// Different length → different bytes (HKDF stream is the same prefix).
+	short, err := id1.DeriveSubkey("daimon-memory-encryption-v1", 16)
+	if err != nil {
+		t.Fatalf("DeriveSubkey short: %v", err)
+	}
+	if !bytes.Equal(short, a1[:16]) {
+		t.Error("HKDF stream prefix mismatch — derivation is not stable across lengths")
+	}
+
+	// Argument validation.
+	if _, err := id1.DeriveSubkey("", 32); err == nil {
+		t.Error("expected error for empty label")
+	}
+	if _, err := id1.DeriveSubkey("ok", 0); err == nil {
+		t.Error("expected error for zero length")
+	}
+	if _, err := id1.DeriveSubkey("ok", -1); err == nil {
+		t.Error("expected error for negative length")
+	}
+}

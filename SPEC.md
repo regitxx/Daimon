@@ -105,9 +105,11 @@ v0.1 supports identity key rotation only for `did:ion`. `did:key` rotation is ou
 
 ### 5.1 Storage layer
 
-- SQLite database at `$DAIMON_HOME/memory.db`, encrypted with **SQLCipher**.
-- Vector index via the `sqlite-vec` extension for semantic search.
-- Encryption key derived from passkey/password (same root as identity).
+- SQLite database at `$DAIMON_HOME/memory.db`. Pure-Go driver (modernc.org/sqlite); no CGO, single-binary distribution preserved.
+- **At-rest confidentiality (v0.1):** application-level row encryption. The `content`, `metadata`, and `source` columns are stored as `version(1B) || nonce(12B) || AES-256-GCM(plaintext, AAD)`, with `AAD = "daimon-memory-row-v1" || 0x00 || row_id || 0x00 || field_name`. The AAD binds each ciphertext to its row and column so a stolen ciphertext cannot be silently moved onto another row or into another field. The `id`, `created_at`, `updated_at`, `kind`, `embedding`, and `signature` columns remain in clear: the signature is over plaintext (id ‖ content ‖ metadata), embeddings are a one-way function of plaintext content, and ids/timestamps/kinds are needed for indexing without unlock.
+- **Encryption key derivation:** the 32-byte AES key is derived from the principal's Ed25519 seed via HKDF-SHA256 with info label `"daimon-memory-encryption-v1"`. The same identity always produces the same key (deterministic), so a memory store written in one process can be reopened in the next without storing the key on disk. The key never crosses the daimon's process boundary in plaintext: it is rederived in memory at unlock and held in the same trust scope (§9.2) as the unlocked private key.
+- **SQLCipher (page-level encryption) is a v0.2+ option** if the threat model ever requires hiding row count, timestamps, kinds, indexes, WAL contents, or query patterns. The seam is `memory.Open`; switching engines does not change the public API. The v0.1 choice is deliberate: pure-Go single-binary distribution is preserved, and the v0.1 threat model (disk theft / backup exfiltration on top of OS-layer FDE) is covered by encrypting the user-supplied content material.
+- Vector index: O(n) cosine in Go for v0.1 single-user scale. The `sqlite-vec` extension slots in via the same `Open` seam when scale demands it.
 
 ### 5.2 Memory schema (v0.1)
 
@@ -347,8 +349,10 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 |---|---|
 | Identity signatures | Ed25519 |
 | Memory & activity hashing | BLAKE3 |
-| At-rest encryption (SQLite) | AES-256-GCM via SQLCipher |
-| Key derivation (password) | Argon2id (≥64 MiB, ≥3 iters, ≥4 parallel) |
+| At-rest encryption (memory rows, v0.1) | AES-256-GCM, application-level row encryption (per-row random nonce, AAD-bound to row id + field) |
+| At-rest encryption (memory pages, v0.2+ option) | SQLCipher (deferred; see §5.1) |
+| Key derivation (password → master) | Argon2id (≥64 MiB, ≥3 iters, ≥4 parallel) |
+| Key derivation (master → subkeys) | HKDF-SHA256 with domain-separated info labels |
 | Key derivation (passkey) | WebAuthn PRF extension |
 | Future: agent-to-agent channels | Noise XX (v0.3) |
 | Future: group sessions | MLS RFC 9420 (v0.3+) |
@@ -362,7 +366,7 @@ $DAIMON_HOME/  (default: ~/.daimon/)
 ├── identity/
 │   ├── did.json              # DID document
 │   └── keys.encrypted        # Encrypted keystore
-├── memory.db                 # SQLCipher-encrypted SQLite (memories + vectors)
+├── memory.db                 # SQLite — content/metadata/source columns AES-256-GCM-encrypted (§5.1)
 ├── activity.log              # Append-only signed log
 ├── providers.json.encrypted  # Provider credentials
 ├── daimon.sock               # Unix socket (Linux/macOS)

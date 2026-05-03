@@ -160,9 +160,10 @@ func run() error {
 	}
 
 	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Memory rows are AES-256-GCM-encrypted at rest under an identity-derived key (SPEC §5.1).")
 	fmt.Fprintln(os.Stderr, "Mediated mode is real, cosine retrieval is live when Ollama runs, and the Provider")
-	fmt.Fprintln(os.Stderr, "interface is now exercised against two wire formats (Anthropic Messages + OpenAI Responses).")
-	fmt.Fprintln(os.Stderr, "Next: SQLCipher at-rest encryption, then the Ollama chat adapter.")
+	fmt.Fprintln(os.Stderr, "interface is exercised against two wire formats (Anthropic Messages + OpenAI Responses).")
+	fmt.Fprintln(os.Stderr, "Next: Ollama chat adapter (third provider, finishing the v0.1 trio).")
 	return nil
 }
 
