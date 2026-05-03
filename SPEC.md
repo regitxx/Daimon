@@ -287,7 +287,7 @@ type ProviderAdapter interface {
 
 - **claude** — Anthropic Messages API
 - **openai** — OpenAI Responses API (with Chat Completions fallback)
-- **ollama** — local Ollama server
+- **ollama** — local Ollama server, `/api/chat` endpoint (locally-pulled model list discovered via `/api/tags` at registration)
 
 Provider credentials are stored at `$DAIMON_HOME/providers.json.encrypted`, encrypted with the same root key as identity.
 

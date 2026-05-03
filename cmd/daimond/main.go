@@ -21,6 +21,7 @@ import (
 	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/provider/claude"
 	"github.com/regitxx/Daimon/internal/provider/openai"
+	ollamachat "github.com/regitxx/Daimon/internal/provider/ollama"
 	"github.com/regitxx/Daimon/internal/server"
 )
 
@@ -152,7 +153,7 @@ func run() error {
 		n, log.LastHash()[:24])
 
 	fmt.Fprintln(os.Stderr, "[7/8] Building provider registry…")
-	reg, creds := buildProviderRegistry()
+	reg, creds := buildProviderRegistry(ctx)
 
 	fmt.Fprintln(os.Stderr, "[8/8] Starting RPC server and round-tripping daimon.identity.get + daimon.provider.list…")
 	if err := demoRPC(ctx, id, store, log, reg, creds); err != nil {
@@ -162,8 +163,9 @@ func run() error {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Memory rows are AES-256-GCM-encrypted at rest under an identity-derived key (SPEC §5.1).")
 	fmt.Fprintln(os.Stderr, "Mediated mode is real, cosine retrieval is live when Ollama runs, and the Provider")
-	fmt.Fprintln(os.Stderr, "interface is exercised against two wire formats (Anthropic Messages + OpenAI Responses).")
-	fmt.Fprintln(os.Stderr, "Next: Ollama chat adapter (third provider, finishing the v0.1 trio).")
+	fmt.Fprintln(os.Stderr, "interface is exercised against three wire formats: Anthropic Messages, OpenAI Responses,")
+	fmt.Fprintln(os.Stderr, "and Ollama /api/chat — the v0.1 provider trio is complete.")
+	fmt.Fprintln(os.Stderr, "Next: CLI surface (cmd/daimon — init/unlock/memory/provider/chat).")
 	return nil
 }
 
@@ -195,11 +197,15 @@ func pickEmbedder(parent context.Context) memory.Embedder {
 }
 
 // buildProviderRegistry returns the provider registry and credential store
-// the daimon will expose via daimon.provider.{list,invoke}. v0.1 ships with
-// the Claude and OpenAI adapters; each is registered only when its API key
-// is set in the environment so the demo is safe to run without keys (and
-// never spends money on its own).
-func buildProviderRegistry() (*provider.Registry, *provider.CredentialStore) {
+// the daimon will expose via daimon.provider.{list,invoke}. v0.1 ships three
+// adapters:
+//   - Claude / OpenAI register conditionally on their respective API keys —
+//     the demo is safe to run without keys and never spends money on its own.
+//   - Ollama registers conditionally on a successful probe of the local
+//     server (default localhost:11434, override via OLLAMA_HOST). Probe
+//     failure means "not callable", so advertising it via provider.list would
+//     undermine the registry's "what can I actually invoke?" contract.
+func buildProviderRegistry(ctx context.Context) (*provider.Registry, *provider.CredentialStore) {
 	reg := provider.NewRegistry()
 	creds := provider.NewCredentialStore()
 
@@ -227,6 +233,25 @@ func buildProviderRegistry() (*provider.Registry, *provider.CredentialStore) {
 		}
 	} else {
 		fmt.Fprintln(os.Stderr, "      OPENAI_API_KEY not set; OpenAI adapter not registered")
+	}
+
+	// Ollama probe: bounded to a few seconds so a misconfigured OLLAMA_HOST
+	// can't stall the demo. Mirrors pickEmbedder's deadline policy.
+	endpoint := ollamachat.DefaultEndpoint
+	if h := os.Getenv("OLLAMA_HOST"); h != "" {
+		endpoint = h
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	if ad, err := ollamachat.New(probeCtx, ollamachat.WithEndpoint(endpoint)); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"      Ollama chat unavailable (%v); not registered (start `ollama serve` and pull a chat model to enable)\n",
+			err)
+	} else {
+		reg.Register(ad)
+		// No credential entry — Ollama has no API key.
+		fmt.Fprintf(os.Stderr, "      Registered: %s (%d models, endpoint=%s)\n",
+			ad.Name(), len(ad.Models()), endpoint)
 	}
 
 	if reg.Len() == 0 {
