@@ -4,10 +4,10 @@
 > Then read JOURNAL.md for full history. Then begin work.
 
 **Last updated:** 2026-05-03
-**Phase:** Day Zero — vision, SPEC v0.1, defaults resolved, Go skeleton in place. **Identity, memory, and activity-log primitives all landed.** RPC server + SQLCipher next.
+**Phase:** Day Zero — vision, SPEC v0.1, defaults resolved, Go skeleton in place. **Identity, memory, activity-log, and RPC server all landed.** SQLCipher + Ollama embedder + first provider adapter (Claude) next.
 
 **Repository:** https://github.com/regitxx/Daimon.git
-**Build status:** `make build` → `bin/daimond` (~9.8 MB). 33/33 tests pass in ~2.8s (8 identity + 14 memory + 11 activity). Demo run generates a `did:key:z6Mk…` DID, opens a SQLite memory store and a BLAKE3-chained activity log, writes three signed memories (each emitting a signed activity entry), exports a signed memory document, re-imports it into a fresh-identity store, and verifies the activity chain end-to-end — every signature checks out.
+**Build status:** `make build` → `bin/daimond` (~10.4 MB). 51/51 tests pass in ~3s (8 identity + 14 memory + 11 activity + 18 server), race-clean. Demo run generates a `did:key:z6Mk…` DID, opens a SQLite memory store and a BLAKE3-chained activity log, writes three signed memories (each emitting a signed activity entry), exports a signed memory document, re-imports it into a fresh-identity store, verifies the activity chain end-to-end, then **stands up the JSON-RPC 2.0 server on a Unix socket and self-calls `daimon.identity.get`** — every signature checks out and the RPC roundtrip succeeds.
 
 ---
 
@@ -73,10 +73,10 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 6. ~~First primitive: identity (Ed25519 keypair, did:key, Argon2id+AES-GCM keystore, DID document)~~ ✅ shipped 2026-05-03
 7. ~~Second primitive: memory (`internal/memory` — schema per SPEC §5.2, signed write/read, cosine search, signed export/import)~~ ✅ shipped 2026-05-03
 8. ~~Third primitive: activity log (`internal/activity` — append-only JSONL, BLAKE3 hash-chained, Ed25519-signed, full chain Verify)~~ ✅ shipped 2026-05-03
-9. **RPC server** (`internal/server` — JSON-RPC 2.0 over Unix socket; wires the three primitives to the SPEC §6.1 method surface) ← *one of two candidates for next session*
-10. **SQLCipher at-rest encryption** for the memory store — swap the driver, pipe keystore-derived key through Open. Spec-faithful pass over §5.1. ← *the other candidate for next session*
-11. Real Ollama embedder behind the existing `Embedder` interface (drop in once RPC lands)
-12. First provider adapter (Claude)
+9. ~~RPC server (`internal/server` — JSON-RPC 2.0 over Unix socket; wires identity, memory, activity, context.get to the SPEC §6.1 method surface)~~ ✅ shipped 2026-05-03
+10. **SQLCipher at-rest encryption** for the memory store — swap the driver, pipe keystore-derived key through Open. Spec-faithful pass over §5.1. ← *next session candidate*
+11. **Real Ollama embedder** behind the existing `Embedder` interface — unblocks cosine search in the demo, makes `context.get` non-trivial. ← *next session candidate*
+12. **First provider adapter (Claude)** + the `daimon.provider.*` RPC surface — this is what makes mediated mode real. ← *next session candidate*
 13. CLI (`cmd/daimon` — wraps RPC for terminal use)
 14. End-to-end demo: switch providers mid-task, memory persists
 15. Apply to NLnet NGI Zero (rolling deadline every 2 months — drafted in parallel with code work)

@@ -222,3 +222,62 @@ Binary: 9.5 MB → 9.8 MB (BLAKE3 + cpuid).
 
 **Next session begins with:** RPC server *or* SQLCipher — huckgod's call. The RPC server is what makes daimon-core a *daemon* in the Unix sense (clients can talk to it); SQLCipher closes the spec deviation. RPC unblocks the first provider adapter (Claude) and the CLI; SQLCipher doesn't unblock anything new but makes the project spec-faithful.
 
+---
+
+## 2026-05-03 — Day Zero, seventh session: RPC server landed
+
+**`internal/server` package shipped.** Four files, ~1,610 lines of Go (~960 implementation + ~645 tests). 18 server tests pass in ~1.5s; full suite (identity + memory + activity + server) is 51 tests in ~3s, race-clean.
+
+This is the milestone that makes daimon-core a *daemon* in the Unix sense — clients can now talk to it over the wire.
+
+**Files:**
+- `jsonrpc.go` — JSON-RPC 2.0 framing primitives. `Request` (with `IsNotification()`), `Response`, `RPCError`, the standard codes (-32700/-32600/-32601/-32602/-32603), and Daimon-specific application codes (-32001 IdentityLocked, -32002 NotFound, -32003 SignatureFailed, -32004 InvalidKind, -32005 NotImplemented). Helpers for parse-error / invalid-request / success / error response construction.
+- `server.go` — `Server` struct, `New` / `Listen` / `Serve(ctx) / `Close`. Per-connection serial dispatch via goroutine-per-conn; a server-level cancellable context drains in-flight handlers on Close. Stale-socket detection that probes with `net.Dial` before unlinking — refuses to clobber a socket another process is actively listening on. Socket file is `chmod 0600` immediately after bind.
+- `handlers.go` — wires SPEC §6.1 to the primitives. Methods registered: `daimon.identity.get`, `daimon.memory.{write,read,search,delete,export,import}`, `daimon.context.get`, `daimon.activity.{append,query}`. Mediated-mode auto-logging: write/export/import/query each emit the corresponding activity entry. `mapMemoryError` and `mapActivityError` translate package-level sentinel errors to RPC error codes.
+- `server_test.go` — fixture builds a fresh identity + memory + activity log + server on a temp socket. 18 tests covering: socket mode 0600, idempotent Close, all 10 method roundtrips (including export→import across two principals), `context.get` recency-weighted formula and kinds filter, parse-error framing, unknown-method dispatch, JSON-RPC version rejection, notification (no `id`) producing no response, persistent multi-request connections, and 80 concurrent writes across 8 clients with full activity-chain Verify at the end.
+
+**Method surface (this build):**
+
+| Method | Wired to |
+|---|---|
+| `daimon.identity.get` | `identity.Identity` |
+| `daimon.memory.write` | `memory.Store.Write` (+ activity log `memory.write`) |
+| `daimon.memory.read` | `memory.Store.Read` |
+| `daimon.memory.search` | `memory.Store.Search` |
+| `daimon.memory.delete` | `memory.Store.Delete` |
+| `daimon.memory.export` | `memory.Store.Export` (+ activity log `memory.export`) |
+| `daimon.memory.import` | `memory.Store.Import` (+ activity log `memory.import`) |
+| `daimon.context.get` | `memory.Store.Search` + SPEC §11 recency formula |
+| `daimon.activity.append` | `activity.Log.Append` |
+| `daimon.activity.query` | `activity.Log.Query` (+ activity log `activity.queried`) |
+| `daimon.provider.list` | not registered — CodeMethodNotFound |
+| `daimon.provider.invoke` | not registered — CodeMethodNotFound |
+
+**Wired into `cmd/daimond/main.go`:** new step `[6/6]` starts the RPC server on a temp Unix socket, makes one `daimon.identity.get` self-call, prints the round-trip result, and shuts the server down. Demo now exercises the full stack end-to-end. Binary: 9.8 MB → ~10.4 MB.
+
+**Decisions made this session:**
+
+- **JSON-RPC framing via `json.Decoder`/`json.Encoder` on the raw socket.** The spec doesn't mandate a wire framing; LSP-style Content-Length headers are overkill for a localhost socket, and newline-delimited would break if a future client sent pretty-printed JSON. Streaming JSON values is robust and obvious.
+- **Per-connection serial dispatch.** A single connection processes one request at a time; concurrency comes from many connections. Parallel-on-one-connection (interleaved request IDs) is uncommon in JSON-RPC implementations and adds locking on the writer that we don't need yet.
+- **Notification detection via `json.RawMessage` on the `id` field.** Distinguishing absent ("notification") from present-but-null requires looking at whether the JSON contained the key. Using `RawMessage` for `id` (instead of `any`) gives us that signal cleanly: `len(req.ID) == 0` ⇔ notification.
+- **No batch support yet.** SPEC §6.1 doesn't require batches and no v0.1 client needs them. Single-request handling is half the code; batching is a clean future extension.
+- **Mediated-mode auto-logging is the daimon's policy, not the client's.** SPEC §8 says "every meaningful action the daimon has taken" — *the daimon* decides. The handler appends to the activity log automatically on write/export/import/query. Client cooperation is not required for the audit trail.
+- **Activity-append failure is logged, not propagated.** If a memory.write succeeds but the subsequent activity append fails, we log the error and still return success on the RPC. The alternative (failing the call) would induce client retries → duplicate memory entries → worse audit gap. Documented inline; transactional integrity arrives if/when SPEC §8 demands it.
+- **`memory.delete` is NOT auto-logged.** SPEC §8.2's enumerated kinds for v0.1 don't include a `memory.delete` kind, and inventing kinds is a spec change. Worth adding in §8.2 next pass — deletion is plainly a meaningful action — but not in this session.
+- **`activity.queried` is logged after the read.** SPEC §8.2 lists it as a kind. We append after returning the query result so the queried entry isn't visible in the response that triggered it; future queries see it. Yes, this means every introspection grows the log by one — that's the spec's intent.
+- **Provider methods deliberately return `CodeMethodNotFound`, not a placeholder.** Honest signal that the method isn't in this build. They land with the provider-adapter primitive. We reserve `CodeNotImplemented` (-32005) for methods that exist in the dispatch table but are stubbed.
+- **Stale-socket recovery probes with `net.Dial` before unlinking.** A Unix socket file left behind from a crashed process is unusable until removed; we detect that case (Dial → ECONNREFUSED) and clean up. We refuse to clobber a socket another process is actively listening on (Dial succeeds), and we refuse to delete a non-socket file at the same path.
+- **`context.get` implements the SPEC §11 formula directly.** `score = 0.7·cosine + 0.3·exp(−age_days/30)`. Pulls 50 candidates from `memory.Search`, re-ranks with the recency boost, formats top-K under the token budget into a `[N] (kind) content` block. Token estimation is `chars/4` — coarse, but the per-model tokenizer arrives with the provider adapters that own it.
+- **Output `Memory` is the internal struct.** Embedding bytes are included (base64 in JSON). For typical clients the embedding bloat doesn't matter, and clients that want to re-verify signatures need the full row. If a real client complains we add an opt-out flag.
+- **macOS `sun_path` 104-byte limit.** `t.TempDir()` plus a long test name overflows it. Tests use `os.MkdirTemp("", "dmn")` for the socket directory specifically, leaving the heavier per-test files (DB, activity log) under `t.TempDir()`. The demo in `main.go` does the same.
+
+**What we explicitly punted (in priority order for next session):**
+1. SQLCipher at-rest encryption for the memory store. Closes the spec deviation; the keystore key derivation already exists, just pipe it through `memory.Open`.
+2. Real Ollama embedder for the `Embedder` interface seam — unblocks cosine search in the demo and makes `context.get` non-trivial (currently uses substring fallback because demo runs with `NullEmbedder`).
+3. First provider adapter (Claude) + the `daimon.provider.{list,invoke}` RPC methods. This is what makes mediated mode real — provider creds in the daimon, clients call through it.
+4. JSON-RPC batch requests — straightforward addition once a real client demands them.
+5. HTTPS + mutual TLS transport (SPEC §6 alternative for Windows / network mode).
+6. SSE streaming on the HTTPS transport (SPEC §11; Unix socket stays sync-only in v0.1).
+
+**Next session begins with:** SQLCipher *or* Ollama embedder *or* Claude adapter — huckgod's call. SQLCipher closes the spec gap. The Ollama embedder makes the existing demo more interesting (cosine instead of substring). The Claude adapter is the first real value flow — switch from synthetic demo to "a daimon in front of a real LLM." All three are self-contained and could go in any order; Claude is the one that produces the most user-visible "this is real" moment.
+
