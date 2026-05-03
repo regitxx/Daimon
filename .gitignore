@@ -1,0 +1,58 @@
+# Binaries and build outputs
+/bin/
+/dist/
+/build/
+*.exe
+*.test
+*.out
+daimond
+daimon
+
+# Daimon runtime data — NEVER commit user state
+.daimon/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sock
+*.encrypted
+*.log
+!activity.log.example
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Go
+/vendor/
+/.gocache/
+
+# Node / TypeScript
+/node_modules/
+/sdk/typescript/dist/
+/sdk/typescript/node_modules/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+/sdk/python/dist/
+/sdk/python/build/
+/sdk/python/*.egg-info/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Coverage
+coverage/
+*.cover
+*.lcov
