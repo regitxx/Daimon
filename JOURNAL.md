@@ -881,3 +881,62 @@ LM Studio was not up locally on this shell (probe at session start: `curl http:/
 **Next session begins with:** either huckgod's shell has LM Studio up (item 21, 5 min) or we pick a streaming adapter to land — Claude is probably the highest-impact target given it's the founding adapter and the most-used in practice.
 
 ---
+
+## 2026-05-04 — Day Zero, nineteenth session: Claude streaming adapter
+
+**Streaming breadth begins.** The Anthropic Messages API joins Ollama as the second adapter implementing `provider.Streamer`. The wire-shape contract from session 18 absorbed the new adapter exactly as designed — zero changes to `internal/server/`, `cmd/daimon/`, or SPEC. The `daimon chat --provider claude --stream` REPL behavior automatically flips from "falling back to invoke" to live token-by-token rendering as soon as the adapter exposes `Stream`.
+
+LM Studio probe at session start: `curl http://localhost:1234/v1/models` → connection refused. Item 21 still pending huckgod's shell having LM Studio up locally. Proceeded straight to Claude streaming as the kickoff prescribed.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `internal/provider/claude/claude.go` (modified, +218 lines) | New `Stream` method. POST `/v1/messages` with `stream:true`; bufio.Scanner over the SSE response (line-by-line, dispatch on blank line). One Delta per `content_block_delta` of `delta.type == "text_delta"`. Final `*Response` carries model from `message_start.message.model`, content from accumulated text deltas, stop_reason mapped through the existing `normalizeStopReason` helper from `message_delta.delta.stop_reason`, usage as `message_start.usage.input_tokens` + summed `message_delta.usage.output_tokens`, raw payload from the most recent dispatched event. Honours ctx via `http.NewRequestWithContext` AND a per-line `ctx.Err()` check. Errors on missing `message_stop`, malformed JSON in any data: payload we care about, or 4xx/5xx HTTP status. The `messagesRequest` struct gained a `Stream bool` field with `omitempty` — keeps the unary path's wire payload byte-identical (omitempty drops the false-value field on Invoke). Sends `Accept: text/event-stream` on the streaming path. |
+| `internal/provider/claude/claude_test.go` (modified, +298 lines / 7 new tests) | Streaming fixture (`streamServer` helper + `happySSE` constant containing message_start, content_block_start, ping, three content_block_delta of text_delta, content_block_stop, message_delta with stop_reason=end_turn + output_tokens=4, message_stop). Tests: happy path (delta order, accumulated content, model, stop_reason, usage, raw, outbound `stream:true`), context cancellation (server flushes one delta then hangs; cancel mid-stream → returns within 2s deadline), malformed data payload (broken JSON aborts with decode error), missing message_stop (stream ends after deltas → error mentioning `message_stop`), HTTP 401 with realistic Anthropic error envelope, empty messages rejected (with channel-closed assertion on the early-return path), Streamer interface conformance. The `claudeRequestCapture` test struct gained the `Stream` field to match. |
+
+**Decisions held from the kickoff (no re-deliberation, exactly as locked):**
+
+- **SSE wire format, parsed with a hand-rolled bufio.Scanner.** No SDK, no transitive deps. Standard SSE rules: dispatch on blank line, accumulate `event:` and `data:` fields, ignore other lines (id:, retry:, comments). Multi-line `data:` payloads join with `\n` (defensive — Anthropic only ever sends single-line data, but the spec allows multi-line and the cost of supporting it is one append). Pure Go, single binary, no CGO.
+- **Four event types we depend on — all others ignored.** `message_start` (model + initial input_tokens), `content_block_delta` of `delta.type == "text_delta"` (the token fragment), `message_delta` (stop_reason + cumulative output_tokens delta — accumulated on our side per the kickoff's instruction), `message_stop` (terminal). `ping`, `content_block_start`, `content_block_stop`, and any future event types Anthropic adds (tool_use deltas, image deltas) flow through the parser without aborting it. Forward-compat by silence.
+- **No retry, no policy.** Adapter is a translator. `4xx`/`5xx` → error. Stream ends without `message_stop` → error. Malformed JSON in a `data:` line for an event we care about → error. Caller surfaces it; user retries.
+- **Ctx cancellation is a hard requirement.** `http.NewRequestWithContext` plumbs ctx into the HTTP layer; a per-line `ctx.Err()` check covers the "buffered upstream bytes already in scanner.Buffer" case. The `select { case deltas <- delta: case <-ctx.Done(): return ctx.Err() }` send guards against deadlock on a slow consumer + cancellation interleave. Test asserts the adapter exits within 2s of cancellation and the channel closes — no goroutine leak, no continued upstream consumption.
+- **Final Response shape matches Invoke's exactly.** Same `*provider.Response` fields populated identically; the chat REPL's render path is unchanged. Same `normalizeStopReason` helper as the unary path — `end_turn`/`max_tokens`/`stop_sequence`/`tool_use`/unknown all map identically across the two code paths.
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **`Accept: text/event-stream` header on the streaming request.** Anthropic auto-detects streaming from the body's `stream:true`, so the Accept header is technically optional. Sent it anyway — it's the spec-correct hint, costs nothing, and any future proxy that does content negotiation will route correctly.
+- **`Stream` field on `messagesRequest` uses `omitempty`.** The unary path now sets `Stream: false` explicitly; with `omitempty`, the JSON encoder drops the false-value field, so the outbound wire bytes are byte-identical to what they were before this session. Verified via the existing `TestAdapter_InvokeHappyPath` (which asserts the request shape and was untouched by this session) — still passes. Zero churn for unary callers.
+- **Defensive multi-line `data:` joining.** `if len(curData) > 0 { append('\n') }` then append the rest. Anthropic doesn't currently emit multi-line data, but the SSE spec permits it and the cost of being correct is two lines. A future Anthropic event type (multi-line tool-use payload?) would otherwise have produced silent corruption.
+- **Trailing-event-without-blank-line rescue.** If the scanner exits the loop without seeing a blank line that flushes the final event (some servers omit the trailing blank), one final `dispatch()` runs before the missing-`message_stop` check. The httptest fixture in the happy path test does include the trailing blank, so this path exists for production resilience, not test coverage. Cost: 4 lines.
+- **Header order: `Content-Type`, `Accept`, `x-api-key`, `anthropic-version`.** Same as the unary path, just with `Accept` slotted in. Anthropic's API ignores order; the consistency makes the diff between Invoke and Stream readable.
+- **`json.RawMessage(nil)` copy of `lastRaw` for the final Response.** Protects against the scanner's underlying buffer being reused between events (it isn't, currently, because we already copy via `append(lastRaw[:0], curData...)`, but the second copy on return is the cheap insurance). Mirrors the Ollama adapter exactly.
+
+**Test count:** 198 → 205 PASS lines (+7: all in `internal/provider/claude/`). All race-clean, all vet-clean, ~10s total run.
+
+**Live smoke status:** **Deferred to huckgod's shell.** The harness env redacts `ANTHROPIC_API_KEY` (consistent with prior sessions — the demo asciicast was deferred for the same reason). The httptest fixture covers the wire-shape correctness completely (happy path, ctx cancellation, malformed payload, missing stop event, HTTP error, interface conformance, request shape). The remaining proof is "does Anthropic's actual server emit the events we parse" — a five-minute task on huckgod's shell:
+
+```
+ANTHROPIC_API_KEY=sk-ant-... daimon chat --provider claude --model claude-opus-4-7 \
+  --stream --once "Recite the first three sentences of Hamlet's soliloquy." \
+  | python3 -c 'import sys, time; t0 = time.monotonic(); [print(f"{(time.monotonic()-t0)*1000:7.1f}ms {b!r}") for b in iter(lambda: sys.stdin.buffer.read(1), b"")]'
+```
+
+Expected: a sequence of byte-level prints with sub-100ms gaps between them (vs. one all-at-once print after the full generation, which is what session 18's smoke proved against Ollama). The `[stream: claude does not support streaming, falling back to invoke]` stderr note from session 18 should be gone — replaced by direct streaming.
+
+**What this means in plain language:** before this session, `daimon chat --provider claude --stream` printed the fallback note then waited for the full reply to land all-at-once. After this session, Anthropic's tokens render incrementally — same UX as Ollama since session 18, now applied to the founding adapter. The protocol's most concrete promise — switch Claude → OpenAI → local mid-task with memory intact — now has parity on the streaming UX between Anthropic and Ollama. OpenAI and LM Studio are next, each ~half a day, same shape (per-adapter SSE format wrapped around the same `Streamer` interface).
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live Claude streaming round-trip** (this session's deferred smoke). Five minutes once huckgod's shell exposes a real `ANTHROPIC_API_KEY`.
+2. **Live LM Studio round-trip** (carry-over, CHECKPOINT item 21). Five-minute task when LM Studio is up locally.
+3. **OpenAI streaming adapter** (CHECKPOINT item 23a, second of three). Responses API SSE. Half-day session, same shape as this one.
+4. **LM Studio streaming adapter** (CHECKPOINT item 23a, third of three). OpenAI Chat Completions SSE format (`data: {...}\n\n` until `data: [DONE]`). Half-day session.
+5. **Server-side `injected_memory_ids` in `provider.invoke` response → REPL `[inject_context: query="..." matched=N]`** (CHECKPOINT item 23b). ~30 minutes.
+6. **Activity log encryption (SPEC §10) + `internal/secretbox` factor** (CHECKPOINT items 23c/23d). Half-day.
+7. **The asciicast** (carry-over from session 16). Now compelling for two adapters with token-by-token rendering.
+8. **NLnet NGI Zero application** (carry-over from session 16).
+
+**Next session begins with:** either run the deferred live Claude streaming smoke (5 min, requires real `ANTHROPIC_API_KEY` exposed in shell env), or proceed to OpenAI streaming as the second of three remaining adapters in CHECKPOINT item 23a. Either path is short.
+
+---
