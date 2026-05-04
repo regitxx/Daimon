@@ -740,3 +740,40 @@ Previously `daimon.provider.list` and `daimon.provider.invoke` returned `CodeMet
 
 ---
 
+
+## 2026-05-04 — Day Zero, addendum: LM Studio adapter queued post-v0.1
+
+**Decision recorded out-of-band.** During the post-session-15 wrap-up
+huckgod surfaced LM Studio. It is not an existing adapter. The original
+v0.1 roadmap picked one local-LLM runtime (Ollama) to keep the surface
+small; LM Studio is functionally equivalent for the same use case (free
+local model) but is the second-most-common local runtime and many users
+prefer its GUI for model management.
+
+**Slotted as item 20 in the CHECKPOINT next-actions list — post-v0.1,
+before v0.2.** Implementation path locked:
+
+- Fresh package `internal/provider/lmstudio/`, mirroring
+  `internal/provider/ollama/` shape (probe-on-construct, register-on-
+  reachable, harvest models live).
+- Wire format: `/v1/chat/completions` (OpenAI Chat Completions, the
+  format LM Studio's local server speaks). **Not** the Responses API
+  the existing openai adapter uses — different shape, hence a separate
+  package, not a flag on openai. Path 1 chosen over Path 2 (teaching the
+  openai adapter dual-mode) because the blast radius of changing the
+  openai adapter's default behavior is bigger than writing ~200 fresh
+  lines mirroring a known-good adapter.
+- Default endpoint `http://localhost:1234/v1`, override via env
+  (`LMSTUDIO_HOST` parallel to `OLLAMA_HOST`).
+- No API key required (LM Studio's local server doesn't authenticate by
+  default), but the wire layer should send `Authorization: Bearer
+  lm-studio` to be safe — some LM Studio configs reject missing auth
+  headers.
+- Tests mirror the ollama adapter's pattern (httptest server emitting
+  fixture chat completions).
+
+This addendum exists so the decision date is on the record. Implementation
+waits until after the asciicast + NLnet land — those are the v0.1
+ship-blockers, LM Studio is a v0.1.x convenience.
+
+---
