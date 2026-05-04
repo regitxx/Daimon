@@ -319,7 +319,7 @@ Append-only, hash-chained record of every meaningful action.
   "id": "01HXYZ...",          // ULID
   "ts": 1714780800000,
   "kind": "memory.write" | "provider.invoke" | "memory.export" | ...,
-  "payload": { /* kind-specific */ },
+  "payload": "AaaBBBccc...",  // see "At-rest confidentiality" below
   "prev_hash": "blake3:...",  // hash of previous entry
   "hash": "blake3:...",       // hash of this entry's canonical form
   "signature": "ed25519:..."  // signature by daimon identity key
@@ -327,6 +327,12 @@ Append-only, hash-chained record of every meaningful action.
 ```
 
 The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may publish hashes to an external anchor (Bitcoin, Ethereum, Filecoin) for tamper evidence.
+
+**At-rest confidentiality (v0.1):** the `payload` field is encrypted at the application level. On disk it is the base64 encoding of `version(1B) || nonce(12B) || AES-256-GCM(plaintext_payload, AAD)`, with `AAD = "daimon-activity-payload-v1" || 0x00 || entry_id || 0x00 || "payload"`. The AAD binds each ciphertext to its entry id so a stolen ciphertext cannot be silently moved onto another entry. The `id`, `ts`, `kind`, `prev_hash`, `hash`, and `signature` fields remain in clear: `kind` and `ts` are needed for `daimon.activity.query` filtering without unlock, and `prev_hash` / `hash` / `signature` are needed for chain continuity recovery on Open and for tamper-evident verification.
+
+**Hash chain semantics under encryption.** The per-entry `hash` and `signature` commit to the canonical *plaintext* form of the entry — i.e., `hash = BLAKE3(canonical_json(plaintext_entry))` where `plaintext_entry.payload` is the JSON of the original payload object, not the AEAD envelope. Verification on the encrypted log decrypts each entry's payload before recomputing the hash, so chain integrity holds across the encryption boundary. An attacker who tampers with the ciphertext fails AEAD authentication before the chain check runs (`ErrInvalidCiphertext`); an attacker who tampers with `prev_hash` or `hash` themselves still triggers `ErrChainBroken` / `ErrHashMismatch`.
+
+**Encryption key derivation.** The 32-byte AES key is derived from the principal's Ed25519 seed via HKDF-SHA256 with info label `"daimon-activity-encryption-v1"`. The label is distinct from the memory store's `"daimon-memory-encryption-v1"` so the two stores have independent subkeys despite sharing the same root identity. The key never crosses the daimon's process boundary in plaintext: it is rederived in memory at unlock and held in the same trust scope (§9.2) as the unlocked private key. The threat model matches the memory store's (§5.1): disk theft / backup exfiltration on top of OS-layer FDE.
 
 ### 8.2 Logged kinds (v0.1)
 
@@ -366,6 +372,7 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 | Identity signatures | Ed25519 |
 | Memory & activity hashing | BLAKE3 |
 | At-rest encryption (memory rows, v0.1) | AES-256-GCM, application-level row encryption (per-row random nonce, AAD-bound to row id + field) |
+| At-rest encryption (activity payloads, v0.1) | AES-256-GCM, application-level payload encryption (per-entry random nonce, AAD-bound to entry id) |
 | At-rest encryption (memory pages, v0.2+ option) | SQLCipher (deferred; see §5.1) |
 | Key derivation (password → master) | Argon2id (≥64 MiB, ≥3 iters, ≥4 parallel) |
 | Key derivation (master → subkeys) | HKDF-SHA256 with domain-separated info labels |
@@ -385,7 +392,7 @@ $DAIMON_HOME/  (default: $XDG_CONFIG_HOME/daimon, or
                           variable)
 ├── identity.keystore         # Encrypted Ed25519 keystore (mode 0600)
 ├── memory.db                 # SQLite — content/metadata/source columns AES-256-GCM-encrypted (§5.1)
-├── activity.log              # Append-only signed log
+├── activity.log              # Append-only signed log — payload field AES-256-GCM-encrypted (§8.1)
 ├── providers.json.encrypted  # Provider credentials
 ├── daimon.sock               # Unix socket (mode 0600). Falls back to
 │                             # $TMPDIR/daimon-$uid.sock when the resolved

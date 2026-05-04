@@ -23,9 +23,19 @@ import (
 // internally; Query and Verify open the file separately for read and do not
 // block writers (writers fsync after each append, so reads see committed
 // entries up to the moment they open the file).
+//
+// At-rest confidentiality (SPEC §8.1) is provided by application-level payload
+// encryption: each entry's `payload` field is stored as base64(AES-256-GCM)
+// with a per-entry random nonce and AAD bound to (entry_id, "payload"). The
+// id, ts, kind, prev_hash, hash, and signature columns remain in clear so
+// Query filtering, LastHash recovery on Open, and chain continuity all work
+// without unlock. The hash chain and signature commit to the canonical
+// *plaintext* entry, so chain integrity is preserved across the encryption
+// boundary — see crypto.go.
 type Log struct {
 	path string
 	id   *identity.Identity
+	key  []byte // 32-byte AES key derived from the bound identity; nil disables encryption
 
 	mu       sync.Mutex
 	f        *os.File
@@ -39,9 +49,19 @@ type Log struct {
 //
 // Open does NOT verify the existing chain; for that, call Verify after Open.
 // This keeps startup O(1) for daimons with long histories.
+//
+// The payload-encryption key is derived from the identity's Ed25519 seed via
+// HKDF (ActivityEncryptionKeyLabel) and held in process memory for the life
+// of the Log. The same identity will rederive the same key on subsequent
+// opens, allowing entries written in one process to be read in the next. The
+// key never touches disk.
 func Open(path string, id *identity.Identity) (*Log, error) {
 	if id == nil {
 		return nil, errors.New("activity: identity is required")
+	}
+	key, err := id.DeriveSubkey(ActivityEncryptionKeyLabel, payloadKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("derive activity key: %w", err)
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
@@ -57,6 +77,7 @@ func Open(path string, id *identity.Identity) (*Log, error) {
 	return &Log{
 		path:     path,
 		id:       id,
+		key:      key,
 		f:        f,
 		lastHash: last,
 	}, nil
@@ -91,11 +112,16 @@ func (l *Log) LastHash() string {
 }
 
 // Append writes a new signed entry chained to the last committed entry.
-// The returned Entry has ID, Timestamp, Hash, and Signature populated.
+// The returned Entry has ID, Timestamp, Hash, and Signature populated and
+// carries the *plaintext* payload — the on-disk representation is encrypted
+// per SPEC §8.1 (see crypto.go), but callers see the same plaintext shape as
+// before the encryption layer landed.
 //
 // payload may be nil; if non-nil it is canonicalized via json.Marshal (sorted
 // map keys) and embedded in the entry. The hash commits to all fields except
-// Hash and Signature themselves.
+// Hash and Signature themselves, and is computed over the canonical
+// *plaintext* form so chain integrity is preserved across the encryption
+// boundary.
 func (l *Log) Append(_ context.Context, kind Kind, payload map[string]any) (*Entry, error) {
 	if kind == "" {
 		return nil, ErrEmptyKind
@@ -141,7 +167,18 @@ func (l *Log) Append(_ context.Context, kind Kind, payload map[string]any) (*Ent
 	}
 	e.Signature = sig
 
-	line, err := json.Marshal(e)
+	// Build the on-disk shape: same struct, payload replaced with the
+	// encrypted-and-base64 wire form. Hash and Signature are already populated
+	// over the plaintext canonical bytes, so the chain commits to plaintext
+	// and verification works after decryption.
+	diskPayload, err := encodePayloadForDisk(l.key, payloadBytes, e.ID)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt payload: %w", err)
+	}
+	disk := *e
+	disk.Payload = diskPayload
+
+	line, err := json.Marshal(&disk)
 	if err != nil {
 		return nil, fmt.Errorf("marshal entry: %w", err)
 	}
@@ -168,6 +205,10 @@ type QueryOptions struct {
 // Query returns entries matching opts in chain order (oldest first).
 // Signatures and chain links are NOT verified — callers who need integrity
 // should call Verify. This separation keeps Query cheap.
+//
+// Each returned Entry carries the *plaintext* payload after AEAD decryption.
+// Filters that don't depend on payload (timestamp range, kind, limit) are
+// applied before decryption so non-matching entries don't pay the AEAD cost.
 func (l *Log) Query(_ context.Context, opts QueryOptions) ([]*Entry, error) {
 	rf, err := os.Open(l.path)
 	if err != nil {
@@ -198,6 +239,11 @@ func (l *Log) Query(_ context.Context, opts QueryOptions) ([]*Entry, error) {
 		if opts.Kind != "" && e.Kind != opts.Kind {
 			continue
 		}
+		pt, err := decodePayloadFromDisk(l.key, e.Payload, e.ID)
+		if err != nil {
+			return out, fmt.Errorf("decrypt payload: %w", err)
+		}
+		e.Payload = pt
 		out = append(out, &e)
 		if opts.Limit > 0 && len(out) >= opts.Limit {
 			break
@@ -244,6 +290,15 @@ func (l *Log) Verify(_ context.Context) (int, error) {
 			return n, fmt.Errorf("%w: id=%s expected_prev=%s got_prev=%s",
 				ErrChainBroken, e.ID, expected, e.PrevHash)
 		}
+		// Decrypt the payload before recomputing the hash — the chain commits
+		// to plaintext canonical bytes (see crypto.go), so a wrong key or a
+		// tampered ciphertext surfaces as ErrInvalidCiphertext here, before
+		// the hash check runs.
+		pt, err := decodePayloadFromDisk(l.key, e.Payload, e.ID)
+		if err != nil {
+			return n, fmt.Errorf("decrypt payload: %w", err)
+		}
+		e.Payload = pt
 		hashStr, hashBytes, err := e.computeHash()
 		if err != nil {
 			return n, fmt.Errorf("hash: %w", err)

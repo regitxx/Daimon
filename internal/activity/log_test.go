@@ -1,11 +1,13 @@
 package activity
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -121,8 +123,13 @@ func seedLog(t *testing.T, n int) (string, *identity.Identity) {
 func TestVerifyDetectsTamperedPayload(t *testing.T) {
 	path, id := seedLog(t, 3)
 
-	// Rewrite entry #1's payload, leaving its stored hash and signature in
-	// place. The hash recomputation in Verify must mismatch.
+	// Replace entry #1's payload with arbitrary plaintext-shaped JSON,
+	// leaving Hash and Signature intact. Under encryption, the on-disk
+	// payload field MUST be a JSON string of base64-encoded ciphertext;
+	// supplying a JSON object instead surfaces as ErrInvalidCiphertext
+	// before the chain check ever runs. (This is strictly stronger than
+	// pre-encryption ErrHashMismatch — AEAD authentication catches the
+	// tamper one layer earlier.)
 	lines := readLines(t, path)
 	var e Entry
 	if err := json.Unmarshal(lines[1], &e); err != nil {
@@ -142,8 +149,8 @@ func TestVerifyDetectsTamperedPayload(t *testing.T) {
 	}
 	defer log2.Close()
 	n, err := log2.Verify(context.Background())
-	if !errors.Is(err, ErrHashMismatch) {
-		t.Fatalf("expected ErrHashMismatch, got %v (n=%d)", err, n)
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("expected ErrInvalidCiphertext, got %v (n=%d)", err, n)
 	}
 	if n != 1 {
 		t.Errorf("Verify count before failure: got %d want 1", n)
@@ -338,6 +345,218 @@ func TestConcurrentAppends(t *testing.T) {
 	}
 	if n != workers*perWorker {
 		t.Errorf("Verify count: got %d want %d", n, workers*perWorker)
+	}
+}
+
+// --- encryption ---
+
+// TestEncryptedPayloadOnDisk asserts that the on-disk JSONL line stores the
+// payload as a JSON string (base64 of AEAD envelope) — not as a JSON object.
+// The plaintext payload bytes MUST NOT appear anywhere in the line. This is
+// the structural property that makes disk theft harmless for the kinds of
+// data that narrate what the user did across providers.
+func TestEncryptedPayloadOnDisk(t *testing.T) {
+	log, _, path := newTestLog(t)
+	secret := "switch-claude-to-openai-mid-task"
+	if _, err := log.Append(context.Background(), KindProviderInvoke, map[string]any{
+		"model":  "claude-opus-4-7",
+		"secret": secret,
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if err := log.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(secret)) {
+		t.Errorf("plaintext leaked to disk: %q present in %q", secret, raw)
+	}
+	if bytes.Contains(raw, []byte("claude-opus-4-7")) {
+		t.Errorf("plaintext model id leaked to disk: %q", raw)
+	}
+	// payload field must be a JSON string ("..."), not a JSON object ({...})
+	var probe struct {
+		Payload json.RawMessage `json:"payload"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(raw), &probe); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(probe.Payload) == 0 || probe.Payload[0] != '"' {
+		t.Errorf("payload field is not a JSON string: %q", probe.Payload)
+	}
+}
+
+// TestEncryptionRoundtripQuery asserts that Append → Query returns the same
+// plaintext payload, exercising the encrypt-on-write / decrypt-on-read path
+// against a realistic provider.invoke shape with mixed types.
+func TestEncryptionRoundtripQuery(t *testing.T) {
+	log, _, _ := newTestLog(t)
+	ctx := context.Background()
+
+	want := map[string]any{
+		"model":         "gpt-5-mini",
+		"provider":      "openai",
+		"input_tokens":  float64(42),
+		"output_tokens": float64(128),
+		"streamed":      true,
+	}
+	if _, err := log.Append(ctx, KindProviderInvoke, want); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	entries, err := log.Query(ctx, QueryOptions{Kind: KindProviderInvoke})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	var got map[string]any
+	if err := json.Unmarshal(entries[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal payload: %v (raw=%q)", err, entries[0].Payload)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("roundtrip mismatch:\n got:  %+v\n want: %+v", got, want)
+	}
+}
+
+// TestEncryptionAADBindingDetectsCiphertextSwap asserts that the AAD binding
+// to entry_id prevents an attacker from moving a stolen ciphertext from one
+// entry onto another. Verify must reject the swap with ErrInvalidCiphertext.
+func TestEncryptionAADBindingDetectsCiphertextSwap(t *testing.T) {
+	path, id := seedLog(t, 2)
+
+	// Pull the ciphertext payload field from entry #0 and splice it onto
+	// entry #1's line, leaving entry #1's id/ts/kind/hash/signature intact.
+	// AAD = (entry_id || "payload"); entry #0's ciphertext authenticates
+	// under entry #0's id, not #1's, so AEAD.Open MUST fail on Verify.
+	lines := readLines(t, path)
+	var e0, e1 Entry
+	if err := json.Unmarshal(lines[0], &e0); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(lines[1], &e1); err != nil {
+		t.Fatal(err)
+	}
+	if len(e0.Payload) == 0 || len(e1.Payload) == 0 {
+		t.Fatalf("seed produced empty payloads (e0=%q e1=%q)", e0.Payload, e1.Payload)
+	}
+	e1.Payload = e0.Payload // swap entry #0's ciphertext onto entry #1
+	tampered, err := json.Marshal(&e1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines[1] = tampered
+	writeLines(t, path, lines)
+
+	log2, err := Open(path, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log2.Close()
+	_, err = log2.Verify(context.Background())
+	if !errors.Is(err, ErrInvalidCiphertext) {
+		t.Fatalf("expected ErrInvalidCiphertext on cross-entry ciphertext swap, got %v", err)
+	}
+}
+
+// TestEncryptionVerifyAfterReopen asserts that the chain still verifies after
+// close + reopen with the same identity — i.e., the HKDF derivation is
+// deterministic and decryption succeeds across process boundaries, and the
+// hash chain (computed over plaintext) is preserved across the encryption
+// boundary.
+func TestEncryptionVerifyAfterReopen(t *testing.T) {
+	path, id := seedLog(t, 5)
+	log, err := Open(path, id) // same identity → same key
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.Close()
+
+	n, err := log.Verify(context.Background())
+	if err != nil {
+		t.Fatalf("Verify after reopen: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("Verify count: got %d want 5", n)
+	}
+}
+
+// TestEncryptionForeignKeyFailsCleanly asserts that opening an existing log
+// under a different identity (different HKDF subkey) surfaces a clear error
+// from Query / Verify rather than silently returning corrupted data. This is
+// the disk-theft-on-top-of-FDE scenario the encryption layer is for: an
+// attacker who copies the JSONL file off the box gets ciphertext that won't
+// decrypt under any other principal's seed.
+func TestEncryptionForeignKeyFailsCleanly(t *testing.T) {
+	path, _ := seedLog(t, 2)
+
+	other, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	log, err := Open(path, other)
+	if err != nil {
+		t.Fatalf("Open under foreign identity: %v", err)
+	}
+	defer log.Close()
+
+	_, qerr := log.Query(context.Background(), QueryOptions{})
+	if !errors.Is(qerr, ErrInvalidCiphertext) {
+		t.Errorf("Query under foreign key: expected ErrInvalidCiphertext, got %v", qerr)
+	}
+
+	_, verr := log.Verify(context.Background())
+	if !errors.Is(verr, ErrInvalidCiphertext) {
+		t.Errorf("Verify under foreign key: expected ErrInvalidCiphertext, got %v", verr)
+	}
+}
+
+// TestEncryptionDeterministicKeyAcrossOpens asserts that the per-Log key
+// derived from a fixed identity is stable — the canonical property that lets
+// session N read entries written in session N-1 without storing the key on
+// disk.
+func TestEncryptionDeterministicKeyAcrossOpens(t *testing.T) {
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "activity.log")
+
+	log1, err := Open(path, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"step": "before-close"}
+	if _, err := log1.Append(context.Background(), KindMemoryWrite, want); err != nil {
+		t.Fatal(err)
+	}
+	if err := log1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	log2, err := Open(path, id) // same identity → same HKDF subkey
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log2.Close()
+	entries, err := log2.Query(context.Background(), QueryOptions{})
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	var got map[string]any
+	if err := json.Unmarshal(entries[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("payload mismatch across reopens:\n got:  %+v\n want: %+v", got, want)
 	}
 }
 
