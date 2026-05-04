@@ -1301,3 +1301,117 @@ The structural property worth naming: **the daimon.provider.invoke and daimon.pr
 5. **NLnet NGI Zero application** (carry-over from session 16). The application's "what does the daimon actually do for the user" answer is now strongest yet — every provider call enriches the prompt with explicit, audited memory injection, and the user sees how many memories were folded in real-time.
 
 **Next session begins with:** v0.1.x has zero no-external-dependency carry-overs remaining. The next milestone is the asciicast or the NLnet application — both blocked on huckgod's-shell-only constraints (real Anthropic/OpenAI keys, LM Studio running locally) that have been blocking the live round-trips since session 19. If a probe at next-session start finds any of (LM Studio up, OpenAI key real, Anthropic key real) the corresponding live round-trip closes in ~5 minutes; if none free up, the asciicast is the natural next pick — it can be recorded against Ollama alone and the script.md scaffolding from session 16 is ready.
+
+## 2026-05-05 — Day Zero, twenty-fifth session: probe-and-route, nothing landed
+
+Probe at session start showed the same three external blockers as session 24: LM Studio not running locally, OPENAI_API_KEY redacted (whitespace placeholder, not a real key), ANTHROPIC_API_KEY not set. None of the three deferred live round-trips (Claude / OpenAI / LM Studio streaming, items 19/20/21 in CHECKPOINT) freed up.
+
+huckgod ruled out the two next-priority no-external-dependency picks from session 24's punt list: the asciicast recording (carry-over from session 16) and the NLnet NGI Zero application (carry-over from session 16). Both stand as future work but are not the right next pick.
+
+No commits landed. No code written. Session ended with a route-the-rest discussion: the next session's kickoff message will enumerate the remaining v0.1.x polish candidates (`daimon doctor`, `daimon activity query` CLI, `daimon memory search --inject-preview`) and the v0.2 design-only kickoff for x402 / agent wallet, and ask huckgod to pick or invent.
+
+**Test count:** unchanged at 243 PASS lines. Build status unchanged. Last commit on main: a41b568 (session 24).
+
+## 2026-05-05 — Day Zero, twenty-sixth session: `daimon doctor` — read-only environment health probe
+
+**The session-start probe-and-report flow we've been hand-rolling at every kickoff since session 19 becomes a subcommand.** `daimon doctor` reports the same five things the kickoff prescribes — DAIMON_HOME state, daemon up/locked/unlocked, API-key presence (presence only), LM Studio + Ollama reachability, build version — plus a "Live round-trip readiness" footer that names which of the three deferred provider round-trips would unblock right now. Pure read-only, never auto-spawns the daemon, safe at any moment. The kickoff's recommendation made the call ("smallest, most useful in-tree polish item, formalises the session-start probe so huckgod can run it too") and it landed in one session as predicted.
+
+**Probe at session start (per the kickoff's opportunistic round-trip checklist):**
+
+```
+$ curl -sS --max-time 2 http://localhost:1234/v1/models | head -c 200
+curl: (7) Failed to connect to localhost port 1234
+
+$ printenv | grep -E '(ANTHROPIC|OPENAI)_API_KEY' | head -c 80
+OPENAI_API_KEY=
+```
+
+LM Studio: still down. OPENAI_API_KEY: empty/whitespace (harness redaction). ANTHROPIC_API_KEY: not set. All three live round-trips remain deferred from sessions 19/20/21 — none free this session. Proceeded to `daimon doctor` as the kickoff's top-priority recommendation.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `cmd/daimon/cmd_doctor.go` (new, 547 lines) | The doctor subcommand. Layered: data-gathering (`gatherDoctorReport(ctx, doctorConfig) doctorReport`) takes an injectable config (home/socket/runtime endpoints + HTTP client) so tests can swap fake endpoints; text rendering (`renderDoctorText(w, rep)`) uses the existing tabwriter helper; JSON via the existing `printJSON` helper. Five sections: Build, DAIMON_HOME, Daemon, Provider env (presence only — never the value), Local runtimes. Closes with the Live round-trip readiness footer. `--json` and `--timeout <duration>` flags. New private helpers: `isDaemonAbsent(err)` (mirrors `spawn.go`'s `isSpawnableMiss` for ENOENT/ECONNREFUSED + `*os.PathError` fallback), `envKeyPresent(name)` (`strings.TrimSpace(os.Getenv(name)) != ""` — so the harness's whitespace-redacted env vars are correctly classified as "not set", which they functionally are), `humanBytes` (B/KiB/MiB ladder), `probeDaemon`/`probeOllama`/`probeLMStudio`/`httpProbe`. |
+| `cmd/daimon/cmd_doctor_test.go` (new, 354 lines) | The cmd/daimon package's first test file. 8 tests: fresh-home (no daemon, no runtimes, no API keys → all the right "absent"/`not_running`/false bits), populated-home (real activity.log with 2 entries via `activity.Open`+`Append` → entry count + last_hash matches the *second* entry's hash, not the first), daemon states (per-test mock daimond on a short MkdirTemp("","dmn") socket — exercises both `locked` (CodeIdentityLocked response) and `unlocked` (DID surfaced) classifications), runtimes-probe (httptest servers serving canned `/api/tags` and `/v1/models` JSON, asserts model lists parse), API-key env presence (sets ANTHROPIC + OPENAI to placeholder values, asserts presence flips, AND greps the rendered text to confirm the *value* never leaks — only "set"/"not set"), text-render (assembles a fixture report and asserts every section heading + the live-readiness footer renders), JSON shape (asserts the envelope unmarshals into a map with the five top-level keys), `humanBytes` table-driven. Helpers: `shieldEnv(t)` (clears ANTHROPIC/OPENAI/LMSTUDIO/OLLAMA_HOST/LMSTUDIO_HOST/DAIMON_HOME so the outer test environment doesn't pollute the report under test), `shortAbsentSocket(t)` (returns a guaranteed-absent, AF_UNIX-safe `MkdirTemp("","dmn")/s.sock` path — t.TempDir() on darwin produces ~110+ byte paths that overflow sun_path's 104-byte cap, surfacing as EINVAL not ENOENT and masking the not_running classification), `startMockDaemon(t, respond)` (per-test Unix socket server with a per-request response function). |
+| `cmd/daimon/main.go` (modified, +5 lines) | New `case "doctor":` branch in the dispatch switch + 5-line block in the usage docstring; package-level doc comment lists the new subcommand. |
+| `internal/activity/log.go` (modified, +28 lines net) | Refactored the previously-private `scanLastHash` to share a single-pass `scanLog(path) (hash, count, error)` helper, then exported `ScanLastHash(path) (hash, entries, error)` as a small public wrapper. Identity-free; the `id`, `ts`, `kind`, `prev_hash`, `hash` columns remain in clear per SPEC §8.1 so this works without unlock and without the payload-decryption key. The pre-existing `scanLastHash` becomes a one-liner around `scanLog` and continues to be called from `Open` for chain-head recovery — zero behavior change to the activity package's existing call sites. |
+| `CHECKPOINT.md` (modified) | Phase line gains the doctor sentence and the "Live round-trip readiness" footer mention; build status updated (243 → 251 PASS lines, +8 cmd/daimon doctor); item 27 added; session-25 (probe-and-route, no commits) noted in the item-27 paragraph. |
+
+**Decisions held from the kickoff (no re-deliberation):**
+
+- **Doctor is purely client-side** — no new RPC, no daemon-side code change. It dials the existing `daimon.identity.get` to classify the daemon state, reads files in `$DAIMON_HOME` directly to report on-disk state, hits the runtime HTTP endpoints directly to probe Ollama and LM Studio. No SPEC change — doctor is a CLI affordance over existing primitives, not a new protocol surface.
+- **Pure read-only.** Never auto-spawns daimond (auto-spawn is reserved for `daimon unlock` per the session-13 lifecycle decision; auto-spawning here would silently start a locked daemon and immediately fail every other probe). Never writes to `$DAIMON_HOME`. Safe to run at any moment in any state — including states where the keystore is corrupted, the daemon is wedged, or the home directory is on a network mount that's gone away (the per-probe timeout caps the worst case).
+- **Presence only for API keys, never the value.** Doctor outputs are likely to be pasted into Slack / GitHub issues / future asciicasts; leaking the literal `sk-ant-…` value would be a security incident. The text-render test greps the output for the placeholder values it exported and fails if it finds them — guard against future regressions.
+- **Live round-trip readiness footer is the practical takeaway.** The whole point of the kickoff probe is "what would unblock if I tried it now?" — doctor names that explicitly with a 3-line footer rather than burying it under five sections of state.
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **`strings.TrimSpace` on the API-key presence check.** Caught during live smoke: the harness exports `OPENAI_API_KEY` as 28 whitespace characters (tabs), so a literal `os.Getenv(name) != ""` check reports it as "set" — which functionally it isn't (a real provider call with that bearer would 401). Adding `strings.TrimSpace` makes doctor's report match the obvious user intent and what daimond's own provider registration would do (the registry's empty-string check rejects it). Documented as a comment on the helper for future-me.
+- **AF_UNIX sun_path overflow forced a `shortAbsentSocket(t)` test helper.** t.TempDir() on darwin produces paths like `/var/folders/9v/.../T/TestDoctor_FreshHomeNoDaemon.../001/absent.sock` ≈ 110+ bytes; AF_UNIX caps sun_path at 104 on macOS, so dialing such a path returns EINVAL not ENOENT. The not_running classification depends on `errors.Is(err, syscall.ENOENT)` matching, so the test would have falsely flagged a working classifier as broken. Solution: a `MkdirTemp("","dmn")/s.sock` helper that produces ~30-byte paths well under the cap, mirroring the trick the existing `internal/server/` tests use. Documented inline as the same kind of darwin-specific gotcha that lives in `internal/daimonhome/daimonhome.go::SocketPath`'s sun_path-fallback comment.
+- **Exported `ScanLastHash` rather than reading the file from cmd/daimon directly.** Two reasons: (a) the activity-log JSONL parsing logic (and `ErrCorruptLog` handling) lives in `internal/activity` and shouldn't be duplicated in the CLI, (b) the encryption-aware contract (which fields are in clear per §8.1) is a property of the package, not the caller. The exported helper is identity-free and returns `(lastHash, entries, error)` — both pieces of information doctor wants, computed in one walk. The pre-existing private `scanLastHash` becomes a one-liner over the new `scanLog` helper; chain-head recovery on `Open` is unchanged byte-for-byte.
+- **Layered the gather/render split.** `gatherDoctorReport(ctx, cfg) doctorReport` returns the full structured report; `renderDoctorText(w, rep)` and `printJSON(rep)` are the two output formats. This makes the data path testable without spinning up the real CLI binary, and makes adding a third output format (Markdown? HTML for a future browser-based doctor?) a one-function change. The `doctorConfig` struct has injection points for home/socket/runtime endpoints + HTTP client so tests don't need to set process-global env vars or shell out to httptest from the gathering function — the production constructor `newDoctorConfig(timeout)` is the only caller that touches `os.Getenv` and `daimonhome.Resolve()`.
+- **Test count grew by 8, the kickoff predicted ~6.** The two extras are the text-render test (which is essential — without it nothing would catch a regression where the renderer drops a section) and the API-key-leak test (which is essential — without it nothing would catch a regression where doctor accidentally surfaces the value). Coverage is tighter than the prediction.
+
+**Test count:** 243 → 251 PASS lines (+8: all in `cmd/daimon/cmd_doctor_test.go`). All race-clean, all vet-clean, ~10s total run. `make build` clean.
+
+**Live smoke status (this session, against a temp `$DAIMON_HOME`):**
+
+```
+# State 1: empty home, no daemon, no API keys
+$ DAIMON_HOME=$(mktemp -d) ./bin/daimon doctor
+…
+DAIMON_HOME
+  resolved      /var/folders/.../dmnsmoke.5d0e (source: $DAIMON_HOME)
+  socket        /var/folders/.../dmnsmoke.5d0e/daimon.sock
+  keystore      absent — run `daimon init`
+  memory.db     absent (will be created on first unlock)
+  activity.log  absent (will be created on first unlock)
+Daemon
+  state  not running — run `daimon unlock` to start
+…
+Local runtimes
+  Ollama     http://localhost:11434 — ready (1 models: llama3.2:latest)
+  LM Studio  http://localhost:1234 — unreachable (… connect: connection refused)
+Live round-trip readiness
+  Claude streaming  blocked — ANTHROPIC_API_KEY not present
+  OpenAI streaming  blocked — OPENAI_API_KEY not present
+  LM Studio (any)   blocked — LM Studio server not present
+
+# State 2: after `daimon init`
+…  keystore      present (355 B, -rw-------)
+…  state  not running — run `daimon unlock` to start
+
+# State 3: with daimond running but locked (manual `daimond serve`)
+…  keystore      present (355 B, -rw-------)
+…  state  running, locked — run `daimon unlock`
+
+# State 4: after `daimon unlock`
+…  keystore      present (355 B, -rw-------)
+…  memory.db     present (20.0 KiB, -rw-r--r--)
+…  activity.log  present (0 B, -rw-------) — empty (no committed entries)
+…  state  running, unlocked
+…  did    did:key:z6MknrH4kyN7ysqgWnD7b65vYGZihiCGqYvaGaxDSMMWWvar
+
+# State 5: after two `daimon memory write` calls
+…  activity.log  present (960 B, -rw-------) — 2 entries, last_hash=blake3:890fcba18…
+```
+
+Five observable surfaces, five behaviours — all match the spec. `--json` mode round-trips through `python3 -c 'import json; json.load(sys.stdin)'` cleanly, with the expected top-level keys (`build`, `home`, `daemon`, `env`, `runtimes`).
+
+**What this means in plain language:** before this session, every Claude/huckgod kickoff started with a hand-rolled `curl … && printenv | grep …` probe that captured a partial picture of the environment. After this session, `daimon doctor` does it in one shot with a complete picture (DAIMON_HOME state, daemon state, API keys, runtimes, AND a "what would unblock right now?" summary). It's also genuinely useful for end users — anyone running daimon in production wants a single-command health check that tells them whether their setup is in the state they expect, and `daimon doctor --json` makes that scriptable for monitoring.
+
+The structural property worth naming: **doctor exercises the read paths of every primitive without touching the write paths**. It dials the daemon socket without unlocking, reads `$DAIMON_HOME/identity.keystore` / `memory.db` / `activity.log` file stats without opening them, scans the activity log's plain-text columns without holding the payload key, probes the runtime HTTP endpoints with a bounded timeout. Future v0.2+ work that wants to surface other read-only environment facts (wallet balance? pending x402 payments? A2A peer reachability?) has a natural home in this same subcommand — each new section is one new function call in `gatherDoctorReport` plus one new line of text rendering.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Doctor now makes the question "is LM Studio up?" a one-line answer, but actually running the round-trip still needs LM Studio running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Same shape — needs a real key in shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Same shape — needs a real key in shell env.
+4. **`daimon activity query` CLI subcommand.** The `daimon.activity.query` RPC has existed since session 6 but the only way to read the audit trail is hand-rolled JSON-RPC. Mechanical wrapper: `--since`, `--kind`, `--limit`, `--json`, plus a default tabwriter view. Re-uses the `daemonCall` helper and humanises the locked/not-running paths like every other subcommand. Estimate: one session.
+5. **`daimon memory search --inject-preview`.** Dry-run mode that prints what would be folded into a prompt for a given query without invoking a provider — useful for tuning queries before live round-trips become possible (and useful as a debugging surface for the matched=N annotation that landed session 24). Reuses the inject_context retrieval path; new flag, no new RPC. Estimate: half a session.
+6. **The asciicast** (carry-over from session 16). Doctor strengthens the "see what's healthy at a glance" beat the asciicast script's first scene needs.
+7. **NLnet NGI Zero application** (carry-over from session 16). Doctor strengthens the "operability" beat the application needs.
+8. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** v0.1.x has zero no-external-dependency *carry-overs* remaining (item 26's punt list is closed). The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe), one of the in-tree polish items above (`daimon activity query` CLI is the strongest small pick), or the v0.2 design kickoff. If the probe at next-session start finds any of (LM Studio up, OpenAI key real, Anthropic key real) the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–8 above by huckgod's preference.

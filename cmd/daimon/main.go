@@ -15,6 +15,9 @@
 //	daimon chat      — conversational REPL with multi-turn history persisted
 //	                   as JSONL under $DAIMON_HOME/chat-sessions/, switchable
 //	                   provider mid-session, inject_context default on
+//	daimon doctor    — read-only environment health probe: $DAIMON_HOME state,
+//	                   daemon up/locked/unlocked, API-key presence, LM Studio
+//	                   + Ollama reachability. Safe at any moment.
 package main
 
 import (
@@ -44,6 +47,8 @@ func main() {
 		exitOnErr(cmdProvider(args))
 	case "chat":
 		exitOnErr(cmdChat(args))
+	case "doctor":
+		exitOnErr(cmdDoctor(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -102,6 +107,12 @@ Usage:
                             (default name: 'current'). Provider can change
                             mid-session — memory persists across switches.
                             inject_context defaults ON.
+
+  daimon doctor             Read-only health probe: $DAIMON_HOME on-disk
+              [--json]      state, daemon running/locked/unlocked, API-key
+              [--timeout]   presence (presence only, never the value), and
+                            LM Studio + Ollama reachability. Safe at any
+                            moment; never auto-spawns the daemon.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.

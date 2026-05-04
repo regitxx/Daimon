@@ -326,16 +326,36 @@ func (l *Log) Verify(_ context.Context) (int, error) {
 // entry. Empty file → ZeroHash. A corrupt line returns an error so we don't
 // silently chain off a partial write.
 func scanLastHash(path string) (string, error) {
+	last, _, err := scanLog(path)
+	return last, err
+}
+
+// ScanLastHash walks the activity log file at path once, returning the most
+// recent committed hash and the number of entries scanned. Identity-free; the
+// id, ts, kind, prev_hash, and hash columns remain in clear (SPEC §8.1) so
+// this works without unlock and without the payload-decryption key — useful
+// for tooling like `daimon doctor` that wants to surface audit-chain stats
+// without holding the identity.
+//
+// Returns (ZeroHash, 0, nil) when path does not exist (treats absence as
+// "log not yet initialised", not an error). Wraps ErrCorruptLog when a line
+// is unparseable, so callers can errors.Is the result.
+func ScanLastHash(path string) (lastHash string, entries int, err error) {
+	return scanLog(path)
+}
+
+func scanLog(path string) (string, int, error) {
 	rf, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return ZeroHash(), nil
+			return ZeroHash(), 0, nil
 		}
-		return "", fmt.Errorf("scan log: %w", err)
+		return "", 0, fmt.Errorf("scan log: %w", err)
 	}
 	defer rf.Close()
 
 	last := ZeroHash()
+	count := 0
 	sc := newLineScanner(rf)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -344,16 +364,17 @@ func scanLastHash(path string) (string, error) {
 		}
 		var e Entry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			return "", fmt.Errorf("%w: %v", ErrCorruptLog, err)
+			return "", count, fmt.Errorf("%w: %v", ErrCorruptLog, err)
 		}
 		if e.Hash != "" {
 			last = e.Hash
+			count++
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return "", err
+		return "", count, err
 	}
-	return last, nil
+	return last, count, nil
 }
 
 // newLineScanner returns a scanner with a generous buffer so large entry
