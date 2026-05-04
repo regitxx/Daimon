@@ -16,7 +16,20 @@ import (
 	"github.com/regitxx/Daimon/internal/provider"
 )
 
+// Method names for the SPEC §6.1 surface. Constants exist for the names the
+// dispatcher special-cases (the locked-state gate); the rest live as string
+// literals in registerMethods because they have no out-of-table consumers.
+const (
+	methodIdentityUnlock = "daimon.identity.unlock"
+)
+
 // registerMethods wires the SPEC §6.1 surface to the bound primitives.
+//
+// daimon.identity.unlock is registered unconditionally and is the ONLY method
+// the dispatcher allows pre-unlock. Demo-mode servers (constructed without an
+// Unlock callback) start unlocked, so the gate never engages and unlock is a
+// no-op — calling it on an unlocked server returns CodeInvalidRequest rather
+// than re-deriving the key.
 //
 // daimon.provider.{list,invoke} are registered unconditionally. When the
 // server has no Provider Registry attached, the handlers return a structured
@@ -24,6 +37,7 @@ import (
 // JSON-RPC CodeMethodNotFound we'd return if the method itself were missing.
 func (s *Server) registerMethods() {
 	s.methods = map[string]methodHandler{
+		methodIdentityUnlock:     s.handleIdentityUnlock,
 		"daimon.identity.get":    s.handleIdentityGet,
 		"daimon.memory.write":    s.handleMemoryWrite,
 		"daimon.memory.read":     s.handleMemoryRead,
@@ -37,6 +51,75 @@ func (s *Server) registerMethods() {
 		"daimon.provider.list":   s.handleProviderList,
 		"daimon.provider.invoke": s.handleProviderInvoke,
 	}
+}
+
+// --- daimon.identity.unlock --------------------------------------------------
+
+type identityUnlockParams struct {
+	Password string `json:"password"`
+}
+
+type identityUnlockResult struct {
+	DID string `json:"did"`
+}
+
+// handleIdentityUnlock loads the keystore, populates the server's principal
+// trio (identity, memory store, activity log), and flips the unlocked flag.
+// Pre-unlock this is the only method dispatch will route; post-unlock it
+// returns CodeInvalidRequest because the daemon is already unlocked and
+// re-deriving the key would burn ~50ms of Argon2id for no reason.
+//
+// The caller (daimond serve) wires Options.Unlock to a callback that does the
+// keystore.LoadFromKeystore + memory.Open + activity.Open trio. A wrong
+// password surfaces as identity.ErrWrongPassword from that callback; we
+// translate it to CodeIdentityLocked with the message in Data so the CLI can
+// distinguish "wrong password, retry" from "daemon ate it, give up".
+func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessage) (any, *RPCError) {
+	if s.unlockFn == nil {
+		// Demo-mode server — no keystore to load. The server is already
+		// unlocked from construction; calling unlock is a client error.
+		return nil, newError(CodeInvalidRequest, "this daimon was constructed unlocked; identity.unlock is not applicable")
+	}
+	var p identityUnlockParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Password == "" {
+		return nil, newError(CodeInvalidParams, "password is required")
+	}
+
+	// Serialize unlock attempts so two concurrent calls don't both load the
+	// keystore. The fast path (already unlocked) takes the lock briefly to
+	// observe the flag — cheap.
+	s.unlockOnce.Lock()
+	defer s.unlockOnce.Unlock()
+	if s.unlocked.Load() {
+		// Someone else won the race; return success idempotently rather than
+		// erroring, since the post-condition the caller wants ("daemon is
+		// unlocked") holds.
+		return identityUnlockResult{DID: s.id.DID()}, nil
+	}
+
+	id, store, alog, err := s.unlockFn(ctx, p.Password)
+	if err != nil {
+		// We do not log the password or hash thereof. The error message is
+		// surfaced verbatim — typically "wrong password or corrupted
+		// keystore" from internal/identity.
+		return nil, newError(CodeIdentityLocked, "unlock failed", err.Error())
+	}
+	if id == nil || store == nil || alog == nil {
+		return nil, newError(CodeInternalError, "unlock callback returned nil trio without error")
+	}
+
+	// Field writes happen-before the atomic.Store(true) below; subsequent
+	// dispatch.Load() returning true is paired with these writes via
+	// release/acquire semantics (Go memory model). Order matters.
+	s.id = id
+	s.store = store
+	s.alog = alog
+	s.unlocked.Store(true)
+
+	return identityUnlockResult{DID: id.DID()}, nil
 }
 
 // --- daimon.identity.get -----------------------------------------------------

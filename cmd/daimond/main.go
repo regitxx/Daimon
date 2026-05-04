@@ -3,18 +3,33 @@
 // daimond is the long-running local process that holds a principal's identity,
 // memory, and activity log, and routes LLM provider calls. See SPEC.md for the
 // protocol design.
+//
+// Subcommands:
+//
+//   - daimond serve   — production mode: read $DAIMON_HOME, listen on the
+//                       persistent socket, await daimon.identity.unlock,
+//                       then serve until SIGINT/SIGTERM. This is what
+//                       `daimon unlock` auto-spawns.
+//
+//   - daimond demo    — self-contained 8-step demonstration with an ephemeral
+//                       identity on a temp socket. Used for end-to-end smoke
+//                       tests and as a living spec; never touches $DAIMON_HOME.
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/regitxx/Daimon/internal/activity"
+	"github.com/regitxx/Daimon/internal/daimonhome"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/memory/ollama"
@@ -28,18 +43,144 @@ import (
 const version = "v0.1.0-dev"
 
 func main() {
+	if len(os.Args) < 2 {
+		usage()
+		os.Exit(2)
+	}
+	switch os.Args[1] {
+	case "serve":
+		if err := runServe(); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+	case "demo":
+		bannerStderr()
+		if err := runDemo(); err != nil {
+			fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+			os.Exit(1)
+		}
+	case "help", "-h", "--help":
+		usage()
+	default:
+		fmt.Fprintf(os.Stderr, "daimond: unknown subcommand %q\n\n", os.Args[1])
+		usage()
+		os.Exit(2)
+	}
+}
+
+func usage() {
+	fmt.Fprintf(os.Stderr, `daimond %s — Daimon Protocol reference daemon
+
+Usage:
+  daimond serve     Run the daemon: read $DAIMON_HOME, listen on the
+                    persistent socket, await daimon.identity.unlock.
+  daimond demo      Run the self-contained 8-step end-to-end demonstration
+                    (ephemeral identity, temp socket, never touches
+                    $DAIMON_HOME).
+  daimond help      Show this message.
+
+The CLI ('daimon') usually auto-spawns 'daimond serve' on first 'daimon unlock';
+running it directly is mostly useful for debugging and integration tests.
+
+https://github.com/regitxx/Daimon
+`, version)
+}
+
+func bannerStderr() {
 	fmt.Fprintf(os.Stderr, "daimond %s — Day Zero\n", version)
 	fmt.Fprintln(os.Stderr, "Daimon Protocol reference implementation")
 	fmt.Fprintln(os.Stderr, "https://github.com/regitxx/Daimon")
 	fmt.Fprintln(os.Stderr)
-
-	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
-		os.Exit(1)
-	}
 }
 
-func run() error {
+// runServe is the production daemon path. It resolves $DAIMON_HOME, builds
+// the provider registry (no keystore needed for that), opens the persistent
+// Unix socket, and stands up a server in locked mode that loads the keystore
+// on the first successful daimon.identity.unlock RPC. Blocks on SIGINT/SIGTERM.
+func runServe() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	home, err := daimonhome.Resolve()
+	if err != nil {
+		return err
+	}
+	keystorePath := daimonhome.KeystorePath(home)
+	if _, err := os.Stat(keystorePath); errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("no keystore at %s — run `daimon init` first", keystorePath)
+	} else if err != nil {
+		return fmt.Errorf("stat keystore: %w", err)
+	}
+	sockPath, fallback, err := daimonhome.SocketPath(home)
+	if err != nil {
+		return err
+	}
+
+	bannerStderr()
+	fmt.Fprintf(os.Stderr, "daimond serve: home=%s\n", home)
+	fmt.Fprintf(os.Stderr, "               socket=%s%s\n", sockPath, fallbackNote(fallback))
+	fmt.Fprintf(os.Stderr, "               keystore=%s\n", keystorePath)
+
+	// Provider registry is independent of the keystore — env vars and the
+	// Ollama probe both work without an unlocked identity. Build once at
+	// startup so daimon.provider.list works the moment unlock completes.
+	reg, creds := buildProviderRegistry(ctx)
+
+	// Unlock callback: identity.LoadFromKeystore + memory.Open + activity.Open
+	// using the resolved home paths. The embedder gets picked here too — the
+	// memory store needs it at construction; rebuilding it on every unlock
+	// is moot since v0.1 only ever unlocks once per process lifetime.
+	unlock := func(uctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, error) {
+		id, err := identity.LoadFromKeystore(keystorePath, []byte(password))
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		emb := pickEmbedder(uctx)
+		store, err := memory.Open(filepath.Join(home, "memory.db"), id, emb)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("memory.Open: %w", err)
+		}
+		alog, err := activity.Open(filepath.Join(home, "activity.log"), id)
+		if err != nil {
+			_ = store.Close()
+			return nil, nil, nil, fmt.Errorf("activity.Open: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "daimond serve: unlocked, did=%s\n", id.DID())
+		return id, store, alog, nil
+	}
+
+	srv, err := server.New(server.Options{
+		Providers:   reg,
+		Credentials: creds,
+		Unlock:      unlock,
+	})
+	if err != nil {
+		return fmt.Errorf("server.New: %w", err)
+	}
+	if err := srv.Listen(sockPath); err != nil {
+		return fmt.Errorf("listen %s: %w", sockPath, err)
+	}
+	defer srv.Close()
+	fmt.Fprintln(os.Stderr, "daimond serve: ready (locked) — awaiting daimon.identity.unlock")
+
+	if err := srv.Serve(ctx); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+	fmt.Fprintln(os.Stderr, "daimond serve: shutdown clean")
+	return nil
+}
+
+func fallbackNote(b bool) string {
+	if !b {
+		return ""
+	}
+	return " (sun_path fallback to $TMPDIR — long $DAIMON_HOME)"
+}
+
+// runDemo is the self-contained 8-step end-to-end demonstration that has been
+// the project's living spec since session 4. Untouched by the CLI work — this
+// is what `daimond demo` runs.
+func runDemo() error {
 	ctx := context.Background()
 
 	fmt.Fprintln(os.Stderr, "[1/8] Generating ephemeral Ed25519 identity…")

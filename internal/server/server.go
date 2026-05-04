@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/identity"
@@ -17,15 +18,26 @@ import (
 	"github.com/regitxx/Daimon/internal/provider"
 )
 
-// Options bundles the dependencies a Server needs. Identity, Store, and Log
-// are required; the server is the orchestrator, not their owner.
+// Options bundles the dependencies a Server needs.
 //
-// Providers and Credentials are optional. When Providers is nil, the
-// daimon.provider.* methods return CodeMethodNotFound — same honest signal as
-// any unregistered method. When Credentials is nil, daimon.provider.list
-// reports every registered adapter as unconfigured (since we have no way to
-// observe credential presence). Both are typically supplied together by the
-// daemon main, but server tests can exercise either independently.
+// The server runs in one of two modes:
+//
+//   - **Unlocked-from-construction (demo mode).** Identity, Store, and Log
+//     are all supplied; the server starts ready and dispatches every method.
+//     Used by `daimond demo` and by every existing test fixture.
+//
+//   - **Locked-until-unlock (serve mode).** Unlock is non-nil; Identity,
+//     Store, and Log MAY be omitted. The server starts in a locked state
+//     where every method except daimon.identity.unlock returns
+//     CodeIdentityLocked. The unlock RPC calls Unlock(password); on success
+//     the returned trio populates the server and dispatch is permitted on
+//     all methods thereafter. Lock is one-way for v0.1 — once unlocked, the
+//     daemon stays unlocked until process exit.
+//
+// Providers and Credentials are optional in both modes. When Providers is
+// nil, daimon.provider.* return CodeNotFound (no provider registry attached).
+// When Credentials is nil, daimon.provider.list reports adapters as
+// unconfigured.
 type Options struct {
 	Identity    *identity.Identity
 	Store       *memory.Store
@@ -33,10 +45,23 @@ type Options struct {
 	Providers   *provider.Registry
 	Credentials *provider.CredentialStore
 
+	// Unlock, if non-nil, switches the server into locked-mode. The unlock
+	// RPC calls this with the user-supplied password and expects either the
+	// loaded trio (identity + store + log) or a wrong-password / IO error.
+	// Returning a non-nil error from Unlock leaves the server locked and the
+	// RPC reports CodeIdentityLocked with the error message in Data.
+	Unlock UnlockFunc
+
 	// Logger is the destination for operational messages (accept errors,
 	// activity-log append failures, etc.). Nil disables logging.
 	Logger *log.Logger
 }
+
+// UnlockFunc is the keystore-loading callback supplied by the daemon main.
+// It is invoked exactly once per server lifetime: the first successful call
+// transitions the server from locked to unlocked. Subsequent unlock RPCs are
+// rejected (the daemon is already running, no need to re-derive the key).
+type UnlockFunc func(ctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, error)
 
 // Server is a JSON-RPC 2.0 endpoint that exposes the Daimon Protocol surface
 // from SPEC §6.1.
@@ -44,6 +69,14 @@ type Options struct {
 // Lifecycle: New → Listen(socketPath) → Serve(ctx) (blocks) → Close. Close is
 // idempotent and safe to call from any goroutine; it cancels in-flight handler
 // contexts and drops the socket file.
+//
+// Lock state: tracked via the unlocked atomic.Bool. Construction in unlock-
+// mode (Options.Unlock != nil) sets unlocked=false; the unlock RPC populates
+// the principal trio and then transitions unlocked→true via atomic.Store,
+// which carries release semantics so the field writes happen-before any
+// subsequent Load returning true. Demo-mode construction sets the trio first
+// and then unlocked=true via the same atomic write, so dispatch sees a
+// consistent snapshot in either path.
 type Server struct {
 	id        *identity.Identity
 	store     *memory.Store
@@ -54,6 +87,16 @@ type Server struct {
 	logger *log.Logger
 
 	methods map[string]methodHandler
+
+	// unlocked is the locked→unlocked one-shot. Loaded by dispatch, stored by
+	// New (demo mode) or by handleIdentityUnlock (serve mode).
+	unlocked atomic.Bool
+
+	// unlockFn is the keystore-loading callback; nil in demo mode.
+	// unlockOnce serializes unlock attempts so two concurrent unlock RPCs
+	// can't both load the keystore (cheap deduplication on the slow path).
+	unlockFn   UnlockFunc
+	unlockOnce sync.Mutex
 
 	mu         sync.Mutex
 	listener   net.Listener
@@ -75,30 +118,52 @@ type Server struct {
 // JSON-marshaled into the response's "result" field.
 type methodHandler func(ctx context.Context, params json.RawMessage) (any, *RPCError)
 
-// New constructs a Server bound to the given primitives. Methods are
-// registered eagerly so a typo in the registration table fails at construction
-// time rather than at first request.
+// New constructs a Server. Construction validates Options for the chosen
+// mode:
+//
+//   - Demo mode (Options.Unlock == nil): Identity, Store, and Log are all
+//     required; the server starts unlocked.
+//
+//   - Serve mode (Options.Unlock != nil): the trio MAY be omitted; the server
+//     starts locked and only daimon.identity.unlock is callable.
+//
+// Methods are registered eagerly so a typo in the registration table fails at
+// construction time rather than at first request.
 func New(opts Options) (*Server, error) {
-	if opts.Identity == nil {
-		return nil, errors.New("server: Identity is required")
-	}
-	if opts.Store == nil {
-		return nil, errors.New("server: Store is required")
-	}
-	if opts.Log == nil {
-		return nil, errors.New("server: Log is required")
-	}
 	s := &Server{
-		id:        opts.Identity,
-		store:     opts.Store,
-		alog:      opts.Log,
 		providers: opts.Providers,
 		creds:     opts.Credentials,
 		logger:    opts.Logger,
 	}
+	if opts.Unlock != nil {
+		// Serve mode: trio may be nil; unlock callback populates them.
+		s.unlockFn = opts.Unlock
+		s.id = opts.Identity
+		s.store = opts.Store
+		s.alog = opts.Log
+		// Stays locked until handleIdentityUnlock runs successfully.
+	} else {
+		if opts.Identity == nil {
+			return nil, errors.New("server: Identity is required (or supply Options.Unlock for serve mode)")
+		}
+		if opts.Store == nil {
+			return nil, errors.New("server: Store is required (or supply Options.Unlock for serve mode)")
+		}
+		if opts.Log == nil {
+			return nil, errors.New("server: Log is required (or supply Options.Unlock for serve mode)")
+		}
+		s.id = opts.Identity
+		s.store = opts.Store
+		s.alog = opts.Log
+		s.unlocked.Store(true)
+	}
 	s.registerMethods()
 	return s, nil
 }
+
+// IsUnlocked reports whether the server has loaded the principal trio.
+// Useful for tests and diagnostics; not exposed via the wire surface.
+func (s *Server) IsUnlocked() bool { return s.unlocked.Load() }
 
 // Listen binds the Unix socket at socketPath. If a stale socket file exists
 // at that path AND nothing is currently listening on it, the stale file is
@@ -281,6 +346,19 @@ func (s *Server) dispatch(ctx context.Context, raw json.RawMessage) *Response {
 			return nil
 		}
 		return errorResponse(req.ID, newError(CodeMethodNotFound, "Method not found", req.Method))
+	}
+
+	// Locked-state gate. Pre-unlock, only daimon.identity.unlock is callable.
+	// All other methods return CodeIdentityLocked so the client knows to
+	// prompt the user instead of retrying. Notifications drop silently —
+	// the wire-level invariant (no response to a notification) outranks the
+	// "tell the client to unlock" hint, and a locked daimon ignoring a
+	// signed notification is the same as a missing daimon ignoring it.
+	if !s.unlocked.Load() && req.Method != methodIdentityUnlock {
+		if req.IsNotification() {
+			return nil
+		}
+		return errorResponse(req.ID, newError(CodeIdentityLocked, "identity is locked", req.Method))
 	}
 
 	result, rpcErr := handler(ctx, req.Params)

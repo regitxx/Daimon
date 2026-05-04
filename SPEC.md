@@ -342,6 +342,7 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 - A compromised daimon-core process itself (TPM-backed remote attestation arrives v0.2+)
 - Cross-daimon trust (no federation in v0.1)
 - Memory inference attacks against the embedding index
+- **Transient password exposure over the unlock IPC channel.** `daimon unlock` sends the keystore password over the Unix socket to `daimond serve`. The socket is mode 0600 so only the principal's UID can connect, but the password is briefly readable via `/proc/<daimond>/fd` or by a `ptrace`/`strace` on the daemon — i.e. by anything that can already compromise the daimon-core process, which §9.2 already places out of scope. Mitigation (CLI reads password from the controlling terminal and forwards an unlock token instead) is deferred to v0.1.x.
 
 ### 9.3 Cryptographic primitives
 
@@ -362,14 +363,21 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 ## 10. File layout
 
 ```
-$DAIMON_HOME/  (default: ~/.daimon/)
-├── identity/
-│   ├── did.json              # DID document
-│   └── keys.encrypted        # Encrypted keystore
+$DAIMON_HOME/  (default: $XDG_CONFIG_HOME/daimon, or
+                          ~/Library/Application Support/daimon on macOS,
+                          %AppData%/daimon on Windows — whatever os.UserConfigDir()
+                          returns; override via the DAIMON_HOME environment
+                          variable)
+├── identity.keystore         # Encrypted Ed25519 keystore (mode 0600)
 ├── memory.db                 # SQLite — content/metadata/source columns AES-256-GCM-encrypted (§5.1)
 ├── activity.log              # Append-only signed log
 ├── providers.json.encrypted  # Provider credentials
-├── daimon.sock               # Unix socket (Linux/macOS)
+├── daimon.sock               # Unix socket (mode 0600). Falls back to
+│                             # $TMPDIR/daimon-$uid.sock when the resolved
+│                             # path exceeds the AF_UNIX sun_path cap (104
+│                             # bytes on darwin, 108 on linux).
+├── daimon.log                # Daemon log file (where `daimon unlock` writes
+│                             # the auto-spawned daemon's stdout/stderr)
 └── config.toml               # Non-sensitive config
 ```
 
