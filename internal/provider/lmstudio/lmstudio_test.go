@@ -618,3 +618,376 @@ func TestAdapter_ProbeRespectsContext(t *testing.T) {
 		t.Fatal("expected timeout error from probe")
 	}
 }
+
+// --- streaming tests ---
+
+// streamServer wraps httptest.NewServer with a handler that routes /v1/models
+// to the standard probe response and forwards /v1/chat/completions to the
+// supplied chat handler. The chat handler asserts the response writer is a
+// Flusher so each test exercises real incremental SSE writes — without it
+// httptest would silently buffer and the cancellation test would not catch
+// real-world streaming behaviour.
+func streamServer(t *testing.T, chat func(w http.ResponseWriter, r *http.Request, flusher http.Flusher)) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, modelsBody)
+		case "/v1/chat/completions":
+			flusher, ok := w.(http.Flusher)
+			if !ok {
+				t.Fatal("response writer does not flush — test cannot stream")
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			chat(w, r, flusher)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// happyChatSSE is the canonical OpenAI Chat Completions SSE shape: a
+// role-priming chunk, three content delta chunks, the closing finish_reason
+// chunk (empty delta + finish_reason="stop"), the post-content usage chunk
+// (choices:[] + usage:{...} — emitted because we set
+// stream_options.include_usage:true), and the literal [DONE] sentinel.
+const happyChatSSE = `data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[{"index":0,"delta":{"content":", "},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[{"index":0,"delta":{"content":"world."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-stream-1","object":"chat.completion.chunk","created":1746345600,"model":"llama-3.2-1b-instruct","choices":[],"usage":{"prompt_tokens":7,"completion_tokens":4,"total_tokens":11}}
+
+data: [DONE]
+
+`
+
+func TestAdapter_StreamHappyPath(t *testing.T) {
+	var capture chatCapture
+	var headers http.Header
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capture)
+		headers = r.Header.Clone()
+		_, _ = io.WriteString(w, happyChatSSE)
+		flusher.Flush()
+	})
+	defer srv.Close()
+
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	deltas := make(chan provider.Delta, 16)
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		for d := range deltas {
+			got = append(got, d.Content)
+		}
+		close(done)
+	}()
+
+	resp, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	<-done
+
+	if !capture.Stream {
+		t.Errorf("outbound stream flag: got %v, want true", capture.Stream)
+	}
+	if got := headers.Get("Accept"); got != "text/event-stream" {
+		t.Errorf("Accept header: got %q, want text/event-stream", got)
+	}
+	if got := headers.Get("Authorization"); got != "Bearer "+lmstudio.DefaultAPIKey {
+		t.Errorf("Authorization: got %q", got)
+	}
+
+	wantDeltas := []string{"Hello", ", ", "world."}
+	if len(got) != len(wantDeltas) {
+		t.Fatalf("delta count: got %d (%v), want %d", len(got), got, len(wantDeltas))
+	}
+	for i, w := range wantDeltas {
+		if got[i] != w {
+			t.Errorf("delta[%d]: got %q, want %q", i, got[i], w)
+		}
+	}
+	if resp.Content != "Hello, world." {
+		t.Errorf("accumulated content: got %q", resp.Content)
+	}
+	if resp.Model != "llama-3.2-1b-instruct" {
+		t.Errorf("model: got %q", resp.Model)
+	}
+	if resp.StopReason != provider.StopReasonEndTurn {
+		t.Errorf("stop reason: got %q, want %q", resp.StopReason, provider.StopReasonEndTurn)
+	}
+	if resp.Usage.InputTokens != 7 {
+		t.Errorf("input_tokens: got %d, want 7", resp.Usage.InputTokens)
+	}
+	if resp.Usage.OutputTokens != 4 {
+		t.Errorf("output_tokens: got %d, want 4", resp.Usage.OutputTokens)
+	}
+	if len(resp.Raw) == 0 {
+		t.Error("Raw should carry the most recent SSE data payload")
+	}
+}
+
+func TestAdapter_StreamCancellation(t *testing.T) {
+	// Server emits one delta, flushes, then hangs. The test cancels the
+	// context once it has seen that delta and asserts Stream returns promptly
+	// — no goroutine leak, no continued upstream consumption.
+	gate := make(chan struct{})
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"first\"},\"finish_reason\":null}],\"model\":\"llama-3.2-1b-instruct\"}\n\n")
+		flusher.Flush()
+		<-gate
+		<-r.Context().Done()
+	})
+	defer srv.Close()
+	defer close(gate)
+
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		<-deltas
+		cancel()
+		for range deltas {
+		}
+	}()
+
+	doneAt := make(chan time.Time, 1)
+	go func() {
+		_, _ = a.Stream(ctx, provider.Request{
+			Model:    "llama-3.2-1b-instruct",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+		}, deltas)
+		doneAt <- time.Now()
+	}()
+
+	select {
+	case <-doneAt:
+		// expected — Stream returned within the deadline
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stream did not return after ctx cancellation")
+	}
+}
+
+func TestAdapter_StreamMalformedDataPayload(t *testing.T) {
+	// data: line with non-JSON must abort with a decode error — silent skip
+	// would let a corrupted token slip through and the user would see a
+	// truncated reply.
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		_, _ = io.WriteString(w, "data: {not valid json}\n\n")
+		flusher.Flush()
+	})
+	defer srv.Close()
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected decode error on malformed data payload")
+	}
+	if !strings.Contains(err.Error(), "decode chunk") {
+		t.Errorf("error should mention decode of the chunk: %v", err)
+	}
+}
+
+func TestAdapter_StreamMissingDoneTerminal(t *testing.T) {
+	// Stream cuts off after a content delta without sending [DONE]. Adapter
+	// must error rather than return a partial Response — the sentinel is the
+	// contract that the assistant turn is complete.
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		_, _ = io.WriteString(w,
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"only\"},\"finish_reason\":null}],\"model\":\"llama-3.2-1b-instruct\"}\n\n")
+		flusher.Flush()
+	})
+	defer srv.Close()
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error when stream ends without [DONE]")
+	}
+	if !strings.Contains(err.Error(), "[DONE]") {
+		t.Errorf("error should mention missing [DONE] sentinel: %v", err)
+	}
+}
+
+func TestAdapter_StreamHTTPError(t *testing.T) {
+	// 401 from /v1/chat/completions with a realistic OpenAI-shaped error body.
+	// Adapter should surface the status code and a prefix of the body.
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = io.WriteString(w, `{"error":{"type":"invalid_request_error","code":"invalid_api_key","message":"invalid API key"}}`)
+	})
+	defer srv.Close()
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if !strings.Contains(err.Error(), "http 401") {
+		t.Errorf("expected status code in error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "invalid API key") {
+		t.Errorf("expected upstream message in error: %v", err)
+	}
+}
+
+func TestAdapter_StreamMidStreamErrorChunk(t *testing.T) {
+	// 200 OK opens the stream, a content delta flows, then the server emits a
+	// chunk with an `error` field (LM Studio surfaces upstream model failures
+	// this way). Adapter aborts with the carried message — a partial Response
+	// would mislead the caller.
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		_, _ = io.WriteString(w,
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":null}],\"model\":\"llama-3.2-1b-instruct\"}\n\n"+
+				"data: {\"error\":{\"type\":\"server_error\",\"code\":\"model_overloaded\",\"message\":\"upstream model overloaded\"}}\n\n")
+		flusher.Flush()
+	})
+	defer srv.Close()
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error from mid-stream error chunk")
+	}
+	if !strings.Contains(err.Error(), "model overloaded") {
+		t.Errorf("error should carry the upstream message: %v", err)
+	}
+}
+
+func TestAdapter_StreamFinishReasonNormalisation(t *testing.T) {
+	// finish_reason="length" on the closing chunk must normalise to
+	// StopReasonMaxTokens — same mapping as the unary path. Wire-shape
+	// regression guard for the streaming → unary parity that the chat REPL
+	// depends on for consistent UX (the unary tests cover the helper's full
+	// six-case mapping; this test proves the streaming path actually feeds it).
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request, flusher http.Flusher) {
+		_, _ = io.WriteString(w,
+			"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"trunc\"},\"finish_reason\":null}],\"model\":\"llama-3.2-1b-instruct\"}\n\n"+
+				"data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}],\"model\":\"llama-3.2-1b-instruct\"}\n\n"+
+				"data: [DONE]\n\n")
+		flusher.Flush()
+	})
+	defer srv.Close()
+	a, err := lmstudio.New(context.Background(), lmstudio.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	resp, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama-3.2-1b-instruct",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	if resp.StopReason != provider.StopReasonMaxTokens {
+		t.Errorf("stop reason for finish_reason=length: got %q, want %q",
+			resp.StopReason, provider.StopReasonMaxTokens)
+	}
+	if resp.Content != "trunc" {
+		t.Errorf("accumulated content: got %q, want %q", resp.Content, "trunc")
+	}
+}
+
+func TestAdapter_StreamEmptyMessagesRejected(t *testing.T) {
+	// Early-return guard mirrors the unary path. Channel must still be closed
+	// so a consumer's range loop terminates cleanly.
+	a, err := lmstudio.New(context.Background(),
+		lmstudio.WithEndpoint("http://127.0.0.1:1"),
+		lmstudio.WithModels([]provider.Model{{ID: "llama-3.2-1b"}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 1)
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model: "llama-3.2-1b",
+	}, deltas)
+	if !errors.Is(err, lmstudio.ErrEmptyMessages) {
+		t.Errorf("err: got %v, want %v", err, lmstudio.ErrEmptyMessages)
+	}
+	if _, ok := <-deltas; ok {
+		t.Error("deltas channel should be closed on early error")
+	}
+}
+
+// TestAdapter_StreamerInterface verifies the type assertion the server uses
+// before dispatching daimon.provider.stream succeeds — wire-shape regression
+// guard for future refactors.
+func TestAdapter_StreamerInterface(t *testing.T) {
+	a, err := lmstudio.New(context.Background(),
+		lmstudio.WithEndpoint("http://127.0.0.1:1"),
+		lmstudio.WithModels([]provider.Model{{ID: "llama-3.2-1b"}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := provider.Provider(a).(provider.Streamer); !ok {
+		t.Fatal("lmstudio.Adapter must implement provider.Streamer")
+	}
+}

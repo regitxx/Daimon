@@ -21,11 +21,14 @@
 // placeholder string "lm-studio" and is overridden via WithAPIKey when the
 // caller has the LMSTUDIO_API_KEY env var set. Lowest-friction default.
 //
-// Streaming, tool use, and structured outputs land in subsequent versions
-// alongside the corresponding spec changes.
+// Streaming via Chat Completions SSE is implemented in Stream below
+// (CHECKPOINT item 23a, third and last of three v0.1.x streaming adapters).
+// Tool use and structured outputs land in subsequent versions alongside the
+// corresponding spec changes.
 package lmstudio
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -34,6 +37,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/regitxx/Daimon/internal/provider"
@@ -223,6 +227,218 @@ func (a *Adapter) Invoke(ctx context.Context, req provider.Request) (*provider.R
 	}, nil
 }
 
+// Stream posts the normalized request to /v1/chat/completions with stream=true
+// and decodes the OpenAI Chat Completions SSE wire format incrementally,
+// emitting one provider.Delta per non-empty choices[0].delta.content chunk
+// and accumulating the final *Response from the closing finish_reason chunk
+// and (when stream_options.include_usage is honoured by the server) the
+// post-content usage chunk. The terminal sentinel is the literal `data:
+// [DONE]` line; absence is an error so a half-streamed response never
+// presents itself as a complete one.
+//
+// Wire-shape contract (LM Studio mirrors api.openai.com /v1/chat/completions
+// here):
+//
+//   - No `event:` lines — only `data:` payloads, blank-line separated.
+//   - Each non-terminal payload is a chat.completion.chunk JSON document
+//     carrying choices[0].delta.content (the token fragment, may be empty on
+//     the chunk that carries finish_reason) and choices[0].finish_reason
+//     (populated only on the chunk preceding the optional usage chunk and
+//     [DONE]).
+//   - finish_reason is normalised through the same helper as the unary path
+//     so streaming/unary StopReason UX is identical (six cases:
+//     stop/length/content_filter/tool_calls/function_call/empty).
+//   - A chunk carrying `error: {message: ...}` aborts the stream — partial
+//     content with a server-side error is misleading.
+//   - ctx cancellation propagates through http.NewRequestWithContext + a
+//     per-line ctx.Err() check + select-guarded delta send. Cancelling
+//     mid-stream returns ctx.Err() promptly; the channel is always closed.
+//
+// The text-only chat surface only uses the content delta path; future
+// tool_calls fragments under choices[0].delta.tool_calls flow through the
+// parser without aborting it (forward-compat by silence, matching the
+// Claude/OpenAI streaming adapters).
+func (a *Adapter) Stream(ctx context.Context, req provider.Request, deltas chan<- provider.Delta) (*provider.Response, error) {
+	defer close(deltas)
+
+	if len(req.Messages) == 0 {
+		return nil, ErrEmptyMessages
+	}
+	if req.Model == "" && len(a.models) > 0 {
+		req.Model = a.models[0].ID
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+
+	body := chatRequest{
+		Model:         req.Model,
+		Messages:      toChatMessages(req.System, req.Messages),
+		Stream:        true,
+		StreamOptions: &streamOptions{IncludeUsage: true},
+		MaxTokens:     maxTokens,
+		Temperature:   req.Temperature,
+		Stop:          req.StopSeqs,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("lmstudio: marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+chatPath, bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("lmstudio: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "text/event-stream")
+	httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
+
+	resp, err := a.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("lmstudio: do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("lmstudio: http %d: %s", resp.StatusCode, truncateForError(errBody))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	// 1 MiB ceiling matches the Claude / OpenAI streaming adapters — enough for
+	// any single chunk including future tool_call fragments.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		accumulated  strings.Builder
+		model        string
+		finishReason string
+		inputTokens  int
+		outputTokens int
+		lastRaw      []byte
+		sawDone      bool
+
+		curData []byte
+	)
+
+	dispatch := func() error {
+		defer func() { curData = curData[:0] }()
+		if len(curData) == 0 {
+			return nil
+		}
+		// The terminal sentinel is the literal string [DONE], not JSON.
+		if bytes.Equal(bytes.TrimSpace(curData), []byte("[DONE]")) {
+			sawDone = true
+			return nil
+		}
+		// Snapshot the most recent JSON payload for the final Response.Raw —
+		// the last content/usage chunk before [DONE] is the natural endpoint.
+		lastRaw = append(lastRaw[:0], curData...)
+
+		var f struct {
+			Model   string `json:"model"`
+			Choices []struct {
+				Index int `json:"index"`
+				Delta struct {
+					Role    string `json:"role,omitempty"`
+					Content string `json:"content,omitempty"`
+				} `json:"delta"`
+				FinishReason string `json:"finish_reason"`
+			} `json:"choices"`
+			Usage *chatUsage        `json:"usage,omitempty"`
+			Error *chatErrorPayload `json:"error,omitempty"`
+		}
+		if err := json.Unmarshal(curData, &f); err != nil {
+			return fmt.Errorf("lmstudio: decode chunk: %w", err)
+		}
+		if f.Error != nil {
+			return fmt.Errorf("lmstudio: stream error: %s", f.Error.Message)
+		}
+		if f.Model != "" {
+			model = f.Model
+		}
+		// Usage may arrive on its own post-content chunk (canonical with
+		// stream_options.include_usage) OR alongside the final content chunk
+		// on servers that fold it inline. Latest-wins handles both shapes.
+		if f.Usage != nil {
+			inputTokens = f.Usage.PromptTokens
+			outputTokens = f.Usage.CompletionTokens
+		}
+		for _, c := range f.Choices {
+			if c.FinishReason != "" {
+				finishReason = c.FinishReason
+			}
+			if c.Delta.Content == "" {
+				continue
+			}
+			accumulated.WriteString(c.Delta.Content)
+			select {
+			case deltas <- provider.Delta{Content: c.Delta.Content}:
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return nil
+	}
+
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			if err := dispatch(); err != nil {
+				return nil, err
+			}
+			if sawDone {
+				break
+			}
+			continue
+		}
+		// SSE: skip comments (":" prefix) and unknown fields (id:, event:,
+		// retry:). LM Studio / chat.completions only emits data: lines.
+		switch {
+		case bytes.HasPrefix(line, []byte("data: ")):
+			if len(curData) > 0 {
+				curData = append(curData, '\n')
+			}
+			curData = append(curData, line[len("data: "):]...)
+		case bytes.HasPrefix(line, []byte("data:")):
+			if len(curData) > 0 {
+				curData = append(curData, '\n')
+			}
+			curData = append(curData, line[len("data:"):]...)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("lmstudio: read stream: %w", err)
+	}
+	// Trailing-payload-without-blank-line rescue. Some servers omit the final
+	// blank line that would have flushed [DONE] or the last chunk.
+	if !sawDone && len(curData) > 0 {
+		if err := dispatch(); err != nil {
+			return nil, err
+		}
+	}
+	if !sawDone {
+		return nil, errors.New("lmstudio: stream ended without [DONE] sentinel")
+	}
+
+	return &provider.Response{
+		Model:      model,
+		Content:    accumulated.String(),
+		StopReason: normalizeStopReason(finishReason),
+		Usage: provider.Usage{
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+		},
+		Raw: append(json.RawMessage(nil), lastRaw...),
+	}, nil
+}
+
 // probeModels GETs /v1/models and returns the loaded models translated to
 // provider.Model. The probe is the daimon's "is LM Studio reachable?" check:
 // any failure here propagates as a New() error so the caller can skip
@@ -269,12 +485,23 @@ func (a *Adapter) probeModels(ctx context.Context) ([]provider.Model, error) {
 // --- internal types matching the Chat Completions wire format ---
 
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	Stop        []string      `json:"stop,omitempty"`
+	Model         string         `json:"model"`
+	Messages      []chatMessage  `json:"messages"`
+	Stream        bool           `json:"stream,omitempty"`
+	StreamOptions *streamOptions `json:"stream_options,omitempty"`
+	MaxTokens     int            `json:"max_tokens,omitempty"`
+	Temperature   *float64       `json:"temperature,omitempty"`
+	Stop          []string       `json:"stop,omitempty"`
+}
+
+// streamOptions toggles ancillary streaming behaviours. include_usage:true
+// asks the server to emit a final post-content chunk carrying the prompt /
+// completion / total token totals (the OpenAI Chat Completions spec only
+// emits usage on streamed responses when this flag is set). LM Studio honours
+// it; servers that don't simply drop the field. Sent only on the streaming
+// path so unary wire bytes stay byte-identical pre/post this session.
+type streamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 type chatMessage struct {
