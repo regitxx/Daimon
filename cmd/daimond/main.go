@@ -35,6 +35,7 @@ import (
 	"github.com/regitxx/Daimon/internal/memory/ollama"
 	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/provider/claude"
+	"github.com/regitxx/Daimon/internal/provider/lmstudio"
 	"github.com/regitxx/Daimon/internal/provider/openai"
 	ollamachat "github.com/regitxx/Daimon/internal/provider/ollama"
 	"github.com/regitxx/Daimon/internal/server"
@@ -393,6 +394,30 @@ func buildProviderRegistry(ctx context.Context) (*provider.Registry, *provider.C
 		// No credential entry — Ollama has no API key.
 		fmt.Fprintf(os.Stderr, "      Registered: %s (%d models, endpoint=%s)\n",
 			ad.Name(), len(ad.Models()), endpoint)
+	}
+
+	// LM Studio probe: same shape as Ollama. Endpoint via LMSTUDIO_HOST,
+	// optional bearer key via LMSTUDIO_API_KEY (default placeholder works for
+	// stock LM Studio configs that don't enforce auth).
+	lmEndpoint := lmstudio.DefaultEndpoint
+	if h := os.Getenv("LMSTUDIO_HOST"); h != "" {
+		lmEndpoint = h
+	}
+	lmOpts := []lmstudio.Option{lmstudio.WithEndpoint(lmEndpoint)}
+	if k := os.Getenv("LMSTUDIO_API_KEY"); k != "" {
+		lmOpts = append(lmOpts, lmstudio.WithAPIKey(k))
+	}
+	lmProbeCtx, lmCancel := context.WithTimeout(ctx, 3*time.Second)
+	defer lmCancel()
+	if ad, err := lmstudio.New(lmProbeCtx, lmOpts...); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"      LM Studio chat unavailable (%v); not registered (start the LM Studio server and load a chat model to enable)\n",
+			err)
+	} else {
+		reg.Register(ad)
+		// No credential entry — the bearer is internal to the adapter.
+		fmt.Fprintf(os.Stderr, "      Registered: %s (%d models, endpoint=%s)\n",
+			ad.Name(), len(ad.Models()), lmEndpoint)
 	}
 
 	if reg.Len() == 0 {
