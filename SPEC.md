@@ -250,13 +250,19 @@ daimon.provider.invoke({
     query: string,
     max_tokens?: number
   }
-}) → ProviderResponse
+}) → {
+  response: ProviderResponse,
+  injected_memory_ids?: string[]   // present iff inject_context ran AND matched ≥1 memory
+}
 
 daimon.provider.stream({   // identical params to invoke
   provider: string,
   request: ProviderRequest,
   inject_context?: { query: string, max_tokens?: number }
-}) → ProviderResponse       // final accumulated response, on the request id
+}) → {
+  response: ProviderResponse,           // final accumulated response, on the request id
+  injected_memory_ids?: string[]
+}
 ```
 
 `daimon.provider.stream` is parallel to `invoke` for adapters that can render output incrementally. While the call is in flight, the daimon emits zero or more JSON-RPC 2.0 server-pushed **notifications** on the same connection:
@@ -266,7 +272,9 @@ daimon.provider.stream({   // identical params to invoke
  "params": {"content": "..."}}
 ```
 
-Notifications carry no `id` field per JSON-RPC 2.0 — they precede the terminal response, which arrives on the original request's `id` and carries the fully accumulated `ProviderResponse` (model, content, stop_reason, usage, raw). Adapters that do not implement streaming return `CodeNotFound` with `"provider does not support streaming"`; clients SHOULD fall back to `daimon.provider.invoke` transparently. Streaming is opt-in per call: `invoke` remains the default unary contract.
+Notifications carry no `id` field per JSON-RPC 2.0 — they precede the terminal response, which arrives on the original request's `id` and carries the same envelope as `daimon.provider.invoke` (the fully accumulated `ProviderResponse` under `response`, optional `injected_memory_ids`). Adapters that do not implement streaming return `CodeNotFound` with `"provider does not support streaming"`; clients SHOULD fall back to `daimon.provider.invoke` transparently. Streaming is opt-in per call: `invoke` remains the default unary contract.
+
+The response envelope's optional `injected_memory_ids` field surfaces the IDs of memories the daimon folded into the prompt via `inject_context`. The field is OMITTED entirely (not present as an empty array) when `inject_context` was not supplied OR when retrieval ran but matched no memories — clients MUST treat absence and empty-array as equivalent for UX purposes (e.g. printing `matched=0`). The activity log entry for the call carries the same IDs in its payload (SPEC §8.1) — the response field is a convenience for clients that want to render "matched=N" without re-querying the audit trail.
 
 Provider credentials never leave daimon-core. Clients invoke providers *through* the daimon, not around it.
 

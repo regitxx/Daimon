@@ -1199,3 +1199,105 @@ The structural property worth naming: **Daimon's at-rest encryption layer is now
 6. **NLnet NGI Zero application** (carry-over from session 16). The application's "what's encrypted at rest" answer is now strongest yet — one shared AEAD, four domain-separated instances, byte-stability test locking the format.
 
 **Next session begins with:** v0.1.x has one no-external-dependency carry-over remaining — `injected_memory_ids` in `provider.invoke` response → REPL annotation (~30 min, item 24a). After that lands, v0.1.x is genuinely complete and the next milestone is the asciicast or the NLnet application — both blocked on the same external constraints (real API keys, LM Studio running locally) that have been blocking the live round-trips since session 19.
+
+---
+
+## 2026-05-05 — Day Zero, twenty-fourth session: `injected_memory_ids` in the provider envelope → REPL `matched=N`
+
+**The last v0.1.x no-external-dependency carry-over closes.** The chat REPL's `[inject_context: query="..."]` line — which has been printing pre-RPC, count-less, since session 17 — is now `[inject_context: query="..." matched=N]` printed post-RPC, with the actual count of memories the daimon folded into the prompt. The count comes from a new optional `injected_memory_ids` field on the `daimon.provider.invoke` AND `daimon.provider.stream` response envelopes. Wire shape changes from a bare `provider.Response` to `{response: ProviderResponse, injected_memory_ids?: string[]}`; `omitempty` keeps the no-inject case clean (`{"response": {...}}` with no metadata key). With this, **v0.1.x has zero no-external-dependency carry-overs remaining** — the next milestone is the asciicast or the NLnet application, both blocked on huckgod's-shell-only constraints (real Anthropic/OpenAI keys, LM Studio running locally) that have been blocking the live round-trips since sessions 19/20/21.
+
+**Probe at session start (per the kickoff's opportunistic round-trip checklist):**
+
+```
+$ curl -sS --max-time 2 http://localhost:1234/v1/models | head -c 200
+curl: (7) Failed to connect to localhost port 1234
+
+$ printenv | grep -E '(ANTHROPIC|OPENAI)_API_KEY' | head -c 80
+OPENAI_API_KEY=
+```
+
+LM Studio: still down. OPENAI_API_KEY: empty (harness redaction). ANTHROPIC_API_KEY: not set. All three live round-trips remain deferred from sessions 19/20/21 — none free this session. Proceeded straight to the inject-count work as the kickoff prescribed.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `internal/server/handlers.go` (modified, +20 lines net) | New `providerInvokeResult` struct: `{Response *provider.Response, InjectedMemoryIDs []string \`json:"injected_memory_ids,omitempty"\`}` with explanatory comment naming the wire-shape change and the omitempty contract. `handleProviderInvoke` now returns `providerInvokeResult{Response: resp, InjectedMemoryIDs: injectedIDs}` instead of bare `resp` — the rest of the function body (inject_context retrieval, provider call, activity-log append) is unchanged because `injectedIDs` was already a local in scope. `handleProviderStream`'s terminal `successResponse(head.ID, res.resp)` becomes `successResponse(head.ID, providerInvokeResult{Response: res.resp, InjectedMemoryIDs: injectedIDs})` — same change, same shape, parallel to the unary path. Activity-log payload field is unchanged in both cases (the principal-side audit trail was always the source of truth; the response field is a convenience for clients that want `matched=N` without re-querying the audit log). |
+| `internal/server/provider_handlers_test.go` (modified, +60 lines net) | `TestProviderInvoke_HappyPath` updated to decode into `providerInvokeResult` and dereference `out.Response` for the existing assertions; new assertion: `len(out.InjectedMemoryIDs) == 0` when no `inject_context` was set. `TestProviderInvoke_RawJSONShape`'s comment rewritten — the wire-shape guard now asserts the *new* envelope (response is wrapped under "response", `injected_memory_ids` is absent on no-inject calls per omitempty) rather than the bare-response guard the test carried since the response field first landed. New test `TestProviderInvoke_RPCResponseSurfacesInjectedMemoryIDs`: seeds two memories matching "huckgod", calls invoke with `inject_context.query=huckgod`, asserts the response envelope's `InjectedMemoryIDs` is non-empty and contains no empty-string IDs. The pre-existing activity-payload assertions in `TestProviderInvoke_LogsActivity` and `TestProviderInvoke_InjectContextEnrichesSystem` stay verbatim — the activity-log shape is unchanged. |
+| `internal/server/stream_test.go` (modified, +75 lines net) | `TestProviderStream_HappyPath`'s terminal-frame decoder switched from `provider.Response` to `providerInvokeResult`; the existing content/stop_reason/usage assertions now read through `env.Response` and gain three new assertions: the on-the-wire result MUST contain `"response":{`, MUST NOT contain `"injected_memory_ids"` (omitempty when no inject_context), and `len(env.InjectedMemoryIDs) == 0`. New test `TestProviderStream_RPCResponseSurfacesInjectedMemoryIDs`: streaming counterpart to the unary inject test — seeds a memory, opens a stream with `inject_context`, drains notifications, asserts the terminal envelope carries `InjectedMemoryIDs`. Same `memory.WriteRequest` import shape the unary tests already use. |
+| `cmd/daimon/cmd_provider.go` (modified, +30 lines net) | New `providerInvokeResult` struct (CLI-side mirror of the server's same-named struct, with the same `omitempty` on `injected_memory_ids`). `cmdProviderInvoke`'s non-`--json` path swaps `var resp providerResponse; daemonCall(..., &resp)` for `var env providerInvokeResult; daemonCall(..., &env)` and dereferences `env.Response`. `--verbose` mode gains an `[inject_context: matched=N]` footer plus one bullet per ID when `len(env.InjectedMemoryIDs) > 0`, useful for debugging which memories the daimon actually folded into the prompt. `--json` mode is unchanged — it streams the raw JSON envelope to stdout, so the new shape surfaces transparently. |
+| `cmd/daimon/cmd_chat.go` (modified, +25 lines net) | `runTurn`'s signature changes from `(*providerResponse, json.RawMessage, error)` to `(*providerResponse, []string, json.RawMessage, error)` — the new middle return is the slice of injected memory IDs. Same shape change for `runTurnStream` (`(*providerResponse, []string, error)`) and `runTurnStreamWithFallback` (`(*providerResponse, []string, error)`). Both decode into `providerInvokeResult` (locally re-declared in `cmd_provider.go`) and forward the slice. `runChatTurnOnce` and the REPL's stream + non-stream branches now call `announceInject(cfg, prompt, len(injected))` *after* a successful RPC (was: pre-RPC, count-less, fired even on calls that would error). Failure paths skip the announce entirely — the RPC error message itself describes what went wrong. `announceInject`'s signature gains a `matched int` parameter; the format string becomes `[inject_context: query=%q matched=%d]`. Comment rewritten to capture the new contract: matched=0 still prints (retrieval ran, found nothing — that's a real signal), failure paths skip entirely. |
+| `SPEC.md` (modified, §6.1 expanded by ~12 lines) | The `daimon.provider.invoke` and `daimon.provider.stream` response signatures now show `{ response: ProviderResponse, injected_memory_ids?: string[] }` instead of bare `ProviderResponse`. The "notifications carry no id field" paragraph for stream now says the terminal response carries "the same envelope as `daimon.provider.invoke`". New paragraph beneath the streaming notification block: the optional `injected_memory_ids` field is OMITTED entirely (not present as an empty array) when `inject_context` was not supplied OR when retrieval ran but matched no memories; clients MUST treat absence and empty-array as equivalent for UX purposes. Pointer to SPEC §8.1 noting that the activity log payload carries the same IDs and is the durable record (the response field is a client-side convenience). |
+| `CHECKPOINT.md` (modified) | Phase line updated to mention the new envelope and the post-RPC `matched=N` annotation; build status updated (241 → 243 PASS lines, 49 → 51 server tests; previous breakdown's "25 ollama-chat" was off-by-one and is now correctly 24); item 24a crossed out as shipped; new item 26 added; "v0.1.x has zero no-external-dependency carry-overs remaining" line. |
+
+**Decisions held from the kickoff (no re-deliberation, exactly as locked):**
+
+- **Wrap, don't inline-extend.** The new `providerInvokeResult` struct nests `provider.Response` under `"response"` rather than adding `injected_memory_ids` as a sibling of `model`/`content`/`stop_reason`. Inline-extending would have required either custom `MarshalJSON` on the result type (to flatten ProviderResponse fields) or duplicating every ProviderResponse field on the result struct (DRY violation that breaks the moment ProviderResponse gains a new field). Wrap is cleaner; the chat REPL is the only in-tree client and it absorbs the one extra `.Response` dereference at four call sites.
+- **`omitempty` on `InjectedMemoryIDs`, not `[]string{}` on the wire.** A no-inject call serialises as `{"response": {...}}` with no `injected_memory_ids` key at all. SPEC §6.1 documents the absence-vs-empty-array equivalence for clients. Empty array on the wire would have leaked the inject_context-was-asked-but-matched-nothing case to the unary `daimon provider invoke` flow, which the user did not opt in to; absence keeps the no-inject path bytes-cleaner.
+- **Move announceInject from pre-RPC to post-RPC.** Pre-session, the line fired before the call even when the call would fail (e.g. unknown provider, locked daemon, network error to upstream). Post-session, it fires only on success and carries the actual count. One stderr line per successful turn, zero on failure — strictly less noise than the pre-session-24 design. The session-17 rationale ("the user should know when memory enters the wire") was fair when the line carried no post-RPC info; with the count, the natural place is after the response.
+- **Server-side wrapper struct, client-side mirror.** `internal/server/` is the type's home; `cmd/daimon/cmd_provider.go` re-declares the struct because cmd/daimon is a pure JSON-RPC client and importing internal/server's types would cross a package boundary the CLI has been careful not to cross since v0.1 (rpc.go has its own jsonrpcRequest/jsonrpcResponse for the same reason). Two declarations, one wire shape — proven by the test suite asserting both sides decode the same bytes.
+- **`provider invoke --verbose` enumerates IDs.** The locked plan called for "~5 lines" and that's what landed: the verbose footer gains an `[inject_context: matched=N]` header plus one bullet per ID. Useful for debugging which memories the daimon actually folded; bounded output (verbose mode is opt-in, the user already chose to see metadata). `--json` mode passes the raw envelope through transparently, so the IDs surface there naturally; default non-verbose mode prints just the assistant content (composability with `| jq` and `> out.txt` preserved).
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **Test count grew by exactly 2, not the kickoff's predicted 4.** The kickoff suggested two new tests for invoke (with + without inject) and two for stream (with + without inject). I folded the no-inject assertions into the existing `TestProviderInvoke_HappyPath`, `TestProviderInvoke_RawJSONShape`, and `TestProviderStream_HappyPath` rather than adding standalone "no inject" tests — the omitempty contract is best asserted alongside the happy path it pairs with, and adding two more stub tests would have been redundant. The two new tests that DO exist are the inject-positive cases, where the new field is the entire point. Coverage is the same, the test surface is denser.
+- **The `--once --json` path needed no change.** It decodes a `json.RawMessage` and re-emits it via `printJSON`; the new envelope shape passes through transparently. A user who wants the IDs from `--once --json` reads them off the JSON output's `injected_memory_ids` key. Less code to touch, fewer places for the wire shape to diverge between the two formats.
+- **`runTurnStream` failure path on no-Streamer continues to surface `isStreamUnsupported(err)`.** The CLI fallback to `daimon.provider.invoke` (the locked decision from session 18) still triggers correctly because the daemon's CodeNotFound + "does not support streaming" error fires before the new envelope is constructed. The fallback path then calls `runTurn` (unary), which also threads the slice — so the announce line still fires post-fallback with the right count. Tested via the live smoke against Ollama (which DOES support streaming) and the unit-test path that exercises the no-Streamer mock.
+- **The off-by-one in the previous CHECKPOINT's test count breakdown is now reconciled.** Pre-session 23's CHECKPOINT had "25 ollama-chat" but the actual was 24 (off by one), and "48 server" but the actual was 49 (off by one) — net zero, so the 241 total still matched. Post-session 24's breakdown is now precise: 9+30+17+12+51+12+17+22+24+30+12+7 = 243. Future sessions will inherit a clean baseline.
+
+**Test count:** 241 → 243 PASS lines (+2: both in `internal/server/`). All race-clean, all vet-clean, ~10s total run. `make build` clean.
+
+**Live smoke status (this session, against running Ollama):**
+
+```
+# Seeded two memories matching "huckgod"
+$ daimon memory write --kind fact "huckgod prefers olive green"
+01KQT0ESAFNM5E22SJDNVXC5F1
+$ daimon memory write --kind fact "huckgod runs Daimon on macOS"
+01KQT0ESARCT1XMFR2T01ZNEKV
+
+# Default inject_context (query = prompt) — Ollama embedder + cosine fall-through
+# happens to miss the substring at the prompt phrasing, but the explicit
+# --inject-query path nails it:
+$ daimon chat --once "what colour does huckgod prefer?" --provider ollama \
+    --stream=false --name smoke --inject-query "huckgod"
+According to the information provided earlier, Huckgod prefers olive green.
+[inject_context: query="huckgod" matched=2]
+
+# Streaming path — same envelope, same announce post-stream:
+$ daimon chat --once "favourite colour?" --provider ollama --stream \
+    --name smoke --inject-query "huckgod prefers"
+…streamed assistant content…
+[inject_context: query="huckgod prefers" matched=1]
+
+# No-inject path — silent (no [inject_context: ...] line):
+$ daimon chat --once "hi" --provider ollama --stream=false \
+    --no-inject-context --name smoke2
+How can I assist you today?
+
+# provider invoke --verbose enumerates the matched IDs:
+$ daimon provider invoke --verbose --inject-context=huckgod ollama \
+    "what colour does huckgod prefer?"
+Huckgod's preferred color is olive green.
+
+[model=llama3.2:latest stop=end_turn in=61 out=11]
+[inject_context: matched=2]
+  - 01KQT0ESARCT1XMFR2T01ZNEKV
+  - 01KQT0ESAFNM5E22SJDNVXC5F1
+```
+
+Four observable surfaces, four behaviours — all match the spec. The new envelope is wire-correct under both unary and streaming, the post-RPC announce fires only on success and carries the actual count, the no-inject path stays silent, and `--verbose` enumeration helps debug retrieval mismatches.
+
+**What this means in plain language:** before this session, a user running `daimon chat --inject-context …` saw `[inject_context: query="..."]` flash by before the answer with no indication of whether the daimon found anything. After this session, the line fires *after* the answer with the actual count — `matched=0` if retrieval found nothing, `matched=N` otherwise. For the unary `provider invoke --verbose`, the user can also see the exact ULIDs of the memories that ended up in the system prompt. The activity log was already capturing this information (since session 8), but it was buried — the user had to run `daimon.activity.query` to see it. Now it's part of the response, where the user is already looking.
+
+The structural property worth naming: **the daimon.provider.invoke and daimon.provider.stream response envelopes are now metadata-aware**. They carry not just "here's what the upstream provider said" but "here's what I (the daimon) did to enrich the prompt before the provider saw it". Future session-25+ work that wants to surface other mediation metadata (token counts of the injected block, retrieval scores, the §11 max_tokens budget actually used) has a natural home in this same envelope. The wire shape is now extensible without further breaking changes — new optional fields are additive.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (carry-over from session 21). Five minutes once huckgod's shell has LM Studio up locally with a model loaded. Closes both item 21's unary live round-trip AND session 21's streaming live half.
+2. **Live OpenAI streaming round-trip** (carry-over from session 20). Five minutes once `OPENAI_API_KEY` is real in shell env.
+3. **Live Claude streaming round-trip** (carry-over from session 19). Five minutes once `ANTHROPIC_API_KEY` is real in shell env.
+4. **The asciicast** (carry-over from session 16). Now compelling for **all four** adapters with token-by-token rendering, the at-rest confidentiality story (activity log is ciphertext on disk), AND the `matched=N` annotation that makes inject_context visible in the recording.
+5. **NLnet NGI Zero application** (carry-over from session 16). The application's "what does the daimon actually do for the user" answer is now strongest yet — every provider call enriches the prompt with explicit, audited memory injection, and the user sees how many memories were folded in real-time.
+
+**Next session begins with:** v0.1.x has zero no-external-dependency carry-overs remaining. The next milestone is the asciicast or the NLnet application — both blocked on huckgod's-shell-only constraints (real Anthropic/OpenAI keys, LM Studio running locally) that have been blocking the live round-trips since session 19. If a probe at next-session start finds any of (LM Studio up, OpenAI key real, Anthropic key real) the corresponding live round-trip closes in ~5 minutes; if none free up, the asciicast is the natural next pick — it can be recorded against Ollama alone and the script.md scaffolding from session 16 is ready.

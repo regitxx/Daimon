@@ -151,6 +151,19 @@ type providerResponse struct {
 	} `json:"usage"`
 }
 
+// providerInvokeResult is the CLI-side mirror of internal/server's same-named
+// struct. The wire shape for daimon.provider.invoke (and the terminal frame on
+// daimon.provider.stream) is {response: ProviderResponse, injected_memory_ids?: [...]}
+// since session 24 — the optional metadata field carries the IDs of memories
+// the daimon folded into the prompt via SPEC §11 inject_context, so the chat
+// REPL can render "matched=N" without round-tripping the memory store again.
+// We re-declare the type rather than importing internal/server because cmd/daimon
+// is a pure client.
+type providerInvokeResult struct {
+	Response          *providerResponse `json:"response"`
+	InjectedMemoryIDs []string          `json:"injected_memory_ids,omitempty"`
+}
+
 // cmdProviderInvoke calls daimon.provider.invoke and prints the assistant's
 // content to stdout. Metadata (model used, stop reason, token counts) goes
 // to stderr only when --verbose is set, so the default `daimon provider
@@ -227,15 +240,25 @@ func cmdProviderInvoke(args []string) error {
 		return printJSON(v)
 	}
 
-	var resp providerResponse
-	if err := daemonCall("daimon.provider.invoke", params, &resp); err != nil {
+	var env providerInvokeResult
+	if err := daemonCall("daimon.provider.invoke", params, &env); err != nil {
 		return err
 	}
+	if env.Response == nil {
+		return fmt.Errorf("daemon returned envelope with no response")
+	}
+	resp := env.Response
 	fmt.Println(resp.Content)
 	if *verbose {
 		fmt.Fprintf(os.Stderr,
 			"\n[model=%s stop=%s in=%d out=%d]\n",
 			resp.Model, resp.StopReason, resp.Usage.InputTokens, resp.Usage.OutputTokens)
+		if len(env.InjectedMemoryIDs) > 0 {
+			fmt.Fprintf(os.Stderr, "[inject_context: matched=%d]\n", len(env.InjectedMemoryIDs))
+			for _, id := range env.InjectedMemoryIDs {
+				fmt.Fprintf(os.Stderr, "  - %s\n", id)
+			}
+		}
 	}
 	return nil
 }

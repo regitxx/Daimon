@@ -461,6 +461,20 @@ type providerInvokeParams struct {
 	InjectContext *providerInjectContext `json:"inject_context,omitempty"`
 }
 
+// providerInvokeResult is the wire shape returned by daimon.provider.invoke
+// AND daimon.provider.stream's terminal response. The provider.Response is
+// nested under "response" (one extra wrapping level vs. the bare-response wire
+// shape Daimon used through session 23) so the daimon can surface mediation
+// metadata — the IDs of memories that were folded into the prompt via SPEC §11
+// inject_context — alongside the raw provider reply. omitempty on
+// InjectedMemoryIDs means a no-inject-context call serialises as
+// {"response": {...}} with no metadata key, preserving the principle that the
+// envelope only carries fields the daimon actually has something to say about.
+type providerInvokeResult struct {
+	Response          *provider.Response `json:"response"`
+	InjectedMemoryIDs []string           `json:"injected_memory_ids,omitempty"`
+}
+
 func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessage) (any, *RPCError) {
 	var p providerInvokeParams
 	if rpcErr := decodeParams(params, &p); rpcErr != nil {
@@ -526,7 +540,7 @@ func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessag
 		s.logf("activity append (provider.invoke %s): %v", p.Provider, err)
 	}
 
-	return resp, nil
+	return providerInvokeResult{Response: resp, InjectedMemoryIDs: injectedIDs}, nil
 }
 
 // --- daimon.provider.stream --------------------------------------------------
@@ -677,7 +691,7 @@ func (s *Server) handleProviderStream(ctx context.Context, enc *json.Encoder, he
 		s.logf("activity append (provider.stream %s): %v", p.Provider, err)
 	}
 
-	return enc.Encode(successResponse(head.ID, res.resp))
+	return enc.Encode(successResponse(head.ID, providerInvokeResult{Response: res.resp, InjectedMemoryIDs: injectedIDs}))
 }
 
 // streamNotification is the wire shape for a server-pushed JSON-RPC

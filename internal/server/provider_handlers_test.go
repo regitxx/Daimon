@@ -180,14 +180,20 @@ func TestProviderInvoke_HappyPath(t *testing.T) {
 			"messages": []map[string]any{{"role": "user", "content": "hi"}},
 		},
 	})
-	var out provider.Response
+	var out providerInvokeResult
 	resultAs(t, resp, &out)
 
-	if out.Content != "hi back" {
-		t.Errorf("content: got %q", out.Content)
+	if out.Response == nil {
+		t.Fatal("response is nil")
 	}
-	if out.StopReason != provider.StopReasonEndTurn {
-		t.Errorf("stop reason: got %q", out.StopReason)
+	if out.Response.Content != "hi back" {
+		t.Errorf("content: got %q", out.Response.Content)
+	}
+	if out.Response.StopReason != provider.StopReasonEndTurn {
+		t.Errorf("stop reason: got %q", out.Response.StopReason)
+	}
+	if len(out.InjectedMemoryIDs) != 0 {
+		t.Errorf("expected no injected_memory_ids without inject_context, got %v", out.InjectedMemoryIDs)
 	}
 	if f.mock.lastReq.Model != "mock-1" {
 		t.Errorf("last req model: got %q", f.mock.lastReq.Model)
@@ -387,6 +393,56 @@ func TestProviderInvoke_InjectContextEnrichesSystem(t *testing.T) {
 	}
 }
 
+// TestProviderInvoke_RPCResponseSurfacesInjectedMemoryIDs proves the session-24
+// wire-shape change: when inject_context retrieval matches one or more memories,
+// the daimon.provider.invoke RPC response's envelope MUST carry their IDs in
+// the optional injected_memory_ids field. This is what lets the chat REPL
+// print "[inject_context: query=... matched=N]" without having to re-query the
+// memory store. The activity log already records the same IDs (the principal-
+// side audit trail is the source of truth); this test guards the client-side
+// surface that depends on the response shape.
+func TestProviderInvoke_RPCResponseSurfacesInjectedMemoryIDs(t *testing.T) {
+	f := newFixtureWithProviders(t, true)
+	if _, err := f.mem.Write(context.Background(), memory.WriteRequest{
+		Kind:    memory.KindFact,
+		Content: "huckgod runs Daimon on macOS",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.mem.Write(context.Background(), memory.WriteRequest{
+		Kind:    memory.KindPreference,
+		Content: "huckgod prefers vim",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	f.mock.resp = &provider.Response{Model: "mock-1", Content: "ok", StopReason: provider.StopReasonEndTurn}
+
+	resp := f.call(t, "daimon.provider.invoke", map[string]any{
+		"provider": "mock",
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "what do you know"}},
+		},
+		"inject_context": map[string]any{"query": "huckgod"},
+	})
+	if resp.Error != nil {
+		t.Fatalf("error: %+v", resp.Error)
+	}
+	var out providerInvokeResult
+	resultAs(t, resp, &out)
+	if out.Response == nil {
+		t.Fatal("response is nil")
+	}
+	if len(out.InjectedMemoryIDs) == 0 {
+		t.Fatal("expected injected_memory_ids to be populated when inject_context matches memories")
+	}
+	for _, id := range out.InjectedMemoryIDs {
+		if id == "" {
+			t.Errorf("injected_memory_ids contains empty string: %v", out.InjectedMemoryIDs)
+		}
+	}
+}
+
 func TestProviderInvoke_InjectContextWithEmptyOriginalSystem(t *testing.T) {
 	f := newFixtureWithProviders(t, true)
 	if _, err := f.mem.Write(context.Background(), memory.WriteRequest{
@@ -417,8 +473,12 @@ func TestProviderInvoke_InjectContextWithEmptyOriginalSystem(t *testing.T) {
 
 func TestProviderInvoke_RawJSONShape(t *testing.T) {
 	// Verify the wire shape one more time: the response result for invoke
-	// MUST be a provider.Response, not an envelope. This guards against a
-	// future refactor that wraps the response unintentionally.
+	// is the providerInvokeResult envelope — {"response": ProviderResponse,
+	// "injected_memory_ids"?: [...]}. The bare-ProviderResponse shape from
+	// sessions 7-23 was dropped in session 24 so the daimon can surface the
+	// IDs of memories that were folded into the prompt via inject_context.
+	// omitempty on injected_memory_ids: a no-inject-context call MUST NOT
+	// include the field at all.
 	f := newFixtureWithProviders(t, true)
 	f.mock.resp = &provider.Response{Model: "mock-1", Content: "hi", StopReason: provider.StopReasonEndTurn}
 
@@ -449,8 +509,16 @@ func TestProviderInvoke_RawJSONShape(t *testing.T) {
 	if err := json.NewDecoder(c).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	// The result MUST be an envelope with a nested "response" object.
+	if !contains(string(resp.Result), `"response":{`) {
+		t.Fatalf("expected envelope with nested response, got: %s", resp.Result)
+	}
 	if !contains(string(resp.Result), `"content":"hi"`) {
-		t.Fatalf("response shape unexpected: %s", resp.Result)
+		t.Fatalf("response content not present: %s", resp.Result)
+	}
+	// omitempty: no inject_context was set, so the field must not be present.
+	if contains(string(resp.Result), `"injected_memory_ids"`) {
+		t.Fatalf("envelope must omit injected_memory_ids when no inject_context: %s", resp.Result)
 	}
 }
 

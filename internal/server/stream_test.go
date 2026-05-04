@@ -204,18 +204,92 @@ func TestProviderStream_HappyPath(t *testing.T) {
 			t.Errorf("delta[%d]: got %q, want %q", i, got[i], w)
 		}
 	}
-	var resp provider.Response
-	if err := json.Unmarshal(final.Result, &resp); err != nil {
+	var env providerInvokeResult
+	if err := json.Unmarshal(final.Result, &env); err != nil {
 		t.Fatalf("unmarshal final: %v", err)
 	}
-	if resp.Content != "Hello, world." {
-		t.Errorf("final content: got %q", resp.Content)
+	if env.Response == nil {
+		t.Fatal("final response is nil")
 	}
-	if resp.StopReason != provider.StopReasonEndTurn {
-		t.Errorf("stop reason: got %q", resp.StopReason)
+	if env.Response.Content != "Hello, world." {
+		t.Errorf("final content: got %q", env.Response.Content)
 	}
-	if resp.Usage.InputTokens != 5 || resp.Usage.OutputTokens != 7 {
-		t.Errorf("usage: got %+v", resp.Usage)
+	if env.Response.StopReason != provider.StopReasonEndTurn {
+		t.Errorf("stop reason: got %q", env.Response.StopReason)
+	}
+	if env.Response.Usage.InputTokens != 5 || env.Response.Usage.OutputTokens != 7 {
+		t.Errorf("usage: got %+v", env.Response.Usage)
+	}
+	// omitempty: no inject_context, so no injected_memory_ids on the wire.
+	if !contains(string(final.Result), `"response":{`) {
+		t.Errorf("expected envelope with nested response, got: %s", final.Result)
+	}
+	if contains(string(final.Result), `"injected_memory_ids"`) {
+		t.Errorf("envelope must omit injected_memory_ids when no inject_context: %s", final.Result)
+	}
+	if len(env.InjectedMemoryIDs) != 0 {
+		t.Errorf("expected empty injected_memory_ids slice, got %v", env.InjectedMemoryIDs)
+	}
+}
+
+// TestProviderStream_RPCResponseSurfacesInjectedMemoryIDs is the streaming
+// counterpart to provider_handlers_test's TestProviderInvoke_RPCResponseSurfacesInjectedMemoryIDs.
+// Same property: when inject_context retrieval matches, the terminal response
+// envelope on daimon.provider.stream MUST carry the matched IDs so the chat
+// REPL's `--stream` path renders the same matched=N annotation as the unary
+// path.
+func TestProviderStream_RPCResponseSurfacesInjectedMemoryIDs(t *testing.T) {
+	f := newFixtureWithStreamer(t)
+	if _, err := f.mem.Write(context.Background(), memory.WriteRequest{
+		Kind:    memory.KindFact,
+		Content: "huckgod runs Daimon on macOS",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := net.Dial("unix", f.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if err := json.NewEncoder(c).Encode(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      "stream-inject",
+		"method":  "daimon.provider.stream",
+		"params": map[string]any{
+			"provider": "mockstream",
+			"request": map[string]any{
+				"model":    "m-1",
+				"messages": []map[string]any{{"role": "user", "content": "hi"}},
+			},
+			"inject_context": map[string]any{"query": "huckgod"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dec := json.NewDecoder(c)
+	var final streamFrame
+	for {
+		fr := readFrame(t, dec)
+		if !fr.isNotification() {
+			final = fr
+			break
+		}
+	}
+	if final.Error != nil {
+		t.Fatalf("stream error: %+v", final.Error)
+	}
+	var env providerInvokeResult
+	if err := json.Unmarshal(final.Result, &env); err != nil {
+		t.Fatalf("unmarshal final: %v", err)
+	}
+	if env.Response == nil {
+		t.Fatal("final response is nil")
+	}
+	if len(env.InjectedMemoryIDs) == 0 {
+		t.Fatal("expected injected_memory_ids on stream terminal response when inject_context matches")
 	}
 }
 
