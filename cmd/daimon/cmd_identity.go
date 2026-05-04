@@ -1,13 +1,9 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"syscall"
-
-	"github.com/regitxx/Daimon/internal/daimonhome"
 )
 
 // cmdIdentity routes the `identity` subcommand surface. v0.1 ships only `get`.
@@ -33,16 +29,8 @@ func cmdIdentity(args []string) error {
 func cmdIdentityGet(args []string) error {
 	fs := flag.NewFlagSet("daimon identity get", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	asJSON := fs.Bool("json", false, "emit the full result envelope as JSON")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	home, err := daimonhome.Resolve()
-	if err != nil {
-		return err
-	}
-	socket, _, err := daimonhome.SocketPath(home)
-	if err != nil {
 		return err
 	}
 
@@ -51,17 +39,11 @@ func cmdIdentityGet(args []string) error {
 		PublicKey  string   `json:"public_key"`
 		DIDMethods []string `json:"did_methods"`
 	}
-	if err := rpcCall(socket, "daimon.identity.get", nil, &result); err != nil {
-		if rpcErr, ok := asRPCError(err); ok && rpcErr.Code == codeIdentityLocked {
-			return fmt.Errorf("daemon is locked — run `daimon unlock` first")
-		}
-		// Daemon not running (no socket file, or stale file with no listener)
-		// is the common case after a fresh boot; reword the cryptic dial
-		// error into the actionable hint.
-		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
-			return fmt.Errorf("daemon not running — run `daimon unlock` first")
-		}
+	if err := daemonCall("daimon.identity.get", nil, &result); err != nil {
 		return err
+	}
+	if *asJSON {
+		return printJSON(result)
 	}
 	fmt.Printf("DID:          %s\n", result.DID)
 	fmt.Printf("Public key:   %s\n", result.PublicKey)

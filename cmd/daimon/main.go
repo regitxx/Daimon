@@ -9,15 +9,11 @@
 //
 //	daimon init      — provision a keystore in $DAIMON_HOME (run once)
 //	daimon unlock    — load the keystore (auto-spawns daimond if needed)
-//	daimon identity  — `identity get` post-unlock smoke test for v0.1
-//	daimon memory    — (lands in v0.1.x — wraps daimon.memory.{write,…})
-//	daimon provider  — (lands in v0.1.x — wraps daimon.provider.{list,invoke})
-//	daimon chat      — (lands in v0.1.x — wraps daimon.provider.invoke with
-//	                   conversation-state management)
-//
-// v0.1 ships init / unlock / identity get only — the lifecycle proof. The
-// remaining subcommands are mechanical wrappers over existing RPC methods and
-// fall out trivially once the lifecycle works.
+//	daimon identity  — identity.get post-unlock smoke test
+//	daimon memory    — write / read / list / search / delete / export / import
+//	daimon provider  — list / invoke (with optional SPEC §11 inject_context)
+//	daimon chat      — (v0.1.x — wraps provider.invoke with conversation
+//	                   state across CLI invocations)
 package main
 
 import (
@@ -41,6 +37,10 @@ func main() {
 		exitOnErr(cmdUnlock(args))
 	case "identity":
 		exitOnErr(cmdIdentity(args))
+	case "memory":
+		exitOnErr(cmdMemory(args))
+	case "provider":
+		exitOnErr(cmdProvider(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -64,6 +64,29 @@ Usage:
                             running. Prompts for the keystore password.
 
   daimon identity get       Print the principal's DID. Requires unlock.
+
+  daimon memory write       Append a memory row. Requires unlock.
+              --kind <fact|preference|observation|task> (required)
+              [--source <s>] [--metadata <json>] [--json] <content|->
+  daimon memory read        Print one memory by id.
+              [--json] <id>
+  daimon memory list        List recent memories (table).
+              [--kind <k>] [--limit <n>] [--json]
+  daimon memory search      Similarity search against a query.
+              [--kind <k>] [--limit <n>] [--json] <query>
+  daimon memory delete      Delete one memory by id.
+              [--json] <id>
+  daimon memory export      Emit a signed export document.
+              [--out <path>]
+  daimon memory import      Ingest a signed export document.
+              [--no-verify] [--json] <path|->
+
+  daimon provider list      List configured providers (table).
+              [--json]
+  daimon provider invoke    Call a provider; print assistant text on stdout.
+              [--model <id>] [--system <s>] [--temperature <f>]
+              [--max-tokens <n>] [--inject-context[=<query>]]
+              [--verbose] [--json] <provider> <prompt|->
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
