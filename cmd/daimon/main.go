@@ -12,8 +12,9 @@
 //	daimon identity  — identity.get post-unlock smoke test
 //	daimon memory    — write / read / list / search / delete / export / import
 //	daimon provider  — list / invoke (with optional SPEC §11 inject_context)
-//	daimon chat      — (v0.1.x — wraps provider.invoke with conversation
-//	                   state across CLI invocations)
+//	daimon chat      — conversational REPL with multi-turn history persisted
+//	                   as JSONL under $DAIMON_HOME/chat-sessions/, switchable
+//	                   provider mid-session, inject_context default on
 package main
 
 import (
@@ -41,6 +42,8 @@ func main() {
 		exitOnErr(cmdMemory(args))
 	case "provider":
 		exitOnErr(cmdProvider(args))
+	case "chat":
+		exitOnErr(cmdChat(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -87,6 +90,18 @@ Usage:
               [--model <id>] [--system <s>] [--temperature <f>]
               [--max-tokens <n>] [--inject-context[=<query>]]
               [--verbose] [--json] <provider> <prompt|->
+
+  daimon chat               Conversational REPL with multi-turn history.
+              --provider <name> (required)
+              [--model <id>] [--system <s>] [--temperature <f>]
+              [--max-tokens <n>] [--name <s>]
+              [--no-inject-context] [--inject-query <q>]
+              [--once <prompt|->] [--json]
+                            History always loads from
+                            $DAIMON_HOME/chat-sessions/<name>.jsonl
+                            (default name: 'current'). Provider can change
+                            mid-session — memory persists across switches.
+                            inject_context defaults ON.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
