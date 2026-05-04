@@ -251,7 +251,22 @@ daimon.provider.invoke({
     max_tokens?: number
   }
 }) → ProviderResponse
+
+daimon.provider.stream({   // identical params to invoke
+  provider: string,
+  request: ProviderRequest,
+  inject_context?: { query: string, max_tokens?: number }
+}) → ProviderResponse       // final accumulated response, on the request id
 ```
+
+`daimon.provider.stream` is parallel to `invoke` for adapters that can render output incrementally. While the call is in flight, the daimon emits zero or more JSON-RPC 2.0 server-pushed **notifications** on the same connection:
+
+```
+{"jsonrpc": "2.0", "method": "daimon.provider.stream.delta",
+ "params": {"content": "..."}}
+```
+
+Notifications carry no `id` field per JSON-RPC 2.0 — they precede the terminal response, which arrives on the original request's `id` and carries the fully accumulated `ProviderResponse` (model, content, stop_reason, usage, raw). Adapters that do not implement streaming return `CodeNotFound` with `"provider does not support streaming"`; clients SHOULD fall back to `daimon.provider.invoke` transparently. Streaming is opt-in per call: `invoke` remains the default unary contract.
 
 Provider credentials never leave daimon-core. Clients invoke providers *through* the daimon, not around it.
 

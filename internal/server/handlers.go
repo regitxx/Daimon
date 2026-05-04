@@ -17,10 +17,17 @@ import (
 )
 
 // Method names for the SPEC §6.1 surface. Constants exist for the names the
-// dispatcher special-cases (the locked-state gate); the rest live as string
-// literals in registerMethods because they have no out-of-table consumers.
+// dispatcher special-cases (the locked-state gate, the streaming branch in
+// handleConn); the rest live as string literals in registerMethods because
+// they have no out-of-table consumers.
 const (
 	methodIdentityUnlock = "daimon.identity.unlock"
+	methodProviderStream = "daimon.provider.stream"
+
+	// streamDeltaNotification is the JSON-RPC method on the server-pushed
+	// notifications emitted between request and final response. Per JSON-RPC
+	// 2.0 a notification has no id field; the params carry one Delta.
+	streamDeltaNotification = "daimon.provider.stream.delta"
 )
 
 // registerMethods wires the SPEC §6.1 surface to the bound primitives.
@@ -520,6 +527,166 @@ func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessag
 	}
 
 	return resp, nil
+}
+
+// --- daimon.provider.stream --------------------------------------------------
+
+// streamDeltaParams is the wire shape on each daimon.provider.stream.delta
+// notification. One field, one purpose: token-by-token text. Tool-call and
+// role-marker deltas live behind a future spec change (see SPEC §6.1).
+type streamDeltaParams struct {
+	Content string `json:"content"`
+}
+
+// handleProviderStream is the special-cased handler for daimon.provider.stream.
+// Unlike the regular methodHandler signature it owns the connection's encoder
+// directly so it can push N notifications followed by one final response on
+// the original request id, all on the same conn — exactly what JSON-RPC 2.0
+// permits for server-pushed notifications.
+//
+// Locking: handleConn calls this synchronously, before reading the next
+// request from the same conn. The conn's writer (json.Encoder) therefore has
+// exactly one user during the stream — the goroutine the consumer reads
+// from — so no mutex is required to keep notification frames from
+// interleaving with concurrent responses on the same conn (concurrency comes
+// from many conns, each with its own handler).
+//
+// Returns the encoder error (if any) so handleConn knows to drop the conn.
+func (s *Server) handleProviderStream(ctx context.Context, enc *json.Encoder, head Request) error {
+	// Locked-state gate, mirrored from dispatch — handleConn intercepted us
+	// before dispatch ran the gate.
+	if !s.unlocked.Load() {
+		if head.IsNotification() {
+			return nil
+		}
+		return enc.Encode(errorResponse(head.ID, newError(CodeIdentityLocked, "identity is locked", head.Method)))
+	}
+
+	if head.IsNotification() {
+		// A streaming notification (request without id) makes no sense — the
+		// caller is asking for a response stream. Drop silently to honour the
+		// notification-no-reply invariant.
+		return nil
+	}
+
+	var p providerInvokeParams
+	if rpcErr := decodeParams(head.Params, &p); rpcErr != nil {
+		return enc.Encode(errorResponse(head.ID, rpcErr))
+	}
+	if p.Provider == "" {
+		return enc.Encode(errorResponse(head.ID, newError(CodeInvalidParams, "provider is required")))
+	}
+	if s.providers == nil {
+		return enc.Encode(errorResponse(head.ID, newError(CodeNotFound, "no provider registry attached to this daimon")))
+	}
+	prov, err := s.providers.Get(p.Provider)
+	if err != nil {
+		return enc.Encode(errorResponse(head.ID, newError(CodeNotFound, err.Error())))
+	}
+	streamer, ok := prov.(provider.Streamer)
+	if !ok {
+		// Per the locked decision: don't silently fall back. The CLI is the
+		// layer that decides to retry against Invoke with a stderr note.
+		return enc.Encode(errorResponse(head.ID, newError(CodeNotFound,
+			"provider does not support streaming", p.Provider)))
+	}
+
+	req := p.Request
+	var injectedIDs []string
+	if p.InjectContext != nil {
+		ctxResult, rpcErr := s.runContextRetrieval(ctx, p.InjectContext.Query, p.InjectContext.MaxTokens, p.InjectContext.Kinds)
+		if rpcErr != nil {
+			return enc.Encode(errorResponse(head.ID, rpcErr))
+		}
+		if ctxResult.Context != "" {
+			if req.System != "" {
+				req.System = ctxResult.Context + "\n\n" + req.System
+			} else {
+				req.System = ctxResult.Context
+			}
+			injectedIDs = ctxResult.MemoryIDs
+		}
+	}
+
+	// streamCtx so we can stop the adapter's upstream call if the conn writer
+	// errors mid-stream (client went away, etc.) — the goroutine below cancels
+	// when it sees the encoder fail.
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	deltas := make(chan provider.Delta, 16)
+	type runResult struct {
+		resp *provider.Response
+		err  error
+	}
+	resultCh := make(chan runResult, 1)
+	start := time.Now()
+	go func() {
+		resp, err := streamer.Stream(streamCtx, req, deltas)
+		resultCh <- runResult{resp: resp, err: err}
+	}()
+
+	// Forward each delta as a notification. The adapter contract guarantees
+	// the channel is closed before Stream returns, so this loop exits.
+	// Notifications have no id field per JSON-RPC 2.0 — streamNotification
+	// is a dedicated envelope so the wire bytes are right.
+	for d := range deltas {
+		frame := streamNotification{
+			JSONRPC: JSONRPCVersion,
+			Method:  streamDeltaNotification,
+			Params:  streamDeltaParams{Content: d.Content},
+		}
+		if err := enc.Encode(frame); err != nil {
+			cancel()
+			// Drain the channel so the adapter goroutine's send doesn't
+			// deadlock on a buffer-full channel.
+			go func() {
+				for range deltas {
+				}
+			}()
+			<-resultCh
+			return err
+		}
+	}
+
+	res := <-resultCh
+	elapsed := time.Since(start)
+
+	if res.err != nil {
+		return enc.Encode(errorResponse(head.ID, newError(CodeInternalError,
+			fmt.Sprintf("provider.%s.stream: %v", p.Provider, res.err))))
+	}
+	if res.resp == nil {
+		return enc.Encode(errorResponse(head.ID, newError(CodeInternalError,
+			fmt.Sprintf("provider.%s.stream: nil response from adapter", p.Provider))))
+	}
+
+	logPayload := map[string]any{
+		"provider":      p.Provider,
+		"model":         res.resp.Model,
+		"input_tokens":  res.resp.Usage.InputTokens,
+		"output_tokens": res.resp.Usage.OutputTokens,
+		"stop_reason":   string(res.resp.StopReason),
+		"duration_ms":   elapsed.Milliseconds(),
+		"streamed":      true,
+	}
+	if len(injectedIDs) > 0 {
+		logPayload["injected_memory_ids"] = injectedIDs
+	}
+	if _, err := s.alog.Append(ctx, activity.KindProviderInvoke, logPayload); err != nil {
+		s.logf("activity append (provider.stream %s): %v", p.Provider, err)
+	}
+
+	return enc.Encode(successResponse(head.ID, res.resp))
+}
+
+// streamNotification is the wire shape for a server-pushed JSON-RPC
+// notification. Distinct from Response (which has an id field) — the absence
+// of "id" is what makes it a notification per JSON-RPC 2.0.
+type streamNotification struct {
+	JSONRPC string            `json:"jsonrpc"`
+	Method  string            `json:"method"`
+	Params  streamDeltaParams `json:"params"`
 }
 
 // --- daimon.activity.append --------------------------------------------------

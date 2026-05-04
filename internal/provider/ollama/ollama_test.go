@@ -520,3 +520,265 @@ func TestAdapter_ProbeRespectsContext(t *testing.T) {
 		t.Fatal("expected timeout error from probe")
 	}
 }
+
+// --- streaming ---------------------------------------------------------------
+
+// streamServer routes /api/tags to the canonical fixture and /api/chat to a
+// custom handler the test supplies so it can stream NDJSON, write malformed
+// frames, or hang to exercise context cancellation.
+func streamServer(t *testing.T, chatHandler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, tagsBody)
+		case "/api/chat":
+			chatHandler(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+// chatStreamFrames is the canonical NDJSON shape Ollama emits with
+// stream:true: one frame per generated chunk, terminated by a frame with
+// done:true that carries the usage counters and done_reason.
+const chatStreamFrames = `{"model":"llama3.2:latest","created_at":"2026-05-04T12:00:00Z","message":{"role":"assistant","content":"Hello"},"done":false}
+{"model":"llama3.2:latest","created_at":"2026-05-04T12:00:00Z","message":{"role":"assistant","content":", "},"done":false}
+{"model":"llama3.2:latest","created_at":"2026-05-04T12:00:00Z","message":{"role":"assistant","content":"world."},"done":false}
+{"model":"llama3.2:latest","created_at":"2026-05-04T12:00:00Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":12,"eval_count":3}
+`
+
+func TestAdapter_StreamHappyPath(t *testing.T) {
+	var capture ollamaChatCapture
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &capture)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, chatStreamFrames)
+	})
+	defer srv.Close()
+
+	a, err := ollama.New(context.Background(), ollama.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+
+	deltas := make(chan provider.Delta, 16)
+	var got []string
+	done := make(chan struct{})
+	go func() {
+		for d := range deltas {
+			got = append(got, d.Content)
+		}
+		close(done)
+	}()
+
+	resp, err := a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2:latest",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err != nil {
+		t.Fatalf("stream: %v", err)
+	}
+	<-done
+
+	if !capture.Stream {
+		t.Errorf("outbound stream flag: got %v, want true", capture.Stream)
+	}
+	wantDeltas := []string{"Hello", ", ", "world."}
+	if len(got) != len(wantDeltas) {
+		t.Fatalf("delta count: got %d (%v), want %d", len(got), got, len(wantDeltas))
+	}
+	for i, w := range wantDeltas {
+		if got[i] != w {
+			t.Errorf("delta[%d]: got %q, want %q", i, got[i], w)
+		}
+	}
+	if resp.Content != "Hello, world." {
+		t.Errorf("accumulated content: got %q", resp.Content)
+	}
+	if resp.StopReason != provider.StopReasonEndTurn {
+		t.Errorf("stop reason: got %q", resp.StopReason)
+	}
+	if resp.Usage.InputTokens != 12 || resp.Usage.OutputTokens != 3 {
+		t.Errorf("usage: got %+v", resp.Usage)
+	}
+	if resp.Model != "llama3.2:latest" {
+		t.Errorf("model: got %q", resp.Model)
+	}
+	if len(resp.Raw) == 0 {
+		t.Errorf("raw should carry the terminal frame")
+	}
+}
+
+func TestAdapter_StreamCancellation(t *testing.T) {
+	// Server emits one frame, then hangs forever. The test cancels mid-stream
+	// and asserts Stream returns promptly with the ctx error and the channel
+	// closes — no goroutine leak, no continued upstream consumption.
+	gate := make(chan struct{})
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer does not flush — test cannot stream")
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = io.WriteString(w, `{"model":"llama3.2:latest","message":{"role":"assistant","content":"first"},"done":false}`+"\n")
+		flusher.Flush()
+		<-gate
+		<-r.Context().Done()
+	})
+	defer srv.Close()
+	defer close(gate)
+
+	a, err := ollama.New(context.Background(), ollama.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		// Drain the first delta then cancel.
+		<-deltas
+		cancel()
+		// Continue draining so the sender doesn't block on a full channel
+		// during shutdown — for the case where another delta is mid-flight.
+		for range deltas {
+		}
+	}()
+
+	doneAt := make(chan time.Time, 1)
+	go func() {
+		_, _ = a.Stream(ctx, provider.Request{
+			Model:    "llama3.2:latest",
+			Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+		}, deltas)
+		doneAt <- time.Now()
+	}()
+
+	select {
+	case <-doneAt:
+		// expected — Stream returned within the deadline
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stream did not return after ctx cancellation")
+	}
+}
+
+func TestAdapter_StreamMalformedFrame(t *testing.T) {
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w,
+			`{"model":"llama3.2:latest","message":{"role":"assistant","content":"ok"},"done":false}`+"\n"+
+				`{not json at all}`+"\n",
+		)
+	})
+	defer srv.Close()
+
+	a, err := ollama.New(context.Background(), ollama.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 8)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2:latest",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error on malformed NDJSON")
+	}
+	if !strings.Contains(err.Error(), "decode stream frame") {
+		t.Errorf("error should mention frame decode: %v", err)
+	}
+}
+
+func TestAdapter_StreamMissingTerminalFrame(t *testing.T) {
+	// Stream cuts off without ever sending done:true. Adapter should error
+	// rather than return a partial Response — callers expect the final frame
+	// to populate stop_reason and usage.
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w,
+			`{"model":"llama3.2:latest","message":{"role":"assistant","content":"only"},"done":false}`+"\n",
+		)
+	})
+	defer srv.Close()
+	a, err := ollama.New(context.Background(), ollama.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "llama3.2:latest",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error when stream ends without done:true")
+	}
+}
+
+func TestAdapter_StreamHTTPError(t *testing.T) {
+	srv := streamServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "model not found", http.StatusNotFound)
+	})
+	defer srv.Close()
+	a, err := ollama.New(context.Background(), ollama.WithEndpoint(srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 4)
+	go func() {
+		for range deltas {
+		}
+	}()
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model:    "wat",
+		Messages: []provider.Message{{Role: provider.RoleUser, Content: "hi"}},
+	}, deltas)
+	if err == nil {
+		t.Fatal("expected error on non-2xx status")
+	}
+}
+
+func TestAdapter_StreamEmptyMessagesRejected(t *testing.T) {
+	a, err := ollama.New(context.Background(),
+		ollama.WithEndpoint("http://127.0.0.1:1"),
+		ollama.WithModels([]provider.Model{{ID: "x"}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deltas := make(chan provider.Delta, 1)
+	_, err = a.Stream(context.Background(), provider.Request{
+		Model: "x",
+	}, deltas)
+	if !errors.Is(err, ollama.ErrEmptyMessages) {
+		t.Errorf("err: got %v, want %v", err, ollama.ErrEmptyMessages)
+	}
+	// Channel should still be closed on the early-return path.
+	if _, ok := <-deltas; ok {
+		t.Error("deltas channel should be closed on early error")
+	}
+}
+
+// TestAdapter_StreamerInterface verifies the type assertion the server uses
+// before dispatching daimon.provider.stream succeeds — wire-shape regression
+// guard for future refactors that might split the adapter.
+func TestAdapter_StreamerInterface(t *testing.T) {
+	a, err := ollama.New(context.Background(),
+		ollama.WithEndpoint("http://127.0.0.1:1"),
+		ollama.WithModels([]provider.Model{{ID: "x"}}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := provider.Provider(a).(provider.Streamer); !ok {
+		t.Fatal("ollama.Adapter must implement provider.Streamer")
+	}
+}

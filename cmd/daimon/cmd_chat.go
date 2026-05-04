@@ -45,6 +45,11 @@ func cmdChat(args []string) error {
 	noInject := fs.Bool("no-inject-context", false, "disable SPEC §11 memory retrieval (default: enabled)")
 	injectQuery := fs.String("inject-query", "", "explicit retrieval query (default: each user prompt)")
 	asJSON := fs.Bool("json", false, "emit each response envelope as JSON (one-shot only; ignored in REPL)")
+	// Tri-state flag: unset → mode-specific default (REPL on, --once off);
+	// explicit --stream / --stream=false honours the user's call. Implemented
+	// via a custom Var so we can detect "user did not pass it".
+	stream := newStreamFlag()
+	fs.Var(stream, "stream", "stream tokens via daimon.provider.stream (default: on for REPL, off for --once)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -94,6 +99,7 @@ func cmdChat(args []string) error {
 		maxTokens:   *maxTokens,
 		inject:      !*noInject,
 		injectQuery: *injectQuery,
+		stream:      stream.resolve(*once == ""),
 	}
 
 	f, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -138,6 +144,52 @@ type chatConfig struct {
 	maxTokens   int
 	inject      bool
 	injectQuery string
+	stream      bool
+}
+
+// streamFlag is a tri-state stdlib-flag value: when the user does not pass
+// --stream, resolve() falls back to the mode-specific default (REPL on,
+// --once off); when they pass --stream / --stream=true / --stream=false the
+// explicit value wins. We can't use *bool because flag's BoolVar conflates
+// "default false" with "explicitly set to false".
+type streamFlag struct {
+	set   bool
+	value bool
+}
+
+func newStreamFlag() *streamFlag { return &streamFlag{} }
+
+func (f *streamFlag) String() string {
+	if f == nil {
+		return ""
+	}
+	if f.value {
+		return "true"
+	}
+	return "false"
+}
+
+func (f *streamFlag) Set(s string) error {
+	switch strings.ToLower(s) {
+	case "true", "1", "yes", "on":
+		f.set, f.value = true, true
+	case "false", "0", "no", "off":
+		f.set, f.value = true, false
+	default:
+		return fmt.Errorf("--stream: expected true|false, got %q", s)
+	}
+	return nil
+}
+
+func (f *streamFlag) IsBoolFlag() bool { return true }
+
+// resolve returns the effective value: explicit when set, otherwise the
+// supplied per-mode default (true for REPL, false for --once).
+func (f *streamFlag) resolve(defaultOn bool) bool {
+	if f == nil || !f.set {
+		return defaultOn
+	}
+	return f.value
 }
 
 // --- session I/O -------------------------------------------------------------
@@ -242,45 +294,12 @@ func renderResumedHistory(history []chatTurn) {
 // always a coherent sequence of (user, assistant) pairs, which keeps
 // `--resume`'s messages[] reconstruction honest. Audit visibility for
 // failed calls is the activity log's job, not the chat file's.
+//
+// Streaming flows through runTurnStream below; this function is the
+// buffered/unary path used for one-shot scripting and as the fallback when
+// the chosen provider does not implement Streamer.
 func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*providerResponse, json.RawMessage, error) {
-	now := time.Now().UnixMilli()
-	userTurn := chatTurn{
-		Role:    "user",
-		Content: prompt,
-		TS:      now,
-	}
-
-	// Build messages[] from history + this user turn, but don't commit the
-	// turn to history or the file until the RPC succeeds.
-	msgs := make([]providerMessage, 0, len(*history)+1)
-	for _, t := range *history {
-		msgs = append(msgs, providerMessage{Role: t.Role, Content: t.Content})
-	}
-	msgs = append(msgs, providerMessage{Role: userTurn.Role, Content: userTurn.Content})
-
-	req := providerRequest{
-		Model:    cfg.model,
-		Messages: msgs,
-		System:   cfg.system,
-	}
-	if cfg.maxTokens > 0 {
-		req.MaxTokens = cfg.maxTokens
-	}
-	if cfg.temperature != nil {
-		req.Temperature = cfg.temperature
-	}
-
-	params := providerInvokeParams{
-		Provider: cfg.provider,
-		Request:  req,
-	}
-	if cfg.inject {
-		q := cfg.injectQuery
-		if q == "" {
-			q = prompt
-		}
-		params.InjectContext = &injectContextWire{Query: q}
-	}
+	userTurn, params := buildTurnRequest(*history, cfg, prompt)
 
 	var raw json.RawMessage
 	if err := daemonCall("daimon.provider.invoke", params, &raw); err != nil {
@@ -291,21 +310,102 @@ func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*
 		return nil, nil, fmt.Errorf("parse response: %w", err)
 	}
 
+	if err := persistTurnPair(w, history, userTurn, &resp, cfg.provider); err != nil {
+		return nil, nil, err
+	}
+	return &resp, raw, nil
+}
+
+// runTurnStream mirrors runTurn but invokes daimon.provider.stream and calls
+// onDelta for each token-fragment as it arrives. The terminal *Response is
+// the same shape Invoke returns. Persistence rules match runTurn — only on
+// success, both turns committed atomically.
+//
+// On a "provider does not support streaming" error (CodeNotFound + the
+// canonical message), runTurnStream surfaces a sentinel that the caller can
+// translate into a transparent fallback to runTurn — the locked decision
+// puts the fallback choice in the CLI, not the server.
+func runTurnStream(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, error) {
+	userTurn, params := buildTurnRequest(*history, cfg, prompt)
+
+	var resp providerResponse
+	if err := daemonStream("daimon.provider.stream", params, onDelta, &resp); err != nil {
+		return nil, err
+	}
+	if err := persistTurnPair(w, history, userTurn, &resp, cfg.provider); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// buildTurnRequest produces the user turn and the provider invoke params for
+// one cycle. Shared by streaming and unary paths so the wire shape is
+// identical — the only difference between the two is the RPC method name.
+func buildTurnRequest(history []chatTurn, cfg chatConfig, prompt string) (chatTurn, providerInvokeParams) {
+	userTurn := chatTurn{
+		Role:    "user",
+		Content: prompt,
+		TS:      time.Now().UnixMilli(),
+	}
+	msgs := make([]providerMessage, 0, len(history)+1)
+	for _, t := range history {
+		msgs = append(msgs, providerMessage{Role: t.Role, Content: t.Content})
+	}
+	msgs = append(msgs, providerMessage{Role: userTurn.Role, Content: userTurn.Content})
+
+	req := providerRequest{Model: cfg.model, Messages: msgs, System: cfg.system}
+	if cfg.maxTokens > 0 {
+		req.MaxTokens = cfg.maxTokens
+	}
+	if cfg.temperature != nil {
+		req.Temperature = cfg.temperature
+	}
+	params := providerInvokeParams{Provider: cfg.provider, Request: req}
+	if cfg.inject {
+		q := cfg.injectQuery
+		if q == "" {
+			q = prompt
+		}
+		params.InjectContext = &injectContextWire{Query: q}
+	}
+	return userTurn, params
+}
+
+// persistTurnPair writes the user + assistant turns to the session JSONL and
+// appends them to the in-memory history slice. Atomic from the caller's
+// perspective — either both lines land or neither (the session file is
+// append-only, so a partial write would only ever truncate the assistant
+// line, which loadChatSession's per-line parser handles by returning the
+// truncated line as a parse error on next load).
+func persistTurnPair(w io.Writer, history *[]chatTurn, userTurn chatTurn, resp *providerResponse, providerName string) error {
 	astTurn := chatTurn{
 		Role:     "assistant",
 		Content:  resp.Content,
 		TS:       time.Now().UnixMilli(),
-		Provider: cfg.provider,
+		Provider: providerName,
 		Model:    resp.Model,
 	}
 	if err := appendChatTurn(w, userTurn); err != nil {
-		return nil, nil, err
+		return err
 	}
 	if err := appendChatTurn(w, astTurn); err != nil {
-		return nil, nil, err
+		return err
 	}
 	*history = append(*history, userTurn, astTurn)
-	return &resp, raw, nil
+	return nil
+}
+
+// isStreamUnsupported reports whether err is the daemon's "provider does not
+// support streaming" rejection — used by the CLI fallback to retry against
+// daimon.provider.invoke transparently. We match on the message text rather
+// than the code (which is shared with "unknown provider") because the
+// fallback is only safe for the streaming-unsupported case.
+func isStreamUnsupported(err error) bool {
+	rpc, ok := asRPCError(err)
+	if !ok {
+		return false
+	}
+	return rpc.Code == codeNotFound && strings.Contains(rpc.Message, "does not support streaming")
 }
 
 // --- one-shot mode -----------------------------------------------------------
@@ -316,9 +416,25 @@ func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*
 // signalled to stderr only when --json is off (otherwise we'd corrupt the JSON
 // on stdout consumers... actually stderr is separate, but keeping it quiet in
 // --json mode matches `provider invoke --verbose` discipline).
+//
+// When cfg.stream is on (user passed --stream to a --once invocation),
+// tokens print as they arrive instead of one buffered Println. --json
+// disables streaming because the JSON envelope only exists at terminal time.
 func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, asJSON bool) error {
 	if cfg.inject && !asJSON {
 		announceInject(cfg, prompt)
+	}
+	if cfg.stream && !asJSON {
+		resp, err := runTurnStreamWithFallback(w, history, cfg, prompt, func(chunk string) {
+			fmt.Print(chunk)
+		})
+		if err != nil {
+			fmt.Println()
+			return err
+		}
+		_ = resp
+		fmt.Println()
+		return nil
 	}
 	resp, raw, err := runTurn(w, history, cfg, prompt)
 	if err != nil {
@@ -333,6 +449,30 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 	}
 	fmt.Println(resp.Content)
 	return nil
+}
+
+// runTurnStreamWithFallback wraps runTurnStream with the locked CLI-side
+// behaviour: if the daemon reports the chosen provider does not support
+// streaming, drop to runTurn transparently after a one-line stderr note.
+// Buffered output happens after the announcement so the user sees the same
+// content shape in both modes.
+func runTurnStreamWithFallback(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, error) {
+	resp, err := runTurnStream(w, history, cfg, prompt, onDelta)
+	if err == nil {
+		return resp, nil
+	}
+	if !isStreamUnsupported(err) {
+		return nil, err
+	}
+	fmt.Fprintf(os.Stderr, "[stream: %s does not support streaming, falling back to invoke]\n", cfg.provider)
+	r, _, err := runTurn(w, history, cfg, prompt)
+	if err != nil {
+		return nil, err
+	}
+	// Replay the buffered content through onDelta so the caller's stdout
+	// rendering still produces the assistant turn.
+	onDelta(r.Content)
+	return r, nil
 }
 
 // --- REPL --------------------------------------------------------------------
@@ -353,6 +493,11 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 		fmt.Fprintln(os.Stderr, "inject_context: on (memory retrieval before each call) — pass --no-inject-context to disable")
 	} else {
 		fmt.Fprintln(os.Stderr, "inject_context: off")
+	}
+	if cfg.stream {
+		fmt.Fprintln(os.Stderr, "stream: on (token-by-token rendering) — pass --stream=false to disable")
+	} else {
+		fmt.Fprintln(os.Stderr, "stream: off")
 	}
 	fmt.Fprintln(os.Stderr, "Ctrl+D to exit, /help for commands.")
 
@@ -383,6 +528,27 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 		}
 		if cfg.inject {
 			announceInject(cfg, line)
+		}
+		if cfg.stream {
+			// Print the prefix once, then each delta inline; trailing newline
+			// closes the assistant line. Errors mid-stream still print a
+			// newline so the next "you> " prompt isn't glued to a half-line.
+			tagPrefix := fmt.Sprintf("[%s]: ", cfg.provider)
+			fmt.Print(tagPrefix)
+			resp, err := runTurnStreamWithFallback(w, history, cfg, line, func(chunk string) {
+				fmt.Print(chunk)
+			})
+			fmt.Println()
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				continue
+			}
+			// If the model field arrived from the daemon, refine the prefix
+			// retrospectively for /history's benefit. (Not retroactively
+			// rewriting stdout; the persisted assistant turn already carries
+			// the model.)
+			_ = resp
+			continue
 		}
 		resp, _, err := runTurn(w, history, cfg, line)
 		if err != nil {

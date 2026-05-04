@@ -31,13 +31,38 @@ func daemonCall(method string, params, out any) error {
 		return err
 	}
 	if err := rpcCall(socket, method, params, out); err != nil {
-		if rpcErr, ok := asRPCError(err); ok && rpcErr.Code == codeIdentityLocked {
-			return fmt.Errorf("daemon is locked — run `daimon unlock` first")
-		}
-		if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
-			return fmt.Errorf("daemon not running — run `daimon unlock` first")
-		}
-		return err
+		return humaniseDaemonErr(err)
 	}
 	return nil
+}
+
+// daemonStream is the streaming companion to daemonCall: same socket
+// resolution, same error humanisation, but reads N notifications via
+// onDelta before unmarshalling the terminal response into out.
+func daemonStream(method string, params any, onDelta func(string), out any) error {
+	home, err := daimonhome.Resolve()
+	if err != nil {
+		return err
+	}
+	socket, _, err := daimonhome.SocketPath(home)
+	if err != nil {
+		return err
+	}
+	if err := rpcStream(socket, method, params, onDelta, out); err != nil {
+		return humaniseDaemonErr(err)
+	}
+	return nil
+}
+
+// humaniseDaemonErr is the shared rewrite of the two failure modes a user is
+// likely to hit — daemon not running, daemon running but locked — into the
+// actionable hint surfaced everywhere `daemon unlock` is the answer.
+func humaniseDaemonErr(err error) error {
+	if rpcErr, ok := asRPCError(err); ok && rpcErr.Code == codeIdentityLocked {
+		return fmt.Errorf("daemon is locked — run `daimon unlock` first")
+	}
+	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
+		return fmt.Errorf("daemon not running — run `daimon unlock` first")
+	}
+	return err
 }

@@ -282,6 +282,13 @@ func (s *Server) Close() error {
 // handleConn reads JSON-RPC requests from c serially and writes responses
 // back. A single connection processes one request at a time; concurrency
 // across clients comes from many connections.
+//
+// The streaming method (daimon.provider.stream) is special-cased: it is the
+// only handler that needs to push multiple frames (one notification per
+// delta, then the final response) before the conn can read the next request.
+// We dispatch it inline so the writer here remains the sole writer to the
+// conn, which preserves the single-writer-per-connection invariant without
+// needing a mutex on the encoder.
 func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 	defer c.Close()
 
@@ -303,6 +310,19 @@ func (s *Server) handleConn(ctx context.Context, c net.Conn) {
 			// connection — we have no way to resync the JSON stream.
 			_ = enc.Encode(parseErrorResponse(err.Error()))
 			return
+		}
+
+		// Quick first parse: we need the method name to decide between the
+		// streaming and non-streaming paths. A second pass inside dispatch /
+		// handleProviderStream pulls out params and id; this is cheap because
+		// json.Unmarshal stops at the first level.
+		var head Request
+		if err := json.Unmarshal(raw, &head); err == nil && head.Method == methodProviderStream {
+			if err := s.handleProviderStream(ctx, enc, head); err != nil {
+				s.logf("write stream response: %v", err)
+				return
+			}
+			continue
 		}
 
 		resp := s.dispatch(ctx, raw)

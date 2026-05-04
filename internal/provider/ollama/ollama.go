@@ -23,6 +23,7 @@
 package ollama
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -31,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/regitxx/Daimon/internal/provider"
@@ -202,6 +204,134 @@ func (a *Adapter) Invoke(ctx context.Context, req provider.Request) (*provider.R
 			OutputTokens: parsed.EvalCount,
 		},
 		Raw: respBody,
+	}, nil
+}
+
+// Stream posts the normalized request to /api/chat with stream:true, parses
+// the NDJSON line-by-line, sends each non-empty content fragment as a Delta,
+// and returns the accumulated provider.Response when the terminal frame
+// (done:true) arrives. Honours ctx via http.NewRequestWithContext — cancelling
+// ctx mid-stream causes the upstream Read to fail with the ctx error and
+// Stream returns promptly.
+//
+// The deltas channel is closed before Stream returns under all paths
+// (success, error, context cancellation) so the consumer's range loop
+// terminates cleanly. Channel ownership: caller creates and consumes; Stream
+// is sole sender and sole closer.
+func (a *Adapter) Stream(ctx context.Context, req provider.Request, deltas chan<- provider.Delta) (*provider.Response, error) {
+	defer close(deltas)
+
+	if len(req.Messages) == 0 {
+		return nil, ErrEmptyMessages
+	}
+	if req.Model == "" && len(a.models) > 0 {
+		req.Model = a.models[0].ID
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = DefaultMaxTokens
+	}
+
+	body := chatRequest{
+		Model:    req.Model,
+		Messages: toOllamaMessages(req.System, req.Messages),
+		Stream:   true,
+		Options:  buildOptions(req.Temperature, maxTokens, req.StopSeqs),
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: marshal request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+chatPath, bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("ollama: build request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	resp, err := a.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("ollama: do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Drain a bounded prefix for the error message; don't try to consume
+		// an arbitrary error body.
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("ollama: http %d: %s", resp.StatusCode, truncateForError(errBody))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	// Tokens of substantial size occasionally arrive on the same NDJSON line
+	// (long single-token outputs, or merged buffer flushes). 1 MiB is the
+	// same ceiling chat-session loading uses.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+
+	var (
+		accumulated strings.Builder
+		final       chatResponse
+		lastRaw     []byte
+		seenTerminal bool
+	)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		// Bail out if the caller cancelled — don't burn through buffered
+		// upstream bytes the user no longer wants.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var frame chatResponse
+		if err := json.Unmarshal(line, &frame); err != nil {
+			return nil, fmt.Errorf("ollama: decode stream frame: %w (line: %s)", err, truncateForError(line))
+		}
+		if frame.Error != "" {
+			return nil, fmt.Errorf("ollama: stream error: %s", frame.Error)
+		}
+		// Record the most recent raw frame so the final Response can carry it
+		// — Ollama's terminal frame is the one with the usage counters and
+		// done_reason that callers care about.
+		lastRaw = append(lastRaw[:0], line...)
+
+		if frame.Message.Content != "" {
+			accumulated.WriteString(frame.Message.Content)
+			// Block until the consumer takes the delta or ctx fires; this is
+			// the back-pressure point that lets a slow CLI throttle Ollama.
+			select {
+			case deltas <- provider.Delta{Content: frame.Message.Content}:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		if frame.Done {
+			final = frame
+			seenTerminal = true
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		// ctx cancellation surfaces here as a wrapped net error; prefer the
+		// ctx error for caller clarity.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, fmt.Errorf("ollama: read stream: %w", err)
+	}
+	if !seenTerminal {
+		return nil, errors.New("ollama: stream ended without done:true frame")
+	}
+
+	return &provider.Response{
+		Model:      final.Model,
+		Content:    accumulated.String(),
+		StopReason: normalizeStopReason(final.DoneReason, final.Done),
+		Usage: provider.Usage{
+			InputTokens:  final.PromptEvalCount,
+			OutputTokens: final.EvalCount,
+		},
+		Raw: append(json.RawMessage(nil), lastRaw...),
 	}, nil
 }
 

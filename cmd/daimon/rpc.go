@@ -93,3 +93,74 @@ func asRPCError(err error) (*jsonrpcError, bool) {
 	}
 	return nil, false
 }
+
+// streamFrame is a tolerant decode envelope for the daimon.provider.stream
+// wire shape: notifications carry method+params and no id; the terminal
+// response carries id + result/error.
+type streamFrame struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method,omitempty"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      json.RawMessage `json:"id,omitempty"`
+	Result  json.RawMessage `json:"result,omitempty"`
+	Error   *jsonrpcError   `json:"error,omitempty"`
+}
+
+// rpcStream opens a connection, sends a single request, and reads frames
+// until the terminal response with the matching id arrives. onDelta is
+// called for each daimon.provider.stream.delta notification; the final
+// response result is unmarshalled into out (when non-nil).
+//
+// onDelta runs synchronously in this function's goroutine — the CLI's stdout
+// write per delta is what makes "token-by-token rendering" actually visible.
+func rpcStream(socket, method string, params any, onDelta func(string), out any) error {
+	c, err := net.Dial("unix", socket)
+	if err != nil {
+		return fmt.Errorf("dial %s: %w", socket, err)
+	}
+	defer c.Close()
+
+	if err := json.NewEncoder(c).Encode(jsonrpcRequest{
+		JSONRPC: "2.0",
+		Method:  method,
+		Params:  params,
+		ID:      1,
+	}); err != nil {
+		return fmt.Errorf("encode %s: %w", method, err)
+	}
+
+	dec := json.NewDecoder(c)
+	for {
+		var fr streamFrame
+		if err := dec.Decode(&fr); err != nil {
+			return fmt.Errorf("decode %s frame: %w", method, err)
+		}
+		// Notification: no id, but a method name.
+		if len(fr.ID) == 0 && fr.Method != "" {
+			if fr.Method == "daimon.provider.stream.delta" {
+				var p struct {
+					Content string `json:"content"`
+				}
+				if err := json.Unmarshal(fr.Params, &p); err != nil {
+					return fmt.Errorf("decode delta params: %w", err)
+				}
+				if onDelta != nil && p.Content != "" {
+					onDelta(p.Content)
+				}
+			}
+			// Unknown notification methods are ignored — forward-compat for
+			// future delta kinds (tool calls, role markers).
+			continue
+		}
+		// Terminal frame.
+		if fr.Error != nil {
+			return fr.Error
+		}
+		if out != nil && len(fr.Result) > 0 {
+			if err := json.Unmarshal(fr.Result, out); err != nil {
+				return fmt.Errorf("unmarshal %s result: %w", method, err)
+			}
+		}
+		return nil
+	}
+}
