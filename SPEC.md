@@ -371,14 +371,18 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 |---|---|
 | Identity signatures | Ed25519 |
 | Memory & activity hashing | BLAKE3 |
-| At-rest encryption (memory rows, v0.1) | AES-256-GCM, application-level row encryption (per-row random nonce, AAD-bound to row id + field) |
-| At-rest encryption (activity payloads, v0.1) | AES-256-GCM, application-level payload encryption (per-entry random nonce, AAD-bound to entry id) |
+| At-rest encryption (identity keystore, v0.1) | AES-256-GCM via `internal/secretbox.NewAEAD`; ciphertext + Argon2id parameters wrapped in a JSON envelope |
+| At-rest encryption (provider credentials, v0.1) | AES-256-GCM via `internal/secretbox.NewAEAD`; same JSON envelope shape as the identity keystore |
+| At-rest encryption (memory rows, v0.1) | AES-256-GCM via `internal/secretbox.SealAAD` / `OpenAAD` (per-row random nonce, AAD-bound to row id + field; bytes-packed `version‖nonce‖ct` envelope) |
+| At-rest encryption (activity payloads, v0.1) | AES-256-GCM via `internal/secretbox.SealAAD` / `OpenAAD` (per-entry random nonce, AAD-bound to entry id; bytes-packed envelope, base64-into-JSON-string on disk) |
 | At-rest encryption (memory pages, v0.2+ option) | SQLCipher (deferred; see §5.1) |
 | Key derivation (password → master) | Argon2id (≥64 MiB, ≥3 iters, ≥4 parallel) |
 | Key derivation (master → subkeys) | HKDF-SHA256 with domain-separated info labels |
 | Key derivation (passkey) | WebAuthn PRF extension |
 | Future: agent-to-agent channels | Noise XX (v0.3) |
 | Future: group sessions | MLS RFC 9420 (v0.3+) |
+
+All four at-rest encryption sites share one AEAD primitive — `internal/secretbox.NewAEAD` — and the two AAD-bound sites (memory rows, activity payloads) additionally share one bytes-packed envelope (`SealAAD` / `OpenAAD`). The keystore and credentials carry their AES-GCM ciphertext inside an Argon2id-parameterised JSON envelope that the package does not model. Domain separation between the four sites is enforced at the AAD layer (memory/activity) and at the HKDF info-label layer (memory: `daimon-memory-encryption-v1`; activity: `daimon-activity-encryption-v1`); the keystore and credentials each derive their AEAD key from the user password directly via Argon2id, with independent salts.
 
 ---
 

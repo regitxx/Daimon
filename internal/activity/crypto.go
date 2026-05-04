@@ -1,13 +1,11 @@
 package activity
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
+
+	"github.com/regitxx/Daimon/internal/secretbox"
 )
 
 // Application-level activity-log payload encryption per SPEC §8.1.
@@ -40,16 +38,19 @@ import (
 // unlock, lives only as long as the unlocked daimond process, bound to the
 // same trust scope (SPEC §9.2) as the unlocked private key.
 //
+// The AEAD primitive and the bytes-packed envelope live in
+// internal/secretbox; this file contributes the AAD construction, the HKDF
+// info label, and the JSONL-specific base64-into-JSON-string framing that
+// make activity-payload encryption a domain-separated instance of the shared
+// envelope.
+//
 // Encryption is enabled iff Log.key is non-nil. v0.1 always derives a non-nil
 // key from the bound identity at Open; the nil branch exists only for
 // migration tooling and is not exercised by the public Open path.
 
 const (
-	payloadCryptoVersion = 0x01
-	payloadNonceLen      = 12
-	payloadKeyLen        = 32
-	payloadAADPrefix     = "daimon-activity-payload-v1"
-	payloadAADField      = "payload"
+	payloadAADPrefix = "daimon-activity-payload-v1"
+	payloadAADField  = "payload"
 
 	// ActivityEncryptionKeyLabel is the HKDF info string for deriving the
 	// activity log's payload-encryption key from the principal's Ed25519
@@ -57,79 +58,13 @@ const (
 	ActivityEncryptionKeyLabel = "daimon-activity-encryption-v1"
 )
 
-// Errors surfaced by the payload-encryption layer.
+// Errors surfaced by the payload-encryption layer. Aliased to secretbox's
+// sentinels so `errors.Is(err, activity.ErrInvalidCiphertext)` matches whether
+// the error originates here, in the wrapper, or deeper in the AEAD primitive.
 var (
-	ErrInvalidCiphertext = errors.New("activity: invalid payload ciphertext")
-	ErrInvalidKeyLength  = errors.New("activity: invalid encryption key length")
+	ErrInvalidCiphertext = secretbox.ErrInvalidCiphertext
+	ErrInvalidKeyLength  = secretbox.ErrInvalidKeyLength
 )
-
-// encryptPayload returns the on-disk envelope (version || nonce || AEAD)
-// for plaintext, bound to entryID. A nil key disables encryption — the slice
-// is returned as-is. An empty plaintext returns nil (the field is omitted).
-func encryptPayload(key, plaintext []byte, entryID string) ([]byte, error) {
-	if key == nil {
-		return plaintext, nil
-	}
-	if len(key) != payloadKeyLen {
-		return nil, ErrInvalidKeyLength
-	}
-	if len(plaintext) == 0 {
-		return nil, nil
-	}
-
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := make([]byte, payloadNonceLen)
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, fmt.Errorf("generate nonce: %w", err)
-	}
-
-	aad := buildPayloadAAD(entryID)
-	ct := gcm.Seal(nil, nonce, plaintext, aad)
-
-	out := make([]byte, 1+payloadNonceLen+len(ct))
-	out[0] = payloadCryptoVersion
-	copy(out[1:1+payloadNonceLen], nonce)
-	copy(out[1+payloadNonceLen:], ct)
-	return out, nil
-}
-
-// decryptPayload reverses encryptPayload. A nil key returns blob as-is. An
-// empty blob returns nil. Any failure to authenticate the ciphertext under
-// entryID returns ErrInvalidCiphertext.
-func decryptPayload(key, blob []byte, entryID string) ([]byte, error) {
-	if key == nil {
-		return blob, nil
-	}
-	if len(key) != payloadKeyLen {
-		return nil, ErrInvalidKeyLength
-	}
-	if len(blob) == 0 {
-		return nil, nil
-	}
-	// minimum: version(1) + nonce(12) + GCM tag(16)
-	if len(blob) < 1+payloadNonceLen+16 {
-		return nil, fmt.Errorf("%w: blob too short (%d bytes)", ErrInvalidCiphertext, len(blob))
-	}
-	if blob[0] != payloadCryptoVersion {
-		return nil, fmt.Errorf("%w: unknown version 0x%02x", ErrInvalidCiphertext, blob[0])
-	}
-
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	nonce := blob[1 : 1+payloadNonceLen]
-	ct := blob[1+payloadNonceLen:]
-	aad := buildPayloadAAD(entryID)
-	pt, err := gcm.Open(nil, nonce, ct, aad)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInvalidCiphertext, err)
-	}
-	return pt, nil
-}
 
 // encodePayloadForDisk takes plaintext payload bytes and returns the wire-form
 // JSON value to store under the `payload` field. With encryption enabled
@@ -144,7 +79,7 @@ func encodePayloadForDisk(key, plaintext []byte, entryID string) (json.RawMessag
 	if key == nil {
 		return plaintext, nil
 	}
-	ct, err := encryptPayload(key, plaintext, entryID)
+	ct, err := secretbox.SealAAD(key, plaintext, buildPayloadAAD(entryID))
 	if err != nil {
 		return nil, err
 	}
@@ -176,23 +111,11 @@ func decodePayloadFromDisk(key []byte, payload json.RawMessage, entryID string) 
 	if err != nil {
 		return nil, fmt.Errorf("%w: base64 decode: %v", ErrInvalidCiphertext, err)
 	}
-	pt, err := decryptPayload(key, ct, entryID)
+	pt, err := secretbox.OpenAAD(key, ct, buildPayloadAAD(entryID))
 	if err != nil {
 		return nil, err
 	}
 	return pt, nil
-}
-
-func newGCM(key []byte) (cipher.AEAD, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("aes new gcm: %w", err)
-	}
-	return gcm, nil
 }
 
 func buildPayloadAAD(entryID string) []byte {

@@ -1,8 +1,6 @@
 package identity
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
@@ -12,6 +10,8 @@ import (
 	"os"
 
 	"golang.org/x/crypto/argon2"
+
+	"github.com/regitxx/Daimon/internal/secretbox"
 )
 
 const (
@@ -20,7 +20,6 @@ const (
 	argon2Parallelism     = 4
 	argon2KeyLen          = 32
 	argon2SaltLen         = 16
-	aesGCMNonceLen        = 12
 	keystoreFormatVersion = 1
 )
 
@@ -54,16 +53,12 @@ func saveKeystore(path string, priv ed25519.PrivateKey, password []byte) error {
 	}
 	key := argon2.IDKey(password, salt, argon2Iterations, argon2MemoryKiB, argon2Parallelism, argon2KeyLen)
 
-	block, err := aes.NewCipher(key)
+	gcm, err := secretbox.NewAEAD(key)
 	if err != nil {
-		return fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("aes new gcm: %w", err)
+		return fmt.Errorf("aead: %w", err)
 	}
 
-	nonce := make([]byte, aesGCMNonceLen)
+	nonce := make([]byte, secretbox.NonceLen)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
@@ -129,13 +124,9 @@ func loadKeystore(path string, password []byte) (ed25519.PrivateKey, error) {
 		argon2KeyLen,
 	)
 
-	block, err := aes.NewCipher(key)
+	gcm, err := secretbox.NewAEAD(key)
 	if err != nil {
-		return nil, fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("aes new gcm: %w", err)
+		return nil, fmt.Errorf("aead: %w", err)
 	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {

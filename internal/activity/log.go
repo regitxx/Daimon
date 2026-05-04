@@ -16,6 +16,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 	"github.com/regitxx/Daimon/internal/identity"
+	"github.com/regitxx/Daimon/internal/secretbox"
 )
 
 // Log is the principal's append-only activity record. It binds a file path to
@@ -59,7 +60,7 @@ func Open(path string, id *identity.Identity) (*Log, error) {
 	if id == nil {
 		return nil, errors.New("activity: identity is required")
 	}
-	key, err := id.DeriveSubkey(ActivityEncryptionKeyLabel, payloadKeyLen)
+	key, err := id.DeriveSubkey(ActivityEncryptionKeyLabel, secretbox.KeyLen)
 	if err != nil {
 		return nil, fmt.Errorf("derive activity key: %w", err)
 	}

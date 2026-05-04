@@ -1,8 +1,6 @@
 package provider
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -13,6 +11,8 @@ import (
 	"sync"
 
 	"golang.org/x/crypto/argon2"
+
+	"github.com/regitxx/Daimon/internal/secretbox"
 )
 
 // Credential errors.
@@ -25,11 +25,8 @@ var (
 // SPEC §10 path: $DAIMON_HOME/providers.json.encrypted. Tied to the same
 // at-rest crypto family as the identity keystore: Argon2id (≥64 MiB / ≥3 iters
 // / ≥4 parallel per SPEC §4.2) → AES-256-GCM. JSON envelope on disk for
-// debuggability.
-//
-// TODO: factor a shared internal/secretbox so this and internal/identity
-// both call into one crypto implementation. Deferred to the session that
-// adds passkey/WebAuthn-PRF — that's where the abstraction earns its keep.
+// debuggability. The AEAD primitive is shared with the identity keystore and
+// the memory/activity stores via internal/secretbox.NewAEAD.
 const (
 	credentialFormatVersion = 1
 	argon2MemoryKiB         = 64 * 1024
@@ -37,7 +34,6 @@ const (
 	argon2Parallelism       = 4
 	argon2KeyLen            = 32
 	argon2SaltLen           = 16
-	aesGCMNonceLen          = 12
 )
 
 type credentialFile struct {
@@ -110,13 +106,9 @@ func LoadCredentialStore(path string, password []byte) (*CredentialStore, error)
 		f.KDFParams.Iterations, f.KDFParams.MemoryKiB, f.KDFParams.Parallelism,
 		argon2KeyLen,
 	)
-	block, err := aes.NewCipher(key)
+	gcm, err := secretbox.NewAEAD(key)
 	if err != nil {
-		return nil, fmt.Errorf("aes new cipher: %w", err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return nil, fmt.Errorf("aes new gcm: %w", err)
+		return nil, fmt.Errorf("aead: %w", err)
 	}
 	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
@@ -193,15 +185,11 @@ func (c *CredentialStore) Save(path string, password []byte) error {
 		return fmt.Errorf("generate salt: %w", err)
 	}
 	key := argon2.IDKey(password, salt, argon2Iterations, argon2MemoryKiB, argon2Parallelism, argon2KeyLen)
-	block, err := aes.NewCipher(key)
+	gcm, err := secretbox.NewAEAD(key)
 	if err != nil {
-		return fmt.Errorf("aes new cipher: %w", err)
+		return fmt.Errorf("aead: %w", err)
 	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return fmt.Errorf("aes new gcm: %w", err)
-	}
-	nonce := make([]byte, aesGCMNonceLen)
+	nonce := make([]byte, secretbox.NonceLen)
 	if _, err := rand.Read(nonce); err != nil {
 		return fmt.Errorf("generate nonce: %w", err)
 	}
