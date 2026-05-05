@@ -1415,3 +1415,122 @@ The structural property worth naming: **doctor exercises the read paths of every
 8. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
 
 **Next session begins with:** v0.1.x has zero no-external-dependency *carry-overs* remaining (item 26's punt list is closed). The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe), one of the in-tree polish items above (`daimon activity query` CLI is the strongest small pick), or the v0.2 design kickoff. If the probe at next-session start finds any of (LM Studio up, OpenAI key real, Anthropic key real) the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–8 above by huckgod's preference.
+
+## 2026-05-05 — Day Zero, twenty-seventh session: `daimon activity query` — CLI wrapper over `daimon.activity.query`
+
+**The audit trail every other subcommand writes to is now inspectable from the CLI.** `daimon activity query` is the mechanical wrapper the kickoff predicted: a tabwriter table over `daimon.activity.query` with `--since` / `--kind` (repeatable) / `--limit` / `--json`, per-kind summary one-liners pulled from the AEAD-decrypted payload, and the same locked/not-running humanisation `daimon memory` and `daimon provider` already have. The session 26 ↔ session 27 handoff played as written: doctor for "is anything live?", activity query for "what just happened?", and the kickoff's plan landed in one session as predicted.
+
+**Probe at session start (now mechanised — first session that uses `daimon doctor` instead of hand-rolling the curl/printenv check the kickoffs prescribed since session 19):**
+
+```
+$ ./bin/daimon doctor
+Daemon
+  state  not running — run `daimon unlock` to start
+Provider env (presence only)
+  ANTHROPIC_API_KEY  not set
+  OPENAI_API_KEY     not set
+  LMSTUDIO_API_KEY   not set
+Local runtimes
+  Ollama     http://localhost:11434 — ready (1 models: llama3.2:latest)
+  LM Studio  http://localhost:1234 — unreachable (… connect: connection refused)
+Live round-trip readiness
+  Claude streaming  blocked — ANTHROPIC_API_KEY not present
+  OpenAI streaming  blocked — OPENAI_API_KEY not present
+  LM Studio (any)   blocked — LM Studio server not present
+```
+
+All three live round-trips deferred from sessions 19/20/21 remain blocked at session start, identical to sessions 25 and 26. Doctor surfaced the answer as one block — the practical kickoff question ("what would unblock?") is now a single subcommand. Proceeded to `daimon activity query` per the kickoff's top-priority pick when no live round-trip frees up.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `cmd/daimon/cmd_activity.go` (new, 274 lines) | The activity subcommand. Layered: `cmdActivity` (dispatcher; v0.1 routes only `query` — `verify` is a future subcommand) + `runActivityQuery(stdout, stderr, args)` (writer-injected, testable, same pattern as session 26's doctor split) + `summarizeEntry(activityEntry) string` (per-kind dispatcher). Custom flag types: `sinceFlag` (Go duration → relative-from-now-unix-ms; RFC3339 → absolute-unix-ms; resolves at Set time so the wire shape is uniform), `kindsFlag` (repeatable). Mode logic: 0 kinds → server-side filter empty + `--limit` server-side; 1 kind → wire `Kind=kinds[0]` + `--limit` server-side; ≥2 kinds → omit wire `Kind` and wire `Limit` (so the server returns the full window), then apply OR + limit client-side via `filterEntriesByKinds`. `--json` returns the raw server response (no client-side OR-filter applied — documented in usage that tooling should issue one call per `--kind` for OR over JSON). Reuses `daemonCall` so the locked / not-running paths get the same `daimon unlock first` / `daemon not running` humanisation every other subcommand has. New `printJSONTo(w, v)` helper alongside the existing `printJSON` so tests can capture `--json` output without swapping `os.Stdout`. |
+| `cmd/daimon/cmd_activity_test.go` (new, 364 lines) | 9 test funcs, mock-daemon harness identical in shape to the session-26 doctor harness: `MkdirTemp("","dmn")` short-prefix tempdir to dodge AF_UNIX sun_path 104-byte overflow on darwin, `t.Setenv("DAIMON_HOME", dir)` to point `daemonCall` at it, mock daimond goroutine that captures the request into a buffered channel and replies via a per-test callback. Coverage: happy-path (3 entries × 3 kinds, asserts every per-kind summary + wire-shape default limit=50 with no since/kind), empty-log (stderr note + empty stdout), wire-params subtests (4 cases — duration `--since`, RFC3339 `--since`, single `--kind` passthrough, multi-`--kind` omits wire kind AND limit), multi-kind client-side filter (4-entry response, two `--kind` flags → 2 expected rows + 2 omitted rows), `--json` roundtrips through `[]map[string]any`, daemon errors (locked/not-running humanised), bad flag values (3 cases — unparseable `--since`, empty `--kind ""`, positional argument), per-kind summary table-driven (10 cases including provider.invoke with/without injected_memory_ids, memory.write with/without kind, all the other kinds, unrecognised kind → empty SUMMARY, missing payload → empty SUMMARY), and a 4-goroutine concurrency smoke that pegs the harness's request-capture under -race. |
+| `cmd/daimon/main.go` (modified, +5 lines) | New `case "activity":` branch in the dispatch switch, 9-line block in the usage docstring documenting `daimon activity query` (including the "tooling should issue one call per `--kind` for OR over JSON" caveat), package-level doc comment lists the subcommand. |
+| `CHECKPOINT.md` (modified) | Phase line gains `daimon activity query` paragraph; build status updated (251 → 260 PASS lines, +9 cmd/daimon activity); item 28 added. |
+
+**Decisions held from the kickoff (no re-deliberation):**
+
+- **Mirror `daimon memory` / `daimon provider` subcommand shape exactly.** New file, new `case` in main.go's switch, `daemonCall` for the RPC, same flag conventions (`--json` everywhere, `--limit`, default human output is a tabwriter table). The kickoff explicitly framed this as "mechanical wrapper, no new RPC" — and it was.
+- **Default human output: TIME | KIND | ID | SUMMARY tabwriter table.** Per-kind summary one-liner pulled from the decrypted payload. The summarizer is the only piece that touches the payload's per-kind shape; everything else operates on the wire envelope.
+- **Does NOT verify the chain.** That's a future `daimon activity verify` subcommand; this one just queries. The activity package already exposes `Verify` so the future subcommand has a one-line server-side hookup, but the RPC for it doesn't exist yet (would need a new method) and the kickoff explicitly punted it.
+- **No SPEC change.** Like doctor, this is a CLI affordance over an existing RPC, not a new protocol surface. The wire shape (params, response) is unchanged from session 6 when `daimon.activity.query` first landed.
+- **Reuse `daemonCall` + `humaniseDaemonErr`.** Locked / not-running paths surface the same hint as every other subcommand; the user sees one consistent recovery story regardless of which RPC tripped.
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **Multi-kind OR filter is client-side, single round-trip.** The server's `Kind` filter accepts only one kind. Three options for multi-kind: (a) N round-trips merged client-side (pollutes the audit log with N `activity.queried` entries — measurably noisy), (b) extend the wire shape to accept `Kinds []string` (would need a SPEC bump and a server-side change for ergonomics that v0.1 doesn't require), (c) one round-trip with no kind filter, OR-filter client-side. Picked (c): keeps the wire shape unchanged, keeps the round-trip count at 1, keeps the `activity.queried` log clean. Cost: when the user has a huge log and queries for a sparse OR set, we pull more rows than we render. Acceptable for v0.1; if it ever matters, the wire shape can grow `Kinds []string` later without breaking existing single-kind callers.
+- **`--limit` is suppressed on the wire when ≥2 kinds.** Otherwise the server would return the first N rows — most of which might not match any of the `--kind` flags, so the user could see fewer than N matches when they should have seen N. Limit is reapplied client-side after the OR-filter so `--limit 10 --kind a --kind b` returns up to 10 rows of either kind.
+- **Per-kind summary uses the actual wire payload, not the kickoff's prediction.** The kickoff said memory.write summary should be `id=<ULID> name=<name>`; the actual server payload (`internal/server/handlers.go:183`) is `{id, kind, source}` — there is no `name` field. The summarizer renders what the wire actually carries (`id=<m-id> kind=<k>`). Source field is currently empty in the smoke output (the CLI's `memory write --source user` flag wasn't observed to surface — that's a future investigation; not in scope for this session). Documented in the CHECKPOINT note so future-me/huckgod don't read the kickoff and find a discrepancy.
+- **Unrecognised kinds get an empty SUMMARY column, not the entry id.** The kickoff said "for unrecognised kinds: just the entry id" but the entry id is already the ID column — duplicating it in SUMMARY would be redundant noise. Empty SUMMARY for unknown kinds preserves table alignment and clearly signals "no per-kind summary defined yet for this kind." When a new kind appears, adding a `case` to `summarizeEntry` is the only change needed.
+- **`--since` accepts both Go duration AND RFC3339, resolved at flag-parse time.** "1h" is the obvious case; RFC3339 absolute is the "what happened on the day of incident X?" case. Both resolve to unix-ms in the `sinceFlag.Set` so the wire shape is uniform. Unparseable `--since` produces a clear error mentioning both formats and the offending value — caught in the `bad_since` test.
+- **`runActivityQuery` is writer-injected; `cmdActivity` is the os.Stdout/os.Stderr wiring.** Same architectural decision session 26's doctor used (`gatherDoctorReport` data path + `renderDoctorText` presentation). Tests run `runActivityQuery(&buf, &buf2, args)` and assert against the buffers without swapping process stdout, which would race with parallel tests. New `printJSONTo` helper is the writer-injectable variant of the existing `printJSON`.
+- **Test count grew by 9, the kickoff predicted ~6.** The three extras are: (a) the bad-flag-values subtests (essential — flag-parse failures were going to bite the first user with a typo), (b) the per-kind summary table-driven test (essential — covers the 8 kinds + unknown + missing-payload edge cases that the integration tests can't comprehensively reach), (c) the concurrency smoke (paranoia — the harness uses a buffered channel for request capture and I wanted certainty under -race). All three earned their place; coverage is tighter than the kickoff's prediction.
+
+**Test count:** 251 → 260 PASS lines (+9: all in `cmd/daimon/cmd_activity_test.go`). Per-package: 9 identity + 30 memory + 17 activity + 12 secretbox + 51 server + 12 provider + 17 claude + 22 openai + 24 ollama-chat + 30 lmstudio + 12 ollama embedder + 7 daimonhome + 17 cmd/daimon (8 doctor + 9 activity). All race-clean, all vet-clean, ~10s total run. `make build` clean.
+
+**Live smoke status (this session, against a temp `$DAIMON_HOME` after init/unlock + 2 `memory write` + 1 `memory search`):**
+
+```
+# Default view
+$ daimon activity query
+TIME                       KIND              ID                          SUMMARY
+2026-05-05T21:36:34+08:00  activity.queried  01KQW5NM5S3155CSFH87FBGX7Q  matched=0
+2026-05-05T21:36:34+08:00  memory.write      01KQW5NM68K82JX7NV0PT4X992  id=01KQW5NM65NJ3EPDQYYP4384B1 kind=fact
+2026-05-05T21:36:34+08:00  memory.write      01KQW5NM6PM79GJQXSZCEZBA88  id=01KQW5NM6NYTM36D3TXGXJGPA4 kind=preference
+
+# --kind filter (single)
+$ daimon activity query --kind memory.write
+TIME                       KIND          ID                          SUMMARY
+2026-05-05T21:36:34+08:00  memory.write  01KQW5NM68K82JX7NV0PT4X992  id=01KQW5NM65NJ3EPDQYYP4384B1 kind=fact
+2026-05-05T21:36:34+08:00  memory.write  01KQW5NM6PM79GJQXSZCEZBA88  id=01KQW5NM6NYTM36D3TXGXJGPA4 kind=preference
+
+# --kind filter (multiple, client-side OR)
+$ daimon activity query --kind memory.write --kind activity.queried
+… 5 rows: 2 memory.write + 3 activity.queried (the prior queries themselves)
+
+# --since 30s
+… all 5 in-window entries.
+
+# --limit 2
+… caps at 2 rows in chain order.
+
+# --json (one entry, head)
+$ daimon activity query --kind memory.write --limit 1 --json
+[
+  {
+    "hash": "blake3:32615851c63adc9445b70f7d54e7a46ba35300b7cc9d26a47f1c64ab5c62374d",
+    "id": "01KQW5NM68K82JX7NV0PT4X992",
+    "kind": "memory.write",
+    "payload": {"id": "01KQW5NM65NJ3EPDQYYP4384B1", "kind": "fact", "source": ""},
+    "prev_hash": "blake3:ace592a1e4b2253de9e2b2193f02aa9f8c8aa2974251ba3d93c40056efc96cab",
+    "signature": "mREcsNd6vQir…",
+    "ts": 1777988194504
+  }
+]
+
+# pkill daimond, then re-query
+$ daimon activity query
+daimon: daemon not running — run `daimon unlock` first
+```
+
+Six observable surfaces, six behaviours — all match the spec. The "self-incrementing log" property is visible in the multi-kind output: each `daimon activity query` call writes its own `activity.queried` entry (per SPEC §8.2), so the log grows by one entry per query — the multi-kind smoke caught 3 such entries because that was the third query in the session. The `daimon.created` genesis entry is missing from the smoke output because daimond's first-spawn check (`cmd/daimond/main.go:214`) only writes it when the chain is empty AND the daimon was freshly created in this serve session — the auto-spawn from `daimon unlock` skips the genesis write because the daimon was just created via `daimon init`, which doesn't open the activity log. Behaviour-correct but surprising; logged here as a future-investigation note (not in scope this session).
+
+**What this means in plain language:** before this session, the only way to read the audit trail was hand-rolled JSON-RPC against `daimon.activity.query`. After this session, `daimon activity query` does it in one shot with sensible defaults (last 50 entries, table view, summaries that name the salient field per kind), filters that match the obvious user intent (`--since 1h`, `--kind memory.write`), and `--json` for tooling. With doctor and activity query both shipped, **every primitive's audit trail is now inspectable from the CLI**: doctor shows what the environment is, activity query shows what the daimon did, memory + provider + chat show what's stored / which calls / which sessions. The v0.1.x operability quartet (doctor / memory / provider / activity query) is complete.
+
+The structural property worth naming: **activity query closes the readability loop on the audit log without touching the write path**. Every primitive in tree (memory write/read/list/search/delete/export/import, provider invoke, provider stream, activity query itself) writes to the log per SPEC §8.2; the log has been chain-walkable + chain-verifiable since session 6, encrypted at the payload field since session 22, and now human-readable since session 27. The single primitive missing from the readability loop is *integrity verification* — `daimon activity verify` would walk the chain and assert hash continuity + signature validity; it's punted intentionally because the existing `internal/activity.Log.Verify` is one server-side hookup away. Future session, when there's a reason.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Doctor makes "is LM Studio up?" a one-line answer; running the round-trip needs LM Studio running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Same shape — needs a real key in shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Same shape — needs a real key in shell env.
+4. **`daimon activity verify` CLI subcommand.** Wraps `internal/activity.Log.Verify` (which has existed since session 6) — would need a new RPC method (`daimon.activity.verify`?) plus a CLI subcommand. Unlike `query`, this one DOES need a server-side change because `Verify` mutates internal state during the walk and shouldn't be triggered from a pure read endpoint. Estimate: half a session for the RPC + CLI subcommand together.
+5. **`daimon memory search --inject-preview`.** Dry-run mode that prints what would be folded into a prompt for a given query without invoking a provider — useful for tuning queries before live round-trips become possible. Reuses the inject_context retrieval path; new flag, no new RPC. Estimate: half a session.
+6. **The asciicast** (carry-over from session 16). Doctor + activity query both strengthen the "see what's healthy / see what just happened" beats the asciicast script's first three scenes need.
+7. **NLnet NGI Zero application** (carry-over from session 16). Doctor + activity query both strengthen the "operability" beat the application needs.
+8. **Investigate the missing `daimon.created` genesis entry.** The smoke output showed no `daimon.created` row even though `cmd/daimond/main.go:214` should write one on first serve-with-empty-chain. Either the chain wasn't empty when `daimon unlock` auto-spawned daimond, or the genesis write is being skipped for another reason. Bounded investigation: read serve.go's startup path, confirm whether the genesis condition fires, decide whether the behaviour is correct (daimond never knew about the daimon until unlock — but the activity log is created by daimond, not by `daimon init`, so the genesis write should fire on first serve). Estimate: ~30 minutes.
+9. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** v0.1.x has zero no-external-dependency carry-overs remaining (item 26's punt list has stayed closed for two sessions). The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe via `./bin/daimon doctor`), one of the remaining in-tree polish items above (`daimon activity verify` is the strongest small pick — it would round out the audit-trail story; the genesis-entry investigation is a smaller, sharper pick), the asciicast / NLnet, or the v0.2 design kickoff. If the doctor footer at next-session start says any of "Claude streaming  READY", "OpenAI streaming  READY", or "LM Studio (any)  READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–9 above by huckgod's preference.

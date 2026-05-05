@@ -18,6 +18,9 @@
 //	daimon doctor    — read-only environment health probe: $DAIMON_HOME state,
 //	                   daemon up/locked/unlocked, API-key presence, LM Studio
 //	                   + Ollama reachability. Safe at any moment.
+//	daimon activity  — query (default) the audit trail every other subcommand
+//	                   writes to. Filter by kind / time window / limit; --json
+//	                   for tooling.
 package main
 
 import (
@@ -49,6 +52,8 @@ func main() {
 		exitOnErr(cmdChat(args))
 	case "doctor":
 		exitOnErr(cmdDoctor(args))
+	case "activity":
+		exitOnErr(cmdActivity(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -113,6 +118,16 @@ Usage:
               [--timeout]   presence (presence only, never the value), and
                             LM Studio + Ollama reachability. Safe at any
                             moment; never auto-spawns the daemon.
+
+  daimon activity query     Read the principal's audit trail (table).
+              [--since <duration|RFC3339>] [--kind <k> ...]
+              [--limit <n>] [--json]
+                            --kind is repeatable for an OR filter (applied
+                            client-side; --json returns the unfiltered server
+                            response and tooling should issue one call per
+                            kind). Time window is inclusive; --since accepts
+                            either a Go duration ("1h") or an RFC3339
+                            timestamp.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
