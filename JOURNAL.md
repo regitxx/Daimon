@@ -1534,3 +1534,376 @@ The structural property worth naming: **activity query closes the readability lo
 9. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
 
 **Next session begins with:** v0.1.x has zero no-external-dependency carry-overs remaining (item 26's punt list has stayed closed for two sessions). The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe via `./bin/daimon doctor`), one of the remaining in-tree polish items above (`daimon activity verify` is the strongest small pick — it would round out the audit-trail story; the genesis-entry investigation is a smaller, sharper pick), the asciicast / NLnet, or the v0.2 design kickoff. If the doctor footer at next-session start says any of "Claude streaming  READY", "OpenAI streaming  READY", or "LM Studio (any)  READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–9 above by huckgod's preference.
+
+
+## 2026-05-05 — Day Zero, twenty-eighth session: `daimon activity verify` — chain-integrity walk via new `daimon.activity.verify` RPC
+
+**The audit-trail subsystem reaches parity with memory.** Memory has write / read / list / search / delete / export / import; activity now has append / query / verify. `daimon activity verify` walks the chain end-to-end (prev_hash continuity + BLAKE3 hash recomputation over canonical plaintext + Ed25519 signature), reports `verified N entries — chain ok` on success or `chain INVALID: <reason>` on failure, and on success self-appends an `activity.verified` audit row mirroring the `activity.queried` semantics from SPEC §8.2. Failure path explicitly does NOT extend the chain — extending a corrupt head would compound the problem.
+
+**Probe at session start (mechanised via `daimon doctor` since session 26):**
+
+```
+$ ./bin/daimon doctor
+Daemon
+  state  not running — run `daimon unlock` to start
+Provider env (presence only)
+  ANTHROPIC_API_KEY  not set
+  OPENAI_API_KEY     not set
+  LMSTUDIO_API_KEY   not set
+Local runtimes
+  Ollama     http://localhost:11434 — ready (1 models: llama3.2:latest)
+  LM Studio  http://localhost:1234 — unreachable (… connect: connection refused)
+Live round-trip readiness
+  Claude streaming  blocked — ANTHROPIC_API_KEY not present
+  OpenAI streaming  blocked — OPENAI_API_KEY not present
+  LM Studio (any)   blocked — LM Studio server not present
+```
+
+All three live round-trips deferred since sessions 19/20/21 remain blocked. Proceeded to `daimon activity verify` per the kickoff's top-priority pick when no live round-trip frees up.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `internal/activity/activity.go` (modified, +1 line) | New `KindActivityVerified Kind = "activity.verified"` constant alongside the existing kinds. Verifiers MUST accept unknown kinds without rejecting (per §8.2's enumeration), so adding a kind is forward-compatible. |
+| `internal/server/handlers.go` (modified, +35 lines net) | New `handleActivityVerify(ctx, _) → activityVerifyResult{Verified, OK}` method registered at `daimon.activity.verify`. No params (verify is whole-chain or nothing). Calls `s.alog.Verify(ctx)` then on success appends a new `activity.verified` entry with `{verified: N}` payload — same self-incrementing-log property as `handleActivityQuery`'s post-RPC `activity.queried` append. Failure returns the typed activity error mapped to `CodeInternalError` via `mapActivityError`; the failure path does NOT append. Extended `mapActivityError` to also handle `ErrInvalidCiphertext` (AEAD failure surfaces here from a tampered payload — distinct from `ErrChainBroken` which fires on prev_hash mismatches) and `ErrHashMismatch` (defensive — should be unreachable in practice because AEAD authentication catches tamper one layer earlier, but the mapping is correct if it ever arises). |
+| `cmd/daimon/cmd_activity.go` (modified, +50 lines) | New `runActivityVerify(stdout, stderr, args)` — writer-injected and testable, same shape as `runActivityQuery`. Flags: `--json` (escape hatch for tooling). Default human output: `verified N entries — chain ok\n` on stdout (exit 0). Failure: returns `fmt.Errorf("chain INVALID: %w", err)` — the wrap-and-return shape lets `main.go::exitOnErr` print one clean `daimon: chain INVALID: <reason>` line (exit 1) without the stdout/stderr duplicate a pre-print pattern would produce. JSON mode emits `{"verified": N, "ok": true}` on success or `{"ok": false, "error": "..."}` on failure, with the same wrapped error driving exit 1 — `jq -e '.ok'` works as a script gate. New `cmdActivity` dispatcher branch: `case "verify"`. New `case "activity.verified"` in `summarizeEntry` — added after live smoke showed the row rendering with empty SUMMARY (kickoff's per-kind list didn't pre-include it); shape `verified=N` matches the `matched=N` shape `activity.queried` uses, completing the symmetry. |
+| `cmd/daimon/cmd_activity_test.go` (modified, +145 lines) | 6 new test funcs: happy-path renders count + ok phrase; `--json` mode roundtrips through `[]map[string]any` with no stderr; chain-corrupt human mode returns wrapped error containing "chain INVALID" + the underlying reason, asserts stdout is empty (avoids the duplicate-with-exitOnErr); chain-corrupt JSON mode returns wrapped error AND the JSON failure envelope with `ok:false` + `error` string; daemon-error humanisation (locked → `daimon unlock first`, not-running → `daemon not running`); positional-arg rejection. Plus a new `activity_verified` table case in `TestSummarizeEntry_PerKindShapes`. |
+| `internal/server/server_test.go` (modified, +130 lines) | 3 new test funcs: happy-path 3-entry verify (asserts `Verified=3` + `OK=true` + post-RPC `activity.verified` round-trip with payload `verified=3`), tampered-chain rejection (seeds 2 entries, closes the server's log, replaces entry #1's ciphertext with plaintext-shaped JSON, reopens under same identity into `f.srv.alog`, asserts verify returns `CodeInternalError` AND that NO `activity.verified` entry was appended — the failure-path no-extend invariant), empty-log self-incrementing verify (first verify reports `verified=0`; second verify reports `verified=1` because the first appended its own `activity.verified` row). |
+| `cmd/daimon/main.go` (modified) | Help text gains a `daimon activity verify [--json]` entry; package-level `daimon activity` doc comment updated to name both subcommands. |
+| `SPEC.md` (modified, +9 lines) | §6.1 RPC surface gains a `daimon.activity.verify` block with the `{verified: N, ok: bool}` response shape AND a paragraph explaining the three checks (prev_hash + hash + signature), the success-only-append semantics, and the failure semantics (typed RPC error, no log extension on a corrupt chain). §8.2 logged-kinds table gains an `activity.verified` row. |
+| `CHECKPOINT.md` (modified) | Phase line gains the `daimon activity verify` paragraph; build status updated (260 → 269 PASS lines, +9 across server + cmd/daimon); item 29 added in numerical order; per-package test count refreshed (18 activity, 54 server, 24 cmd/daimon). |
+
+**Decisions held from the kickoff (no re-deliberation):**
+
+- **Lean toward "only on success" for the activity.verified self-append.** The kickoff explicitly named this as the in-session decision point — yes-by-symmetry with §8.2 vs cleaner-on-failure. The implementation lands on only-on-success for the reason the kickoff already articulated: when the chain is corrupt, the head is suspect, and extending it would compound the problem. SPEC §6.1's new paragraph documents this contract.
+- **No `--since` / `--limit` etc. on the CLI subcommand.** Verify is whole-chain or nothing. The kickoff named `--json` as the only flag, and the implementation matches.
+- **Exit code 1 on failure for script pre-flight.** `daimon activity verify && deploy` works. Achieved via the wrapped-error pattern that drives `exitOnErr` once.
+- **Reuse `daemonCall` + `humaniseDaemonErr`.** Locked / not-running paths surface the same `daimon unlock first` / `daemon not running` hints every other subcommand has.
+- **Mirror the post-append shape from `handleActivityQuery`.** Same self-incrementing-log property; consistent with how every other meaningful action against the log gets recorded.
+- **No new error code in the JSON-RPC surface.** Failures route through the existing `CodeInternalError` with the typed activity error in `Data` — the kickoff predicted this and there was no reason to deviate.
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **`mapActivityError` now also routes `ErrInvalidCiphertext` and `ErrHashMismatch`.** The kickoff didn't enumerate which activity errors needed mapping; the existing mapper only handled `ErrEmptyKind` / `ErrLogClosed` / `ErrSignatureFailed` / `ErrChainBroken`. AEAD authentication failure is the dominant failure mode under the SPEC §8.1 encryption layer (it fires before the chain check whenever a payload ciphertext is tampered or a foreign key is used), so routing it explicitly with the message "activity payload AEAD authentication failed" gives operators a clearer diagnostic than the generic fall-through. Added `ErrHashMismatch` defensively for future-proofing — under the current invariants AEAD catches tamper before the hash check, but if a future change ever puts a non-encrypted payload back in scope (it shouldn't), the mapper is correct.
+- **Wrap-and-return instead of pre-print.** The first cut of `runActivityVerify` printed `chain INVALID: ...` to stdout AND let `exitOnErr` print `daimon: <error>` to stderr — the live smoke caught the duplicate. Fixed by returning `fmt.Errorf("chain INVALID: %w", err)` and removing the stdout pre-print; `exitOnErr` now produces exactly one user-visible line. JSON mode keeps the structured failure envelope on stdout (so `jq` still works) and the same wrapped error drives exit 1. Tests updated to assert on the returned error rather than stdout.
+- **`summarizeEntry` gained a `case "activity.verified"`.** Live smoke showed the new row rendering with empty SUMMARY (the kickoff's per-kind list didn't pre-include the new kind because the new kind is also new). `verified=N` matches the existing `matched=N` shape `activity.queried` uses. Symmetry: query writes `{matched: N}`, verify writes `{verified: N}`, both render in the table the same way.
+- **Empty-log verify is OK with 0.** The activity package's `Verify()` returns `(0, nil)` on a missing or empty log file; the handler treats that as success and self-appends an `activity.verified` entry with `{verified: 0}`. The second verify then reports 1 (the first verify's own row). Tested explicitly — the property is "verify never lies about a valid empty/short chain".
+
+**Test count:** 260 → 269 PASS lines (+9: 3 in `internal/server/server_test.go`, 6 in `cmd/daimon/cmd_activity_test.go`; the 10th `summarizeEntry` table case rolls into the existing table-driven test). Per-package: 9 identity + 30 memory + 18 activity + 12 secretbox + 54 server + 12 provider + 17 claude + 22 openai + 24 ollama-chat + 30 lmstudio + 12 ollama embedder + 7 daimonhome + 24 cmd/daimon (8 doctor + 16 activity). All race-clean, all vet-clean, ~10s total run. `make build` clean.
+
+**Live smoke status (this session, against a temp `$DAIMON_HOME`):**
+
+```
+# Empty chain (no entries written)
+$ ./bin/daimon activity verify
+verified 0 entries — chain ok
+# (exit 0)
+
+# After init/unlock + 2 memory writes
+$ ./bin/daimon activity verify
+verified 2 entries — chain ok
+# (exit 0)
+
+# Re-verify (the prior verify added an activity.verified row, so chain has 3 entries)
+$ ./bin/daimon activity verify
+verified 3 entries — chain ok
+# (exit 0)
+
+# JSON mode
+$ ./bin/daimon activity verify --json
+{
+  "verified": 6,
+  "ok": true
+}
+# (exit 0)
+
+# Tampered chain (entry #1's payload replaced with plaintext-shaped JSON via Python)
+$ ./bin/daimon activity verify
+daimon: chain INVALID: rpc error -32603: activity payload AEAD authentication failed
+        ("decrypt payload: secretbox: invalid ciphertext: payload not a JSON string:
+         json: cannot unmarshal object into Go value of type string")
+# (exit 1)
+
+# JSON mode on tampered chain
+$ ./bin/daimon activity verify --json
+{
+  "error": "rpc error -32603: activity payload AEAD authentication failed (...)",
+  "ok": false
+}
+daimon: chain INVALID: rpc error -32603: activity payload AEAD authentication failed (...)
+# (exit 1; structured envelope on stdout for tooling, message on stderr for operators)
+
+# After pkill daimond
+$ ./bin/daimon activity verify
+daimon: chain INVALID: daemon not running — run `daimon unlock` first
+# (exit 1)
+
+# Query view shows the activity.verified rows
+$ ./bin/daimon activity query --kind activity.verified
+TIME                       KIND               ID                          SUMMARY
+2026-05-05T22:03:10+08:00  activity.verified  01KQW76B3B7BSZKPEY5JRHGRYF  verified=1
+2026-05-05T22:03:10+08:00  activity.verified  01KQW76B3K8X2QKCJAD6JJ9M04  verified=2
+```
+
+Six observable surfaces, six behaviours — all match the spec. The "self-incrementing log" property is visible in the third call: each successful `daimon activity verify` writes its own `activity.verified` entry, so re-verify counts the prior verify (verified=2 → next verify reports 3, etc.). The tampered-chain path produces a one-line operator-facing message with the offending entry's diagnostic preserved verbatim from the AEAD error — there's no "chain INVALID" line on stdout duplicating it.
+
+**What this means in plain language:** before this session, the only way to assert "the audit log has not been tampered with" was to call the unexposed `internal/activity.Log.Verify` from Go. After this session, `daimon activity verify` does it in one shot from the CLI, with a clean exit code suitable for `daimon activity verify && deploy` script gating, structured JSON output for tooling, and a self-recording audit trail of every verification. With doctor, activity query, and activity verify all shipped, **every primitive's audit trail is inspectable AND verifiable from the CLI** — the v0.1.x audit-trail story is end-to-end at parity with the memory-store story (write / read / list / search / delete / export / import on memory ↔ append / query / verify on activity).
+
+The structural property worth naming: **verify closes the integrity loop on the audit log without touching the write path.** Every primitive in tree (memory write/read/list/search/delete/export/import, provider invoke, provider stream, activity query, activity verify itself) writes to the log per SPEC §8.2; every entry is AEAD-authenticated at the payload field per SPEC §8.1; every entry is Ed25519-signed under the bound identity; every entry is BLAKE3-hash-chained back to genesis; and now the entire chain is one CLI invocation away from end-to-end verification. The only audit surface NOT yet covered is the genesis-entry investigation punted from session 27 (the missing `daimon.created` row on first auto-spawn) — which `daimon activity verify` makes structurally observable: a chain whose genesis is `daimon.created` reports one count, a chain that skipped genesis reports one less.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Doctor makes "is LM Studio up?" a one-line answer; running the round-trip needs LM Studio running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Same shape — needs a real key in shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Same shape — needs a real key in shell env.
+4. **`daimon memory search --inject-preview`.** Dry-run mode that prints what would be folded into a prompt for a given query without invoking a provider — useful for tuning queries before live round-trips become possible. Reuses the inject_context retrieval path; new flag, no new RPC. Estimate: half a session.
+5. **Investigate the missing `daimon.created` genesis entry.** Session 27's smoke output showed no `daimon.created` row even though `cmd/daimond/main.go:214` should write one on first serve-with-empty-chain. Now structurally observable via `daimon activity verify`'s entry count vs the expected genesis. Bounded investigation: read `serve.go`'s startup path, confirm whether the genesis condition fires under the auto-spawn-from-`daimon-unlock` flow, decide whether the behaviour is correct or buggy. Estimate: ~30 minutes.
+6. **The asciicast** (carry-over from session 16). Doctor + activity query + activity verify all strengthen the operability scenes; an end-to-end demo (write → query → verify) is now a compelling beat the script can showcase.
+7. **NLnet NGI Zero application** (carry-over from session 16). The end-to-end audit-trail story (write → encrypt → query → verify) is now the strongest operability beat the application has — write down the demo asciicast and reference it.
+8. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** v0.1.x audit-trail story is end-to-end. The audit-trail subsystem reaches parity with memory: write / read / list / search / delete / export / import on memory ↔ append / query / verify on activity. The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe via `./bin/daimon doctor`), one of the in-tree polish items above (`daimon memory search --inject-preview` is the strongest small pick now that verify has shipped; the genesis-entry investigation is a smaller, sharper pick that benefits from verify's new observability), the asciicast / NLnet (both stronger now), or the v0.2 design kickoff. If the doctor footer at next-session start says any of "Claude streaming  READY", "OpenAI streaming  READY", or "LM Studio (any)  READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–8 above by huckgod's preference.
+
+
+## 2026-05-05 — Day Zero, twenty-ninth session: `daimon memory search --inject-preview` — dry-run inspection over existing `daimon.context.get` RPC
+
+**The inject_context UX is now end-to-end inspectable.** Session 24 shipped `matched=N` annotation in the chat REPL post-RPC. Session 27 shipped CLI access to the audit trail. Session 28 shipped chain verification of the audit trail. This session ships dry-run inspection of what would be folded into a prompt before any provider call fires — the developer-facing tuning loop for `inject_context` queries. The full UX trinity: predict-via-preview → invoke-with-annotation → audit-via-query → integrity-via-verify.
+
+Wraps the existing `daimon.context.get` RPC, which has been live since session 6 but had no CLI surface in v0.1.x. The only consumer was the server-side `runContextRetrieval` helper that `handleProviderInvoke` and `handleProviderStream` call when `inject_context` is supplied. Wire shape is unchanged (`{query, max_tokens?, kinds?[]}` → `{context, memory_ids, token_estimate}`); only the consumer surface changed. Same architectural shape as session 26's `daimon doctor` (CLI over existing primitives) and session 27's `daimon activity query` (CLI over `daimon.activity.query`).
+
+**Probe at session start (mechanised via `daimon doctor` since session 26):**
+
+```
+$ ./bin/daimon doctor
+Daemon
+  state  not running — run `daimon unlock` to start
+Provider env (presence only)
+  ANTHROPIC_API_KEY  not set
+  OPENAI_API_KEY     not set
+  LMSTUDIO_API_KEY   not set
+Local runtimes
+  Ollama     http://localhost:11434 — ready (1 models: llama3.2:latest)
+  LM Studio  http://localhost:1234 — unreachable (… connect: connection refused)
+Live round-trip readiness
+  Claude streaming  blocked — ANTHROPIC_API_KEY not present
+  OpenAI streaming  blocked — OPENAI_API_KEY not present
+  LM Studio (any)   blocked — LM Studio server not present
+```
+
+All three live round-trips deferred since sessions 19/20/21 remain blocked. Proceeded to `daimon memory search --inject-preview` per the kickoff's natural-follow-on pick when no live round-trip frees up.
+
+**Files (this session):**
+
+| Path | Purpose |
+|---|---|
+| `cmd/daimon/flags.go` (new, 28 lines) | Factor `kindsFlag` out of `cmd_activity.go` into a shared file. The flag's validation contract (empty values rejected, comma-joined String render) lives in one place; both `daimon activity query` (multi-kind OR filter over the audit trail) and the new `daimon memory search --inject-preview` (multi-kind allowlist threaded into SPEC §11 retrieval) reference the same type. Kickoff prediction: factor (small, no shared state) — confirmed in session. |
+| `cmd/daimon/cmd_activity.go` (modified, −19 lines) | Removed the `kindsFlag` definition (moved to `flags.go`); also removed the now-unused `strings` import. No behavioural change — `runActivityQuery` continues to use the same type, just via the shared declaration. |
+| `cmd/daimon/cmd_memory.go` (modified, +110 lines) | New `runMemorySearchInjectPreview(stdout, stderr, query, kinds, maxTokens, asJSON)` writer-injected runner alongside the existing `runMemorySearch`. New `contextGetWire` and `contextGetResult` mirror structs (the wire shapes from `internal/server/handlers.go`'s `contextGetParams` / `contextGetResult` — re-declared here so cmd/daimon stays a pure client per SPEC §6.1's stable wire contract). `cmdMemorySearch` becomes a flag-parsing dispatcher: parses `--kind` (now `kindsFlag` repeatable), `--limit`, `--json`, `--inject-preview`, `--max-tokens` on a single FlagSet, then branches on `*injectPreview`. The non-inject-preview path validates `len(kinds) <= 1` (single-kind contract preserved in search mode) and `*maxTokens == 0` (--max-tokens is inject-preview-only); the inject-preview path validates `--limit` was not set via `flag.Visit` (its default 10 is a search-mode artifact that shouldn't trip an error in inject-preview's path). Each path produces a mode-specific usage string when `fs.NArg() != 1`. |
+| `cmd/daimon/cmd_memory_test.go` (new, ~310 lines, +11 PASS lines) | The cmd_memory package's first test file. Mirrors `activityHarness`: short `MkdirTemp("","dmn")` tempdir to dodge AF_UNIX 104-byte sun_path overflow on darwin, mock daemon goroutine, request capture into a buffered channel, `t.Setenv("DAIMON_HOME", dir)` points `daemonCall` at the harness socket. Coverage: happy-path renders header + formatted block + correct wire-shape; empty-match prints stderr note + empty stdout + nil error; wire-shape table-driven over 5 cases asserting `omitempty` semantics on both `max_tokens` and `kinds`; explicit `--max-tokens` reflects in budget denominator; `--json` roundtrips; daemon errors humanise (locked, not_running); plus four dispatcher-level cases (`--limit`+`--inject-preview`, `--max-tokens` alone, multi-kind in search mode, missing positional in both modes); end-to-end through `cmdMemorySearch` proving flag plumbing reaches the runner's RPC. |
+| `cmd/daimon/main.go` (modified, +7 lines) | Help block gains the `--inject-preview` form under `daimon memory search`, with a paragraph explaining "dry-run the SPEC §11 inject_context retrieval … same RPC the chat REPL's inject_context flow uses (`daimon.context.get`)". Doc comment unchanged (the package-level surface still groups under `daimon memory`). |
+| `CHECKPOINT.md` (modified) | Phase line gains the `daimon memory search --inject-preview` paragraph; build status updated (269 → 280 PASS lines, +11 in `cmd/daimon`); item 30 added in numerical order; per-package test count refreshed (35 cmd/daimon = 8 doctor + 16 activity + 11 memory). |
+
+**Decisions held from the kickoff (no re-deliberation):**
+
+- **`--inject-preview` is a flag on `memory search`, not a separate verb.** Discoverability win: "I already know `memory search`, I just add a flag" beats the conceptual purity of a separate `daimon memory inject-preview` verb. The kickoff explicitly named this in CHECKPOINT.md item-26's punt list ("search --inject-preview") and recommended it; implementation matches.
+- **Factor `kindsFlag` into shared `cmd/daimon/flags.go`.** Small, no shared state. Both `activity query` and the new `memory search --inject-preview` use the same repeatable-kind validator; one definition.
+- **Reuse `daemonCall` for error humanisation.** Locked → `daimon unlock first`; not_running → `daemon not running`. Same hint surface every other subcommand has.
+- **Writer-injected runner.** `runMemorySearchInjectPreview(stdout, stderr, ...)` follows the same pattern as `runActivityQuery` / `runActivityVerify`: tests capture rendered output without swapping `os.Stdout`. `cmdMemorySearch` wires `os.Stdout` / `os.Stderr` into the runner.
+- **Empty match is exit 0, not an error.** Search-with-no-hits is not a failure; the tuning loop should be cheap to iterate. Stderr note `no memories matched.`, empty stdout.
+- **`--json` emits the raw RPC envelope** verbatim (`{context, memory_ids, token_estimate}`). Tooling pipelines treat this as the stable shape; the human renderer's header is presentation-only.
+
+**Decisions made this session (small details not in the kickoff):**
+
+- **`--limit` and `--max-tokens` are mutually exclusive across the modes.** The kickoff said "exclusive with --limit" but didn't specify the error path. Implementation: passing `--limit` with `--inject-preview` errors with `--limit is meaningless with --inject-preview; use --max-tokens instead`; passing `--max-tokens` without `--inject-preview` errors with `--max-tokens is only valid with --inject-preview`. The `--limit` mismatch uses `flag.Visit` to detect "did the user actually set it" rather than checking against the default 10 — the default is a search-mode artifact that the inject-preview path should ignore silently if not explicitly set.
+- **Multi-`--kind` is rejected in search mode with an explicit error.** The kickoff predicted `kindsFlag` would be the type for both modes but didn't say what happens when search mode receives 2+ kinds. Implementation: error with `daimon memory search: --kind is single-valued in search mode; use --inject-preview for multi-kind retrieval`. Surfacing the mismatch is better than silently dropping `kinds[1:]` — the user typed both for a reason.
+- **Mode-specific usage strings.** When `fs.NArg() != 1`, the error message reflects which mode the user is in (the `--inject-preview` form lists `--max-tokens`; the search form lists `--limit`). Tiny UX detail; users don't read both lines when only one applies.
+- **Default budget display in the header.** When `--max-tokens` is unset, the header reads `tokens≈<estimate>/2000` — the SPEC §11 default 2000 is rendered explicitly so the denominator is honest. The kickoff didn't say what the budget denominator should be; rendering the actual default the server applies (rather than `tokens≈<estimate>/-` or omitting it) makes the budget tuning loop more obvious to the user.
+
+**Test count:** 269 → 280 PASS lines (+11: all in `cmd/daimon/cmd_memory_test.go` — the cmd_memory package's first test file). Per-package: 9 identity + 30 memory + 18 activity + 12 secretbox + 54 server + 12 provider + 17 claude + 22 openai + 24 ollama-chat + 30 lmstudio + 12 ollama embedder + 7 daimonhome + 35 cmd/daimon (8 doctor + 16 activity + 11 memory). All race-clean, all vet-clean, ~10s total run. `make build` clean.
+
+**Live smoke status (this session, against a temp `$DAIMON_HOME` after init/unlock + 4 seeded memories of 3 kinds):**
+
+```
+# Happy path: default budget, no kind filter
+$ daimon memory search --inject-preview "huckgod"
+[inject_preview] query="huckgod" matched=3 tokens≈35/2000
+
+[1] (fact) huckgod is the creator of Daimon
+[2] (preference) huckgod prefers terse, no-emoji responses
+[3] (fact) huckgod has a daughter
+
+# Lower budget reflects in the denominator
+$ daimon memory search --inject-preview --max-tokens 100 "huckgod"
+[inject_preview] query="huckgod" matched=3 tokens≈35/100
+[...same 3 entries...]
+
+# Single-kind allowlist filters to facts only
+$ daimon memory search --inject-preview --kind fact "huckgod"
+[inject_preview] query="huckgod" matched=2 tokens≈20/2000
+
+[1] (fact) huckgod is the creator of Daimon
+[2] (fact) huckgod has a daughter
+
+# Multi-kind allowlist (the inject-preview-only path)
+$ daimon memory search --inject-preview --kind fact --kind preference "huckgod"
+[inject_preview] query="huckgod" matched=3 tokens≈35/2000
+[...all 3 entries...]
+
+# Empty match: stderr note, empty stdout, exit 0
+$ daimon memory search --inject-preview "supercalifragilistic"
+no memories matched.
+$ echo $?
+0
+
+# --json roundtrips the raw envelope
+$ daimon memory search --inject-preview --json "huckgod"
+{
+  "context": "[1] (fact) ...\n[2] (preference) ...\n[3] (fact) ...",
+  "memory_ids": ["01KQW86TJ5F0...", "01KQW86THXZP...", "01KQW86THM9A..."],
+  "token_estimate": 35
+}
+
+# Flag-validation rejections (all exit 1)
+$ daimon memory search --inject-preview --limit 5 "q"
+daimon: --limit is meaningless with --inject-preview; use --max-tokens instead
+
+$ daimon memory search --max-tokens 500 "q"
+daimon: --max-tokens is only valid with --inject-preview
+
+$ daimon memory search --kind fact --kind preference "q"
+daimon: daimon memory search: --kind is single-valued in search mode; use --inject-preview for multi-kind retrieval
+```
+
+Six observable surfaces, six behaviours — all match the spec. The "tuning loop" property is visible: the developer can iterate on the query string and the kind allowlist with sub-second feedback (no provider call, no token billing) until the formatted block contains the right memories, then flip to `daimon chat --inject-context` knowing the retrieval will fold those exact memories into the system prompt.
+
+**Observation worth flagging for a future session:** `daimon.context.get` does NOT currently write an activity-log row — unlike `daimon.activity.query` (which writes `activity.queried` per SPEC §8.2). This means dry-run previews are invisible to the audit trail. The smoke output above proves it: after running the six `--inject-preview` calls above, `daimon activity query` showed only the 4 `memory.write` rows from setup, no `context.get` rows. Whether this is correct is a SPEC §8.2 design question both ways:
+
+- **Yes-by-symmetry:** Every meaningful action against the principal's data should be auditable. `activity.queried` is logged; `context.get` is the same shape (a pure read with no mutation) and should be too.
+- **Read-only-and-incidental:** `context.get` is invoked on every `provider.invoke` with `inject_context` already; auditing the standalone calls would double-log when the chat REPL runs them (the `provider.invoke` row already records `injected_memory_ids`). And the dry-run iteration during query tuning is high-frequency by design — auditing every keystroke during a tuning session adds noise without security value.
+
+The kickoff explicitly said "Zero new RPC, zero SPEC change" so the existing behaviour is preserved. Logged to the punt list for huckgod's call when relevant.
+
+**What this means in plain language:** before this session, the only way to see what `inject_context` would actually fold into a provider's prompt was to run `daimon chat --inject-context` (or `provider invoke --inject-context`) and read the model's response — which costs tokens, hits the network, and conflates "did retrieval pick the right memories?" with "did the model use them well?". After this session, `daimon memory search --inject-preview` does it in one shot from the CLI, with the formatted block visible verbatim and the matched IDs / token estimate annotated. The developer-facing tuning loop is now sub-second and free.
+
+The structural property worth naming: **inject-preview closes the prediction loop on `inject_context` without touching the provider invocation path.** Every primitive that participates in the SPEC §11 retrieval (the cosine search at `internal/memory/store.go`, the recency boost at `handlers.go:822`, the kind allowlist at `handlers.go:847`, the token-budget formatter at `handlers.go:399-414`) is exercised by the new CLI surface in dry-run; the live `daimon chat --inject-context` flow continues to use the same `runContextRetrieval` server-side helper. One implementation, two consumers, full UX coverage end-to-end.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Doctor makes "is LM Studio up?" a one-line answer; running the round-trip needs LM Studio running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Same shape — needs a real key in shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Same shape — needs a real key in shell env.
+4. **Audit `daimon.context.get` calls in SPEC §8.2.** Surfaced this session: standalone `daimon memory search --inject-preview` calls are invisible to the audit trail. Decide yes-by-symmetry vs read-only-and-incidental, then either (a) wire `s.alog.Append(ctx, "context.previewed", {query, matched})` into `handleContextGet` (bounded ~30 min, plus SPEC §8.2 row) or (b) document the omission as intentional in SPEC §8.2 with the rationale (read-only retrieval has no audit obligation; the `provider.invoke` row's `injected_memory_ids` is the durable record). Estimate: ~30 minutes either way.
+5. **Investigate the missing `daimon.created` genesis entry** (carry-over from session 27). Now structurally observable via `daimon activity verify`'s entry count vs the expected genesis. Bounded investigation: read `serve.go`'s startup path, confirm whether the genesis condition fires under the auto-spawn-from-`daimon-unlock` flow, decide whether the behaviour is correct or buggy. Estimate: ~30 minutes.
+6. **The asciicast** (carry-over from session 16). Doctor + activity query + activity verify + inject-preview all strengthen the operability scenes. A five-scene cut: (1) `daimon doctor` shows healthy environment, (2) `daimon memory write` + `daimon memory search --inject-preview` shows retrieval tuning, (3) `daimon chat --once` against Ollama with `[inject_context: query="..." matched=N]` annotation, (4) `daimon activity query` shows the audit trail, (5) `daimon activity verify` confirms chain integrity end-to-end. ~90s of runtime including narration.
+7. **NLnet NGI Zero application** (carry-over from session 16). The end-to-end audit-trail story (write → encrypt → preview-inject → invoke → query → verify) is the strongest operability beat the application has — write down the demo asciicast and reference it.
+8. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** v0.1.x has the inject_context UX trinity end-to-end (predict-via-preview → invoke-with-annotation → audit-via-query → integrity-via-verify). The next milestone is one of the deferred live round-trips (if any of them unblocks at next-session probe via `./bin/daimon doctor`), one of the in-tree polish items above (the `context.get` audit decision is the smallest sharp pick; the genesis-entry investigation benefits from verify's observability), the asciicast / NLnet (both stronger now), or the v0.2 design kickoff. If the doctor footer at next-session start says any of "Claude streaming  READY", "OpenAI streaming  READY", or "LM Studio (any)  READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–8 above by huckgod's preference.
+
+## 2026-05-06 — Day Zero, thirtieth session: `context.previewed` activity row — closing the audit-trail asymmetry
+
+**Probe at start:** `./bin/daimon doctor` showed all three live round-trips still blocked (no Anthropic/OpenAI keys in the harness env, LM Studio not running). Ollama up with `llama3.2:latest` loaded. Picked session 29's punted SPEC §8.2 question — should `daimon.context.get` calls write an activity-log row? — as the bounded-30-min in-tree item.
+
+**The decision: yes-by-symmetry.** `daimon.activity.query` writes `activity.queried`; `daimon.activity.verify` writes `activity.verified`; both are pure reads of the principal's data, both are audited per SPEC §8.2's "every meaningful action against the principal's data is logged" property. `daimon.context.get` is the same shape and the gap is an oversight. The asymmetry was hard to defend; the audit trail's "every meaningful action" promise is stronger if there are no carve-outs. The high-frequency-noise concern (session 29's punt-list articulated this) is real but small — a tuning session writes ~5–20 entries; the audit log already absorbs `activity.queried` rows at the same rate from session 27's self-incrementing-log property and nobody has complained about that noise.
+
+**Architectural call held in-session: do `handleProviderInvoke` and `handleProviderStream`'s internal `runContextRetrieval` calls also write a `context.previewed` row?** No. The `provider.invoke` / `provider.stream` row already records `injected_memory_ids` (since session 24); an additional `context.previewed` row alongside it would double-log a single principal action. Only the standalone `daimon.context.get` RPC path writes the new row; the inject_context-on-invoke path stays as-is. The split is enforced by the implementation: `handleContextGet` calls `s.alog.Append(activity.KindContextPreviewed, ...)` after a successful `runContextRetrieval`, while the two provider handlers call `runContextRetrieval` without the surrounding append.
+
+**What landed:**
+
+1. **`internal/activity/activity.go`** — added `KindContextPreviewed Kind = "context.previewed"` to the kind constants block alongside `KindActivityQueried` / `KindActivityVerified` / `KindKeyRotated`. One line.
+
+2. **`internal/server/handlers.go::handleContextGet`** — refactored from a one-line passthrough to runContextRetrieval into a four-line success-path-append shape mirroring `handleActivityQuery`'s `if rpcErr := ...; rpcErr != nil { return nil, rpcErr }` early-return then `s.alog.Append(...)` then `return res, nil`. Payload is `{query, matched: len(res.MemoryIDs)}` — the same shape `activity.queried` already uses for `matched=N`. Append failure is logged via `s.logf` and does NOT fail the RPC (same belt-and-suspenders pattern as every other `s.alog.Append` call in this file: the user got their context, audit gap is the lesser harm). Also added a new doc-comment paragraph naming the architectural decision (the inject_context-on-invoke path deliberately does NOT write this row).
+
+3. **`cmd/daimon/cmd_activity.go::summarizeEntry`** — added `case "context.previewed": return fmt.Sprintf("query=%q matched=%d", ...)`. The `%q` is intentional — quoted query strings are easier to scan in the audit table view than bare strings (a query like "huckgod ships at night" reads cleaner as `query="huckgod ships at night"` than as `query=huckgod ships at night matched=...`). Mirrors how `daimon memory search --inject-preview` already prints `[inject_preview] query="..." matched=N`.
+
+4. **SPEC.md §8.2** — added a `context.previewed` row to the "Logged kinds" table with the explanation `"Each standalone daimon.context.get call ({query, matched}); the inject-context-on-invoke path is recorded under provider.invoke with injected_memory_ids instead, to avoid double-logging a single action"`. **§6.1** — added a paragraph after the `daimon.context.get` wire-shape block documenting the success-only-append semantics, the no-double-log-with-invoke rule, and the empty-match-still-appends-but-error-skips rule (same shape as session 28's `activity.verified` paragraph).
+
+5. **`internal/server/server_test.go`** — three new tests:
+   - `TestContextGet_AppendsContextPreviewed` (happy path: 3 memories written, query "alpha" → 1 `context.previewed` entry in the log with `payload.query == "alpha"` and `payload.matched == len(got.MemoryIDs)`)
+   - `TestContextGet_EmptyMatchStillAppends` (no memories, query "nothingever" → result has empty `MemoryIDs`, but log still has 1 `context.previewed` entry with `matched=0`. Guards the failure-vs-empty-match distinction)
+   - `TestContextGet_ErrorPathDoesNotAppend` (close the store mid-test, then call context.get → search errors, RPC fails, log has 0 `context.previewed` entries. Mirrors session 28's verify-fails-no-extend rule)
+
+6. **`internal/server/provider_handlers_test.go::TestProviderInvoke_InjectContextEnrichesSystem`** — extended with the no-double-log assertion: after the inject_context-driven `provider.invoke` call, query the log for `KindContextPreviewed` and assert zero entries. Guards the architectural decision from this session against future regression.
+
+7. **`cmd/daimon/cmd_activity_test.go::TestSummarizeEntry_PerKindShapes`** — added a `context_previewed` table case asserting `summarizeEntry` renders `query="huckgod" matched=3` for the new kind.
+
+**Test count:** 280 → 283 PASS lines (+3 top-level: the three new server tests). The new `provider_handlers_test.go` assertion extends an existing test rather than adding a new top-level. The new `summarizeEntry` table case adds at the indented subtest level (not top-level). Race-clean, vet-clean.
+
+**Live smoke (this session, against a temp `$DAIMON_HOME` after init/unlock + 3 seeded memories of 2 kinds):**
+- `daimon memory search --inject-preview "favourite"` rendered 2 matched memories + the formatted block.
+- `daimon memory search --inject-preview "xyznonexistent"` printed `no memories matched.` to stderr.
+- `daimon activity query --kind context.previewed` rendered both rows in chain order: `query="favourite" matched=2` and `query="xyznonexistent" matched=0` — confirming both happy-path and empty-match-still-appends.
+- `daimon activity verify` reported `verified 6 entries — chain ok` (3 memory.write + 2 context.previewed + 1 activity.queried from the verify-itself self-incrementing property), confirming the new row participates in the chain correctly under encryption (AEAD payload + plaintext hash chain per SPEC §8.1).
+- `daimon activity query --kind context.previewed --json` round-tripped through `python3 -m json.tool` cleanly: `payload.{query, matched}` decrypts; `id`/`ts`/`kind`/`prev_hash`/`hash`/`signature` stay in clear (per SPEC §8.1's at-rest confidentiality model).
+
+**What this means in plain language:** before this session, `daimon memory search --inject-preview` (the session 29 surface) was invisible to the audit trail. After this session, every preview-tuning call appends a `context.previewed` row alongside `memory.write`, `activity.queried`, `activity.verified`, `provider.invoke`. The audit-trail subsystem is now fully closed — every RPC that touches the principal's memory, activity, or identity surface is auditable, AND every audit row is human-queryable AND chain-verifiable from the CLI. The story becomes: every byte of state the daimon owns is encrypted at rest, signed, hash-chained, and inspectable.
+
+The structural property worth naming: **the audit trail is now reflexive over its own surface.** Every read of the audit trail (`activity.query`, `activity.verify`) writes a corresponding audit row; every read of the principal's memory through the daimon's retrieval policy (`context.get` standalone) writes a corresponding audit row; every write to the principal's memory (`memory.write`, `memory.import`) writes a corresponding audit row; every model invocation that consumed retrieval (`provider.invoke`, `provider.stream` with `inject_context`) records the same retrieval IDs in its audit row. The "every meaningful action" promise has no carve-outs in v0.1's surface.
+
+The kickoff predicted ~285–287 PASS lines (extrapolating from the 5 test outline). Actual landed at 283 because the kickoff counted the no-double-log assertion as a new top-level test (it's an extension of an existing test) and the `summarizeEntry` table case as a new top-level (it adds at the indented subtest level). Same coverage, different counting. The new top-level count (+3) matches the three architectural properties under test: append-on-match, append-on-empty-match, no-append-on-error.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Five-minute close when LM Studio is running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Five-minute close when a real key is in the shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Five-minute close when a real key is in the shell env.
+4. **Investigate the missing `daimon.created` genesis entry** (carry-over from session 27). Now structurally observable via `daimon activity verify`'s entry count vs the expected genesis. The auto-spawn from `daimon unlock` may skip the genesis write because `daimon init` already created the keystore but didn't open the activity log, so the first `serve` run sees an empty log AND a fresh keystore. Bounded investigation: read `serve.go`'s startup path, confirm whether the genesis condition fires under the auto-spawn flow. Decide whether the behaviour is correct (chain root should be a write, not a read; if `daimon init` creates the daimon then `daimon.created` should fire then, not on first serve) or buggy (genesis silently dropped). Estimate: ~30 minutes.
+5. **The asciicast** (carry-over from session 16). Five scenes: (1) `daimon doctor` shows healthy environment, (2) `daimon memory write` + `daimon memory search --inject-preview` shows retrieval tuning (now writing `context.previewed` rows the audit trail captures), (3) `daimon chat --once` against Ollama with `[inject_context: query="..." matched=N]` annotation, (4) `daimon activity query` shows the audit trail (now including `context.previewed` rows), (5) `daimon activity verify` confirms chain integrity end-to-end. ~90s of runtime including narration.
+6. **NLnet NGI Zero application** (carry-over from session 16). Operability story is now strongest yet — a complete write → encrypt → preview-inject → invoke → query → verify trail, all from the CLI, all chain-verifiable.
+7. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** the audit-trail subsystem is closed end-to-end. Every read of the principal's data through the daimon writes an audit row; every audit row is chain-verifiable; every audit row is human-queryable. The daimon's "every meaningful action against the principal's data is logged" promise has zero carve-outs in v0.1. If the doctor footer says any of "Claude streaming READY", "OpenAI streaming READY", or "LM Studio (any) READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–7 above by huckgod's preference. The genesis-entry investigation is the smallest sharp in-tree pick (~30 min, one file read + one decision); the asciicast or the NLnet application are the strongest external-facing follow-ups (both blocked on huckgod's shell having real API keys, both stronger after this session's audit-trail closure).
+
+---
+
+## 2026-05-06 — Day Zero, thirty-first session: `daimon.created` genesis row — closing the chain-root asymmetry
+
+**Probe at start:** `./bin/daimon doctor` showed all three live round-trips still blocked (no Anthropic/OpenAI keys in the harness env, LM Studio not running). Picked session 30's punt-list item 4 — investigate the missing `daimon.created` genesis row — as the bounded ~30 min in-tree work.
+
+**Hypothesis confirmation:** `grep "daimon.created\|KindDaimonCreated"` across the tree showed exactly one production write site for genesis: `cmd/daimond/main.go:214` inside `runDemo` (the self-contained 8-step demonstration). Production lifecycle (`init` / `unlock` / `serve`) never wrote genesis. Chain root under the production path was whatever the user happened to do first (a `memory.write`, an `activity.queried` from a self-incrementing query, etc.) — chain integrity held because every entry's `prev_hash` correctly chained back to `ZeroHash`, but the chain's first entry had no semantic meaning. The hypothesis from session 27's punt list — that genesis was silently dropped under the auto-spawn flow — was correct, with one refinement: it wasn't "silently dropped"; it was never wired into the production code path at all. Demo got it right; the production CLI never had it.
+
+**The decision: option A — `daimon init` writes genesis.** Two reasonable readings of SPEC §8.2's "First boot": (A) init = key generation = birth = genesis; (B) first unlock against an empty log = genesis. Both architecturally valid. Chose A because (1) the lifecycle invariant is structurally cleaner — `daimon init` creates the keystore + 1-entry log; `daimon unlock` never mutates log shape, it just opens the log. The asymmetry was previously flipped (init created the keystore but not the log; unlock created the log but not the keystore); option A repairs it. (2) "First boot" reads cleanly as "key generation" — the daimon is born when its keypair is generated, not when it first wakes up. (3) Option B would have nicer retro-fix ergonomics for pre-existing alpha homes, but (a) huckgod is the only existing alpha and can `daimon init --force` a clean home, and (b) option B bolts a state-shape side-effect onto an already-load-bearing handler (`handleIdentityUnlock`), which feels worse than putting it in the dedicated provisioning command.
+
+**Architectural call held in-session: what does `daimon init --force` do with stale `activity.log` and `memory.db`?** Removes both. `--force` is documented as DESTROYS the current identity; the activity log is signed under the discarded identity, and the memory DB is encrypted under a subkey derived from the discarded identity — both are unreadable by the new identity. Leaving them on disk only produces a chain Verify failure on the first audit (entry 0's signature would be from the old key) and a memory store the new identity can't decrypt. So `--force` becomes "discard current identity AND its data trail", which matches the documented intent. Without `--force`, the existing keystore-presence check already errors out, so this code path only runs under explicit user opt-in. Confirmed live: `--force` re-init produces a single-entry chain under the new DID, with the old chain wiped.
+
+**Architectural call held in-session: abort init or warn on genesis-append failure?** Keystore is already on disk by the time genesis runs. Aborting after a successful keystore save would leave the user in a stuck state (subsequent re-runs would error on keystore-exists, requiring `--force` and discarding the just-saved identity). Implementation does NOT abort: genesis-append errors return an error from `runInit`, but the keystore is durable. Future re-runs would either succeed (transient disk issue cleared) or surface the same error. In practice the failure surface is tiny (the activity log is a single-file create-or-append in the same directory the keystore just wrote to; if disk is full or perms are wrong, the keystore save would have failed first). Trade-off accepted: in the unlikely double-failure case, the user has a daimon they can unlock and use, just with a missing genesis row — no different from the pre-fix state, which is the world we're already living in. The lesser harm.
+
+**What landed:**
+
+1. **`cmd/daimon/cmd_init.go`** — refactored `cmdInit` to extract `runInit(home, password, force) (*identity.Identity, error)` containing the keystore-overwrite check, optional `--force` cleanup of `activity.log` + `memory.db`, key generation, keystore save, and genesis activity-row write. Split exists for testability — tests drive `runInit` directly without TTY mocking. `cmdInit` reduces to: parse flags, resolve home, prompt password (twice with confirmation), call `runInit`, print success block. Updated the success block to surface the genesis row: `Genesis: <path> (1 entry, kind=daimon.created)`. Updated `--force` flag help text: `(DANGEROUS — discards the current identity, activity log, and memory store)`.
+
+2. **`SPEC.md` §8.2** — updated the `daimon.created` row in the "Logged kinds" table from the cryptic `"First boot"` to the full semantic: `"Genesis row, written by daimon init immediately after keystore generation. Payload {version, did}. The chain root is always this kind; entry index 0 has prev_hash = ZeroHash. daimon unlock never mutates log shape — it just opens the existing log."` Added a **Lifecycle invariant** paragraph after the kinds table documenting: (a) post-init the chain has exactly one entry (the genesis), (b) `--force` re-init produces the same invariant by removing prior `activity.log` + `memory.db`, (c) `daimon-core` programmatic adopters who skip the init CLI are responsible for their own genesis (Verify still tolerates an empty-prefix chain — the chain root just carries no semantic meaning without it).
+
+3. **`cmd/daimon/cmd_init_test.go`** (new file — first test for the `init` subcommand): four tests covering the lifecycle invariant in detail.
+   - `TestRunInit_FreshHome_WritesGenesisRow` (the core property: post-init the activity log has exactly 1 entry, kind = `daimon.created`, prev_hash = `ZeroHash`, signature verifies under the just-generated identity, `Verify` returns `(1, nil)`)
+   - `TestRunInit_GenesisPayloadCarriesDIDAndVersion` (pins SPEC §8.2 payload shape for external tooling — payload's `did` matches `id.DID()`, payload's `version` matches the CLI version constant)
+   - `TestRunInit_RefusesOverwriteWithoutForce` (existing safety net: re-init without `--force` errors with the documented message AND leaves the existing `activity.log` byte-identical, proving the rejected init does not mutate state)
+   - `TestRunInit_ForceCleansActivityLogAndMemoryDB` (the `--force` semantic: pre-seed an old daimon with a non-genesis activity entry + a stale `memory.db` byte file, then `--force` re-init produces a fresh DID, the stale `memory.db` is gone, and `Verify` under the new identity returns exactly 1 entry — the new genesis. Without the cleanup, Verify would fail at entry 0 because the stale entries are signed by the old identity.)
+
+**Test count:** 283 → 287 PASS lines (+4 top-level: the four new init tests). Race-clean, vet-clean, all 13 packages green.
+
+**Live smoke (this session, against a temp `$DAIMON_HOME`):**
+- `daimon init` (fresh home) printed `Genesis: <path>/activity.log (1 entry, kind=daimon.created)` after keystore success.
+- On-disk activity.log shows the JSONL line with `kind:"daimon.created"` (clear) and an AEAD-encrypted base64 payload (per SPEC §8.1).
+- `daimon unlock` succeeded; `daimon identity get` returned the just-generated DID.
+- `daimon activity verify` reported `verified 1 entries — chain ok` — exactly the lifecycle invariant the SPEC paragraph promises. (Pre-fix, this would have reported `verified 1 entries — chain ok` only because verify-itself appends `activity.verified`, which was structurally weird — the "first entry" was the verify call's own audit row, not a meaningful action.)
+- `daimon activity query` rendered the genesis row at the top: `daimon.created  01KQY...  did=did:key:z6Mkh...` followed by the `activity.verified  ...  verified=1` row from the prior verify.
+- Re-init without `--force`: errored with `daimon: keystore already exists at .../identity.keystore — pass --force to overwrite (DESTROYS the current identity)` (existing safety net intact).
+- Re-init with `--force`: produced a fresh DID, fresh genesis under the new DID, stale memory.db wiped. `Verify` under the new identity returned `verified 1 entries — chain ok` — the old chain (signed by the old identity) was cleanly replaced.
+
+**What this means in plain language:** before this session, the daimon's chain had no semantic root — entry 0 was whatever the user happened to do first, and the audit trail's first row was a coincidence of usage. After this session, every daimon's chain begins with a `daimon.created` row at init, naming the version it was born under and the DID it was born as. The chain root is itself a meaningful action: the daimon's birth.
+
+The structural property worth naming: **the audit trail is now totally meaningful from entry 0.** From the moment a daimon is born (init), every byte of state it owns is encrypted at rest, signed, hash-chained, and inspectable from the CLI. The chain's root is a documented, tested action; every subsequent entry chains back to it. The "every meaningful action" promise has zero carve-outs in v0.1, AND the chain root is itself one of those meaningful actions. Sessions 28 + 29 + 30 closed the audit trail's surface area; this session closes its origin.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Five-minute close when LM Studio is running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Five-minute close when a real key is in the shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Five-minute close when a real key is in the shell env.
+4. **The asciicast** (carry-over from session 16). Five scenes, now strongest yet: (1) `daimon doctor` shows healthy environment, (2) `daimon memory write` + `daimon memory search --inject-preview` shows retrieval tuning (writing `context.previewed` rows visible in scene 4), (3) `daimon chat --once` against Ollama with `[inject_context: query="..." matched=N]` annotation, (4) `daimon activity query` shows the audit trail — **now starting with the genesis `daimon.created` row** (a much stronger beat than the pre-fix "verified N entries" without a named root), (5) `daimon activity verify` confirms chain integrity end-to-end. ~90s of runtime including narration.
+5. **NLnet NGI Zero application** (carry-over from session 16). Operability story is now strongest yet — birth → encrypt → preview-inject → invoke → query → verify, every entry named and tested.
+6. **v0.2 — x402 / agent wallet, design-only session.** Multi-session arc; opens the next phase. SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** the audit-trail subsystem is closed end-to-end **and from entry 0**. Every chain begins with a meaningful named action (the genesis); every subsequent meaningful action extends it; every read of the chain itself extends it; every action is inspectable and chain-verifiable from the CLI. The daimon's "every meaningful action against the principal's data is logged, including its own birth" promise has zero carve-outs in v0.1. If the doctor footer says any of "Claude streaming READY", "OpenAI streaming READY", or "LM Studio (any) READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–6 above by huckgod's preference. With the audit-trail closure now complete (sessions 28 + 29 + 30 + 31 in sequence), the strongest external-facing follow-ups (asciicast, NLnet) get their cleanest demo material yet.
+

@@ -223,6 +223,8 @@ daimon.context.get({
 
 The daimon decides what is relevant for a given query. Implementations MAY use semantic similarity, recency weighting, or learned policies. v0.1 default: cosine similarity + recency boost.
 
+A successful standalone `daimon.context.get` call appends a `context.previewed` entry to the activity log with `{query, matched}` payload (SPEC §8.2), mirroring the self-audit shape of `activity.queried` / `activity.verified` — every meaningful action against the principal's data is itself logged. The inject-context-on-invoke path deliberately does NOT write this row: the `provider.invoke` entry already records `injected_memory_ids` for the same retrieval, and an additional `context.previewed` alongside it would double-log a single principal action. Empty match (`matched=0`) still appends; failure (search-layer error) does NOT, by the same reasoning that gates `activity.verified`'s success-only-append rule (§6.1).
+
 #### Activity log
 
 ```
@@ -236,7 +238,14 @@ daimon.activity.query({
   kind?: string,
   limit?: number
 }) → ActivityEntry[]
+
+daimon.activity.verify() → {
+  verified: number,         // count of entries that passed all three checks
+  ok: boolean               // true iff verified == total entries on disk
+}
 ```
+
+`daimon.activity.verify` walks the log from genesis to the current head, asserting three properties for every entry: (1) `prev_hash` matches the previous entry's `hash`, (2) the stored `hash` recomputes from the canonical *plaintext* form (the encrypted payload is decrypted first, since the chain commits to plaintext per §8.1), and (3) `signature` verifies under the bound identity's public key. On success the daimon appends a new `activity.verified` entry to the log itself with `{verified: N}` payload, mirroring the `activity.queried` self-audit shape from §8.2 — every meaningful action against the log is itself logged. On failure (any of the three checks rejects an entry, or AEAD authentication fails on a tampered payload) the call returns a typed RPC error and **does NOT** append an `activity.verified` entry: extending a corrupt chain would compound the problem.
 
 #### Provider routing
 
@@ -346,13 +355,17 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 
 | Kind | When |
 |---|---|
-| `daimon.created` | First boot |
+| `daimon.created` | Genesis row, written by `daimon init` immediately after keystore generation. Payload `{version, did}`. The chain root is always this kind; entry index 0 has `prev_hash = ZeroHash`. `daimon unlock` never mutates log shape — it just opens the existing log. |
 | `memory.write` | Each memory write |
 | `memory.export` | Each export |
 | `memory.import` | Each import |
 | `provider.invoke` | Each provider call (mediated mode) |
 | `activity.queried` | Each query against the log itself |
+| `activity.verified` | Each successful chain verification (count of entries verified) |
+| `context.previewed` | Each standalone `daimon.context.get` call (`{query, matched}`); the inject-context-on-invoke path is recorded under `provider.invoke` with `injected_memory_ids` instead, to avoid double-logging a single action |
 | `key.rotated` | did:ion key rotations |
+
+**Lifecycle invariant.** A daimon provisioned via `daimon init` produces a one-entry chain immediately: the genesis `daimon.created` row is appended before init returns. Every subsequent meaningful action (memory write/export/import, provider invocation, audit query/verify, context preview) extends the chain. `daimon activity verify` against a freshly-init'd daimon reports `verified 1 entries — chain ok`. The `--force` re-init flag removes the prior `activity.log` and `memory.db` (both are signed/encrypted under the discarded identity and unreadable by the new one), so the post-`--force` invariant matches the post-fresh-init invariant: exactly one entry, the new genesis. Adopters who use `daimon-core` programmatically without going through the `daimon init` CLI are responsible for writing the genesis row themselves; `daimon activity verify` does not require it (an empty-prefix chain still verifies), but the chain root carries no semantic meaning without it.
 
 ---
 

@@ -55,6 +55,7 @@ func (s *Server) registerMethods() {
 		"daimon.context.get":     s.handleContextGet,
 		"daimon.activity.append": s.handleActivityAppend,
 		"daimon.activity.query":  s.handleActivityQuery,
+		"daimon.activity.verify": s.handleActivityVerify,
 		"daimon.provider.list":   s.handleProviderList,
 		"daimon.provider.invoke": s.handleProviderInvoke,
 	}
@@ -347,12 +348,29 @@ type contextGetResult struct {
 //
 // The actual retrieval and formatting lives in runContextRetrieval so the
 // provider.invoke handler can reuse it for the inject_context flow.
+//
+// Per SPEC §8.2 a successful standalone context.get appends a
+// context.previewed entry to the activity log, mirroring the audit symmetry
+// of activity.queried/activity.verified. The inject_context-on-invoke path
+// deliberately does NOT write this row — the provider.invoke entry already
+// records injected_memory_ids for the same retrieval, and a context.previewed
+// alongside it would double-log a single principal action.
 func (s *Server) handleContextGet(ctx context.Context, params json.RawMessage) (any, *RPCError) {
 	var p contextGetParams
 	if rpcErr := decodeParams(params, &p); rpcErr != nil {
 		return nil, rpcErr
 	}
-	return s.runContextRetrieval(ctx, p.Query, p.MaxTokens, p.Kinds)
+	res, rpcErr := s.runContextRetrieval(ctx, p.Query, p.MaxTokens, p.Kinds)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	if _, err := s.alog.Append(ctx, activity.KindContextPreviewed, map[string]any{
+		"query":   p.Query,
+		"matched": len(res.MemoryIDs),
+	}); err != nil {
+		s.logf("activity append (context.previewed): %v", err)
+	}
+	return res, nil
 }
 
 // runContextRetrieval pulls candidates from memory.Search, re-ranks with the
@@ -764,6 +782,39 @@ func (s *Server) handleActivityQuery(ctx context.Context, params json.RawMessage
 	return entries, nil
 }
 
+// --- daimon.activity.verify --------------------------------------------------
+
+type activityVerifyResult struct {
+	Verified int  `json:"verified"`
+	OK       bool `json:"ok"`
+}
+
+// handleActivityVerify walks the activity-log chain end-to-end, asserting
+// prev_hash continuity, BLAKE3 hash recomputation over the canonical plaintext,
+// and Ed25519 signature validity for every entry. On success appends a new
+// activity.verified entry to the log so the audit trail records the
+// verification itself; on failure returns a typed CodeInternalError carrying
+// the underlying activity error and does NOT append (extending a corrupt chain
+// would compound the problem — see SPEC §6.1).
+//
+// Like activity.query, this method takes no params; the verifier walks the
+// whole chain or nothing.
+func (s *Server) handleActivityVerify(ctx context.Context, _ json.RawMessage) (any, *RPCError) {
+	n, err := s.alog.Verify(ctx)
+	if err != nil {
+		return nil, mapActivityError(err, "verify")
+	}
+	// Append AFTER verification so the verify-of-N entry isn't itself in scope
+	// of this verify. The next verify call walks N+1 entries (including this
+	// one) — same self-incrementing property as activity.queried.
+	if _, aerr := s.alog.Append(ctx, activity.KindActivityVerified, map[string]any{
+		"verified": n,
+	}); aerr != nil {
+		s.logf("activity append (activity.verified): %v", aerr)
+	}
+	return activityVerifyResult{Verified: n, OK: true}, nil
+}
+
 // --- helpers -----------------------------------------------------------------
 
 // decodeParams unmarshals params into v, returning a typed RPC error on
@@ -809,9 +860,13 @@ func mapActivityError(err error, op string) *RPCError {
 	case errors.Is(err, activity.ErrLogClosed):
 		return newError(CodeInternalError, "activity log is closed")
 	case errors.Is(err, activity.ErrSignatureFailed):
-		return newError(CodeSignatureFailed, "activity signature verification failed")
+		return newError(CodeSignatureFailed, "activity signature verification failed", err.Error())
 	case errors.Is(err, activity.ErrChainBroken):
-		return newError(CodeInternalError, fmt.Sprintf("activity chain broken: %v", err))
+		return newError(CodeInternalError, "activity chain broken", err.Error())
+	case errors.Is(err, activity.ErrHashMismatch):
+		return newError(CodeInternalError, "activity hash mismatch", err.Error())
+	case errors.Is(err, activity.ErrInvalidCiphertext):
+		return newError(CodeInternalError, "activity payload AEAD authentication failed", err.Error())
 	case errors.Is(err, identity.ErrIdentityLocked):
 		return newError(CodeIdentityLocked, "identity is locked")
 	}

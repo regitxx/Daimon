@@ -391,6 +391,21 @@ func TestProviderInvoke_InjectContextEnrichesSystem(t *testing.T) {
 	if _, hasInjected := payload["injected_memory_ids"]; !hasInjected {
 		t.Error("payload should include injected_memory_ids when inject_context was set")
 	}
+
+	// Session 30 invariant: the inject-context-on-invoke path does NOT write a
+	// context.previewed row. The provider.invoke entry's injected_memory_ids
+	// already records the same retrieval; an additional context.previewed
+	// would double-log a single principal action. Only the standalone
+	// daimon.context.get RPC writes context.previewed.
+	previewed, err := f.alog.Query(context.Background(), activity.QueryOptions{
+		Kind: activity.KindContextPreviewed,
+	})
+	if err != nil {
+		t.Fatalf("query context.previewed: %v", err)
+	}
+	if len(previewed) != 0 {
+		t.Errorf("inject-context-on-invoke must not write context.previewed; got %d entries", len(previewed))
+	}
 }
 
 // TestProviderInvoke_RPCResponseSurfacesInjectedMemoryIDs proves the session-24

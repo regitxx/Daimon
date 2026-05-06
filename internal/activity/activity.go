@@ -52,13 +52,15 @@ func ZeroHash() string {
 type Kind string
 
 const (
-	KindDaimonCreated   Kind = "daimon.created"
-	KindMemoryWrite     Kind = "memory.write"
-	KindMemoryExport    Kind = "memory.export"
-	KindMemoryImport    Kind = "memory.import"
-	KindProviderInvoke  Kind = "provider.invoke"
-	KindActivityQueried Kind = "activity.queried"
-	KindKeyRotated      Kind = "key.rotated"
+	KindDaimonCreated    Kind = "daimon.created"
+	KindMemoryWrite      Kind = "memory.write"
+	KindMemoryExport     Kind = "memory.export"
+	KindMemoryImport     Kind = "memory.import"
+	KindProviderInvoke   Kind = "provider.invoke"
+	KindActivityQueried  Kind = "activity.queried"
+	KindActivityVerified Kind = "activity.verified"
+	KindContextPreviewed Kind = "context.previewed"
+	KindKeyRotated       Kind = "key.rotated"
 )
 
 // Common errors.

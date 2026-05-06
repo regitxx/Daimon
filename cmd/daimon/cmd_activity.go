@@ -6,24 +6,25 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 	"time"
 )
 
-// cmdActivity routes the `activity` subcommand surface. v0.1 ships `query`
-// only — a thin wrapper over daimon.activity.query so the audit trail every
-// other subcommand writes to is inspectable from the CLI without hand-rolling
-// JSON-RPC. `daimon activity verify` (chain-integrity check) is a future
-// addition; the RPC for it does not exist yet.
+// cmdActivity routes the `activity` subcommand surface. `query` is the
+// human-readable view over the audit trail every other subcommand writes to;
+// `verify` walks the chain end-to-end (prev_hash continuity + BLAKE3 hash
+// recomputation + Ed25519 signature) and reports pass/fail. Both are thin
+// wrappers over their corresponding RPC.
 func cmdActivity(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: daimon activity <query> [args]")
+		return fmt.Errorf("usage: daimon activity <query|verify> [args]")
 	}
 	sub := args[0]
 	rest := args[1:]
 	switch sub {
 	case "query":
 		return runActivityQuery(os.Stdout, os.Stderr, rest)
+	case "verify":
+		return runActivityVerify(os.Stdout, os.Stderr, rest)
 	default:
 		return fmt.Errorf("daimon activity: unknown subcommand %q", sub)
 	}
@@ -86,25 +87,6 @@ func (f *sinceFlag) Set(s string) error {
 		return nil
 	}
 	return fmt.Errorf("--since must be a Go duration (e.g. 1h) or RFC3339 timestamp (e.g. 2026-05-05T00:00:00Z); got %q", s)
-}
-
-// kindsFlag captures repeated --kind flags. flag.Var calls Set once per
-// occurrence, so successive --kind values append rather than overwrite.
-type kindsFlag []string
-
-func (k *kindsFlag) String() string {
-	if k == nil {
-		return ""
-	}
-	return strings.Join(*k, ",")
-}
-
-func (k *kindsFlag) Set(v string) error {
-	if v == "" {
-		return fmt.Errorf("--kind cannot be empty")
-	}
-	*k = append(*k, v)
-	return nil
 }
 
 // runActivityQuery is the testable body of `daimon activity query`. The
@@ -195,6 +177,52 @@ func filterEntriesByKinds(entries []activityEntry, kinds []string, limit int) []
 	return out
 }
 
+// --- daimon activity verify --------------------------------------------------
+
+// activityVerifyResult mirrors internal/server.activityVerifyResult — the wire
+// shape returned by daimon.activity.verify on success. The verifier walks the
+// whole chain or nothing, so there are no input flags besides --json.
+type activityVerifyResult struct {
+	Verified int  `json:"verified"`
+	OK       bool `json:"ok"`
+}
+
+// runActivityVerify is the testable body of `daimon activity verify`. Returns
+// nil on success (chain ok), an error on failure (chain corrupt / signature
+// failure / AEAD authentication failure / daemon locked / not running). The
+// non-nil error path drives `daimon activity verify`'s exit code 1, which lets
+// `daimon activity verify && deploy` work as a pre-flight check in scripts.
+func runActivityVerify(stdout, stderr io.Writer, args []string) error {
+	fs := flag.NewFlagSet("daimon activity verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	asJSON := fs.Bool("json", false, "emit the result as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("daimon activity verify takes no positional arguments")
+	}
+
+	var res activityVerifyResult
+	if err := daemonCall("daimon.activity.verify", struct{}{}, &res); err != nil {
+		// Server-side failures (chain broken / signature failed / AEAD) arrive
+		// here as a CodeInternalError carrying the activity error text. In JSON
+		// mode emit a structured failure envelope on stdout so tooling can
+		// switch on ok:false; in human mode let exitOnErr render the reason
+		// once via the wrapped error (avoids the stdout/stderr duplicate the
+		// pre-print pattern produces).
+		if *asJSON {
+			_ = printJSONTo(stdout, map[string]any{"ok": false, "error": err.Error()})
+		}
+		return fmt.Errorf("chain INVALID: %w", err)
+	}
+	if *asJSON {
+		return printJSONTo(stdout, res)
+	}
+	fmt.Fprintf(stdout, "verified %d entries — chain ok\n", res.Verified)
+	return nil
+}
+
 // --- rendering ---------------------------------------------------------------
 
 func renderActivityEntries(w io.Writer, entries []activityEntry) error {
@@ -244,6 +272,10 @@ func summarizeEntry(e activityEntry) string {
 		return fmt.Sprintf("imported=%d skipped=%d", intField(p, "imported"), intField(p, "skipped"))
 	case "activity.queried":
 		return fmt.Sprintf("matched=%d", intField(p, "matched"))
+	case "activity.verified":
+		return fmt.Sprintf("verified=%d", intField(p, "verified"))
+	case "context.previewed":
+		return fmt.Sprintf("query=%q matched=%d", stringField(p, "query"), intField(p, "matched"))
 	case "daimon.created":
 		return "did=" + stringField(p, "did")
 	default:

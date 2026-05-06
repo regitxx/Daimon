@@ -430,6 +430,107 @@ func TestContextGetKindsFilter(t *testing.T) {
 	}
 }
 
+// TestContextGet_AppendsContextPreviewed proves the SPEC §8.2 audit symmetry
+// added in session 30: a successful standalone daimon.context.get appends a
+// context.previewed entry whose payload carries {query, matched} — mirroring
+// the self-audit shape of activity.queried (matched=N).
+func TestContextGet_AppendsContextPreviewed(t *testing.T) {
+	f := newFixture(t)
+	for _, c := range []string{
+		"alpha is the first",
+		"alpha and beta together",
+		"gamma sits alone",
+	} {
+		f.call(t, "daimon.memory.write", map[string]any{"kind": "fact", "content": c})
+	}
+	resp := f.call(t, "daimon.context.get", map[string]any{"query": "alpha"})
+	if resp.Error != nil {
+		t.Fatalf("context.get error: %+v", resp.Error)
+	}
+	var got contextGetResult
+	resultAs(t, resp, &got)
+
+	entries, err := f.alog.Query(context.Background(), activity.QueryOptions{
+		Kind: activity.KindContextPreviewed,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 context.previewed entry, got %d", len(entries))
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(entries[0].Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if pl["query"] != "alpha" {
+		t.Errorf("payload.query: got %v want %q", pl["query"], "alpha")
+	}
+	if v, _ := pl["matched"].(float64); int(v) != len(got.MemoryIDs) {
+		t.Errorf("payload.matched: got %v want %d", pl["matched"], len(got.MemoryIDs))
+	}
+}
+
+// TestContextGet_EmptyMatchStillAppends guards the failure-vs-empty-match
+// distinction: a query that matches no memories is not an error — the daimon
+// honestly answers "no relevant context" — and the audit row still appends
+// with matched=0. Only an actual retrieval error (search-layer failure) skips
+// the append, by the same success-only-append rule activity.verified uses.
+func TestContextGet_EmptyMatchStillAppends(t *testing.T) {
+	f := newFixture(t)
+	resp := f.call(t, "daimon.context.get", map[string]any{"query": "nothingever"})
+	if resp.Error != nil {
+		t.Fatalf("context.get error: %+v", resp.Error)
+	}
+	entries, err := f.alog.Query(context.Background(), activity.QueryOptions{
+		Kind: activity.KindContextPreviewed,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("empty-match should still append; got %d entries", len(entries))
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(entries[0].Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if v, _ := pl["matched"].(float64); int(v) != 0 {
+		t.Errorf("payload.matched on empty match: got %v want 0", pl["matched"])
+	}
+	if pl["query"] != "nothingever" {
+		t.Errorf("payload.query: got %v want %q", pl["query"], "nothingever")
+	}
+}
+
+// TestContextGet_ErrorPathDoesNotAppend mirrors session 28's verify-fails-no-
+// extend rule for the new context.previewed audit row: when the underlying
+// retrieval errors, the daimon does NOT extend the audit chain. Closing the
+// store mid-test makes search return a "database is closed" error which
+// surfaces through mapMemoryError as CodeInternalError; the success path's
+// alog.Append never runs.
+func TestContextGet_ErrorPathDoesNotAppend(t *testing.T) {
+	f := newFixture(t)
+	// Close the memory store so the next search call errors. The activity log
+	// is left open so we can query it post-failure.
+	if err := f.mem.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	resp := f.call(t, "daimon.context.get", map[string]any{"query": "anything"})
+	if resp.Error == nil {
+		t.Fatal("expected context.get to error after store close")
+	}
+	entries, err := f.alog.Query(context.Background(), activity.QueryOptions{
+		Kind: activity.KindContextPreviewed,
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("error path must not append context.previewed; got %d entries", len(entries))
+	}
+}
+
 func TestActivityAppendAndQuery(t *testing.T) {
 	f := newFixture(t)
 	resp := f.call(t, "daimon.activity.append", map[string]any{
@@ -468,6 +569,137 @@ func TestActivityAppendRejectsEmptyKind(t *testing.T) {
 	}
 	if resp.Error.Code != CodeInvalidParams {
 		t.Errorf("code: got %d want %d", resp.Error.Code, CodeInvalidParams)
+	}
+}
+
+func TestActivityVerify_HappyPathReturnsCountAndOK(t *testing.T) {
+	f := newFixture(t)
+	// Seed three entries via the public RPC surface so the writes land through
+	// the same path daimond uses in production.
+	for i := 0; i < 3; i++ {
+		resp := f.call(t, "daimon.activity.append", map[string]any{
+			"kind":    "memory.write",
+			"payload": map[string]any{"id": fmt.Sprintf("mem-%d", i)},
+		})
+		if resp.Error != nil {
+			t.Fatalf("seed append %d: %+v", i, resp.Error)
+		}
+	}
+	resp := f.call(t, "daimon.activity.verify", nil)
+	var got activityVerifyResult
+	resultAs(t, resp, &got)
+	if !got.OK {
+		t.Errorf("ok: got false want true")
+	}
+	if got.Verified != 3 {
+		t.Errorf("verified: got %d want 3", got.Verified)
+	}
+
+	// Post-append symmetry: a successful verify writes its own
+	// activity.verified entry, so a follow-up query for that kind returns one
+	// row whose payload says verified=3 (the count from the verify above).
+	resp = f.call(t, "daimon.activity.query", map[string]any{"kind": "activity.verified"})
+	var verified []activity.Entry
+	resultAs(t, resp, &verified)
+	if len(verified) != 1 {
+		t.Fatalf("expected 1 activity.verified entry; got %d", len(verified))
+	}
+	var pl map[string]any
+	if err := json.Unmarshal(verified[0].Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if v, _ := pl["verified"].(float64); int(v) != 3 {
+		t.Errorf("payload verified: got %v want 3", pl["verified"])
+	}
+}
+
+func TestActivityVerify_TamperedChainReturnsError(t *testing.T) {
+	f := newFixture(t)
+	// Seed two entries through the RPC surface.
+	for i := 0; i < 2; i++ {
+		resp := f.call(t, "daimon.activity.append", map[string]any{
+			"kind":    "memory.write",
+			"payload": map[string]any{"id": fmt.Sprintf("mem-%d", i)},
+		})
+		if resp.Error != nil {
+			t.Fatalf("seed append %d: %+v", i, resp.Error)
+		}
+	}
+
+	// Close the server's log handle and tamper with entry #1's on-disk
+	// payload — anything other than the original ciphertext fails AEAD
+	// authentication on the next Verify.
+	logPath := f.alog.Path()
+	if err := f.alog.Close(); err != nil {
+		t.Fatalf("close alog: %v", err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read log: %v", err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 log lines; got %d", len(lines))
+	}
+	var e activity.Entry
+	if err := json.Unmarshal([]byte(lines[1]), &e); err != nil {
+		t.Fatalf("unmarshal entry #1: %v", err)
+	}
+	// Replace the encrypted payload with a JSON-shaped value the AEAD layer
+	// will reject before the chain check runs (mirrors
+	// TestVerifyDetectsTamperedPayload in internal/activity).
+	e.Payload = json.RawMessage(`{"i":99}`)
+	tampered, err := json.Marshal(&e)
+	if err != nil {
+		t.Fatalf("marshal tampered: %v", err)
+	}
+	lines[1] = string(tampered)
+	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write tampered log: %v", err)
+	}
+
+	// Reopen under the same identity so the server can reach the file.
+	reopened, err := activity.Open(logPath, f.id)
+	if err != nil {
+		t.Fatalf("reopen alog: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	f.srv.alog = reopened
+
+	resp := f.call(t, "daimon.activity.verify", nil)
+	if resp.Error == nil {
+		t.Fatal("expected verify to fail on tampered chain")
+	}
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want %d", resp.Error.Code, CodeInternalError)
+	}
+	// Failure path MUST NOT extend a corrupt chain: no activity.verified
+	// entry should appear after the failed verify.
+	resp2 := f.call(t, "daimon.activity.query", map[string]any{"kind": "activity.verified"})
+	var verified []activity.Entry
+	resultAs(t, resp2, &verified)
+	if len(verified) != 0 {
+		t.Errorf("expected NO activity.verified entries after failed verify; got %d", len(verified))
+	}
+}
+
+func TestActivityVerify_EmptyLogIsOK(t *testing.T) {
+	f := newFixture(t)
+	resp := f.call(t, "daimon.activity.verify", nil)
+	var got activityVerifyResult
+	resultAs(t, resp, &got)
+	if !got.OK {
+		t.Errorf("empty log should verify ok")
+	}
+	if got.Verified != 0 {
+		t.Errorf("verified: got %d want 0", got.Verified)
+	}
+	// The verify itself appended an activity.verified entry; subsequent verify
+	// should now report 1.
+	resp = f.call(t, "daimon.activity.verify", nil)
+	resultAs(t, resp, &got)
+	if got.Verified != 1 {
+		t.Errorf("second verify count: got %d want 1", got.Verified)
 	}
 }
 

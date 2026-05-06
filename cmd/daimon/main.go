@@ -18,9 +18,9 @@
 //	daimon doctor    — read-only environment health probe: $DAIMON_HOME state,
 //	                   daemon up/locked/unlocked, API-key presence, LM Studio
 //	                   + Ollama reachability. Safe at any moment.
-//	daimon activity  — query (default) the audit trail every other subcommand
-//	                   writes to. Filter by kind / time window / limit; --json
-//	                   for tooling.
+//	daimon activity  — query the audit trail every other subcommand writes to,
+//	                   or verify the chain end-to-end (prev_hash continuity +
+//	                   BLAKE3 hash recomputation + Ed25519 signature).
 package main
 
 import (
@@ -87,6 +87,13 @@ Usage:
               [--kind <k>] [--limit <n>] [--json]
   daimon memory search      Similarity search against a query.
               [--kind <k>] [--limit <n>] [--json] <query>
+              --inject-preview [--kind <k> ...] [--max-tokens <n>] [--json] <query>
+                            With --inject-preview, dry-run the SPEC §11
+                            inject_context retrieval: print what would be
+                            folded into a provider's system prompt without
+                            calling any provider. Multi-kind allowlist via
+                            repeated --kind. Same RPC the chat REPL's
+                            inject_context flow uses (daimon.context.get).
   daimon memory delete      Delete one memory by id.
               [--json] <id>
   daimon memory export      Emit a signed export document.
@@ -128,6 +135,13 @@ Usage:
                             kind). Time window is inclusive; --since accepts
                             either a Go duration ("1h") or an RFC3339
                             timestamp.
+  daimon activity verify    Walk the chain end-to-end. Asserts prev_hash
+              [--json]      continuity, BLAKE3 hash recomputation, and Ed25519
+                            signature for every entry. On success appends an
+                            activity.verified entry to the log itself; on
+                            failure exits non-zero with the offending entry
+                            named, suitable for 'daimon activity verify &&
+                            deploy' pre-flight in scripts.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.

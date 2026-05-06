@@ -458,6 +458,18 @@ func TestSummarizeEntry_PerKindShapes(t *testing.T) {
 			want:    "matched=12",
 		},
 		{
+			name:    "activity_verified",
+			kind:    "activity.verified",
+			payload: map[string]any{"verified": float64(42)},
+			want:    "verified=42",
+		},
+		{
+			name:    "context_previewed",
+			kind:    "context.previewed",
+			payload: map[string]any{"query": "huckgod", "matched": float64(3)},
+			want:    `query="huckgod" matched=3`,
+		},
+		{
 			name:    "daimon_created",
 			kind:    "daimon.created",
 			payload: map[string]any{"version": "v0.1.0-dev", "did": "did:key:zABC"},
@@ -491,6 +503,172 @@ func TestSummarizeEntry_PerKindShapes(t *testing.T) {
 				t.Errorf("summarizeEntry(%s): got %q want %q", tc.kind, got, tc.want)
 			}
 		})
+	}
+}
+
+// --- daimon activity verify --------------------------------------------------
+
+func TestActivityVerify_HappyPathRendersCount(t *testing.T) {
+	startActivityHarness(t, func(req jsonrpcRequest) jsonrpcResponse {
+		body, _ := json.Marshal(activityVerifyResult{Verified: 7, OK: true})
+		return jsonrpcResponse{
+			JSONRPC: "2.0",
+			Result:  body,
+			ID:      json.RawMessage("1"),
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	if err := runActivityVerify(&stdout, &stderr, []string{}); err != nil {
+		t.Fatalf("runActivityVerify: %v (stderr=%q)", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "verified 7 entries") {
+		t.Errorf("expected 'verified 7 entries' in stdout; got %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "chain ok") {
+		t.Errorf("expected 'chain ok' in stdout; got %q", stdout.String())
+	}
+}
+
+func TestActivityVerify_JSONOutputRoundtrips(t *testing.T) {
+	startActivityHarness(t, func(req jsonrpcRequest) jsonrpcResponse {
+		body, _ := json.Marshal(activityVerifyResult{Verified: 42, OK: true})
+		return jsonrpcResponse{
+			JSONRPC: "2.0",
+			Result:  body,
+			ID:      json.RawMessage("1"),
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	if err := runActivityVerify(&stdout, &stderr, []string{"--json"}); err != nil {
+		t.Fatalf("runActivityVerify --json: %v", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("--json should not write to stderr on success; got %q", stderr.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal --json output: %v\n%s", err, stdout.String())
+	}
+	if v, _ := got["verified"].(float64); int(v) != 42 {
+		t.Errorf("verified in JSON: got %v want 42", got["verified"])
+	}
+	if got["ok"] != true {
+		t.Errorf("ok in JSON: got %v want true", got["ok"])
+	}
+}
+
+func TestActivityVerify_ChainCorruptReturnsErrorAndNonZero(t *testing.T) {
+	startActivityHarness(t, func(req jsonrpcRequest) jsonrpcResponse {
+		return jsonrpcResponse{
+			JSONRPC: "2.0",
+			Error: &jsonrpcError{
+				Code:    -32603, // CodeInternalError
+				Message: "activity chain broken",
+				Data:    json.RawMessage(`"activity: chain broken: id=01HXYZ expected_prev=blake3:abc got_prev=blake3:def"`),
+			},
+			ID: json.RawMessage("1"),
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	err := runActivityVerify(&stdout, &stderr, []string{})
+	if err == nil {
+		t.Fatal("expected error on chain corruption; got nil")
+	}
+	if !strings.Contains(err.Error(), "chain INVALID") {
+		t.Errorf("expected 'chain INVALID' in returned error; got %v", err)
+	}
+	if !strings.Contains(err.Error(), "chain broken") {
+		t.Errorf("expected underlying reason in returned error; got %v", err)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("non-JSON failure should not write stdout (avoid duplicate with exitOnErr); got %q", stdout.String())
+	}
+}
+
+func TestActivityVerify_ChainCorruptJSONEnvelopeShape(t *testing.T) {
+	startActivityHarness(t, func(req jsonrpcRequest) jsonrpcResponse {
+		return jsonrpcResponse{
+			JSONRPC: "2.0",
+			Error: &jsonrpcError{
+				Code:    -32603,
+				Message: "activity payload AEAD authentication failed",
+			},
+			ID: json.RawMessage("1"),
+		}
+	})
+	var stdout, stderr bytes.Buffer
+	err := runActivityVerify(&stdout, &stderr, []string{"--json"})
+	if err == nil {
+		t.Fatal("expected error on AEAD failure; got nil")
+	}
+	if !strings.Contains(err.Error(), "chain INVALID") {
+		t.Errorf("expected 'chain INVALID' in returned error; got %v", err)
+	}
+	var got map[string]any
+	if jerr := json.Unmarshal(stdout.Bytes(), &got); jerr != nil {
+		t.Fatalf("Unmarshal --json failure envelope: %v\n%s", jerr, stdout.String())
+	}
+	if got["ok"] != false {
+		t.Errorf("ok in JSON failure: got %v want false", got["ok"])
+	}
+	if _, ok := got["error"].(string); !ok {
+		t.Errorf("expected 'error' string in JSON failure envelope; got %v", got)
+	}
+}
+
+func TestActivityVerify_DaemonErrors_HumaniseIntoActionableHints(t *testing.T) {
+	t.Run("locked", func(t *testing.T) {
+		startActivityHarness(t, func(req jsonrpcRequest) jsonrpcResponse {
+			return jsonrpcResponse{
+				JSONRPC: "2.0",
+				Error:   &jsonrpcError{Code: codeIdentityLocked, Message: "locked"},
+				ID:      json.RawMessage("1"),
+			}
+		})
+		var stdout, stderr bytes.Buffer
+		err := runActivityVerify(&stdout, &stderr, []string{})
+		if err == nil {
+			t.Fatal("expected error from locked daemon; got nil")
+		}
+		if !strings.Contains(err.Error(), "daimon unlock") {
+			t.Errorf("expected actionable hint; got %v", err)
+		}
+	})
+
+	t.Run("not_running", func(t *testing.T) {
+		dir, err := os.MkdirTemp("", "dmn")
+		if err != nil {
+			t.Fatalf("MkdirTemp: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		t.Setenv("DAIMON_HOME", dir)
+
+		var stdout, stderr bytes.Buffer
+		err = runActivityVerify(&stdout, &stderr, []string{})
+		if err == nil {
+			t.Fatal("expected error from absent daemon; got nil")
+		}
+		if !strings.Contains(err.Error(), "daemon not running") {
+			t.Errorf("expected 'daemon not running' hint; got %v", err)
+		}
+	})
+}
+
+func TestActivityVerify_RejectsPositionalArgs(t *testing.T) {
+	dir, err := os.MkdirTemp("", "dmn")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	t.Setenv("DAIMON_HOME", dir)
+
+	var stdout, stderr bytes.Buffer
+	err = runActivityVerify(&stdout, &stderr, []string{"unexpected"})
+	if err == nil {
+		t.Fatal("expected error for positional arg; got nil")
+	}
+	if !strings.Contains(err.Error(), "no positional") {
+		t.Errorf("expected 'no positional' in error; got %v", err)
 	}
 }
 
