@@ -2011,3 +2011,98 @@ verified 5 entries — chain ok    # 1 genesis + 3 sdk-writes + 1 self-append fr
 
 **Next session begins with:** the v0.1 SDK gap is half-closed on the Python side. Memory + identity verbs over a real Unix-socket JSON-RPC client; tests against a stub daemon; smoke against the real daemon proving SDK writes are audited principal actions. If the doctor footer shows a live-readiness READY, take the 5-minute close (items 1-3); otherwise the natural next pick is Python SDK session 2 (provider + activity verbs — same scaffolding, mostly mechanical), or v0.2 design (multi-session arc, SPEC-only deliverable). TypeScript SDK is also live as a v0.1 deliverable; v0.1.0 doesn't ship without it. The v0.1 SDK milestone is now half-built.
 
+## 2026-05-06 — Day Zero, thirty-third session: Python SDK session 2 — provider + activity verbs over the existing harness
+
+**The Python SDK reaches all of v0.1's non-streaming RPC surface.** Session 32 shipped identity + memory; this session adds the remaining four namespaces (`provider.list`, `provider.invoke`, `activity.append`, `activity.query`, `activity.verify`) over the same Unix-socket JSON-RPC client, the same error taxonomy, the same StubDaemon harness. The Python SDK is now feature-complete on the v0.1 RPC surface modulo `provider.stream` (deferred to session 3 because the one-request-per-connection lifecycle in `_rpc.py` has no notification handling).
+
+**Probe at start:** `./bin/daimon doctor` showed all three live-readiness lanes blocked again (no Anthropic/OpenAI keys in the harness shell, LM Studio not running, only Ollama up with `llama3.2:latest`). Took the kickoff's lean — Python SDK session 2 over TypeScript session 1 or v0.2 design. Rationale held: cheapest close on the v0.1 SDK milestone, scaffolding from session 32 still warm (StubDaemon, error taxonomy, half-close write-side, `params is None` omit-empty), no zigzag.
+
+**Architectural decisions (this session):**
+
+1. **Flat-kwargs surface for `provider.invoke`, nested wire shape assembled internally.** The wire shape is `{provider, request: {model, messages, system?, max_tokens?, temperature?}, inject_context?}` — `model` lives inside `request`, not top-level. Two surfaces could fit: (A) mirror the wire 1:1 and require callers to pass `request={...}` themselves; (B) take flat kwargs (`provider=, model=, messages=, system=, ...`) and assemble the nested envelope inside the SDK. Chose (B) because it matches the Go CLI's user-facing flag surface (`daimon provider invoke <provider> --model X --system Y`), keeps the SDK pythonic, and still respects the principle that the SDK is a thin wrapper — the assembly is one local dict construction, not a translation layer. Trade-off: SDK callers can't see the nested `request` shape from the docstring without reading SPEC §6.1; mitigated by the docstring naming the wire fields explicitly.
+
+2. **Full envelope returned from `provider.invoke`, not the bare response.** The wire returns `{response: {...}, injected_memory_ids?: [...]}`. Returning just the inner `response` would lose the injected-memory-IDs metadata that's the whole reason the envelope wrap exists (session 24 added it). SDK returns the envelope verbatim — callers do `env["response"]["content"]` for the text and `env.get("injected_memory_ids")` for the audit metadata. Same philosophy as `memory.write` returning `{"id": "..."}` rather than the bare ID string: keep the wire shape visible.
+
+3. **`inject_context` accepts a dict, not a string-or-bool.** The CLI's `--inject-context` flag has bare-bool semantics ("use the prompt as the query") and string semantics (`--inject-context=<query>`). The SDK doesn't replicate either: callers pass `inject_context={"query": ...}` explicitly, or `inject_context={"query": ..., "max_tokens": 256, "kinds": ["fact"]}` for full control. Bare-bool magic is a CLI ergonomic — library callers have the prompt in scope and can build the dict themselves with one extra line. Keeps the surface declarative.
+
+4. **`activity.query` omits `params` entirely when no filters are passed.** Compromise between the Go CLI (which sends `{}` because `daemonCall("…query", activityQueryWire{}, …)` always encodes the struct, even all-omitempty) and the SDK's existing `params is None → omit key` rule from session 32. Chose the SDK rule for internal consistency: `client.activity.query()` with no args sends a request envelope with no `params` key, just like `client.identity.get()`. Server's `decodeParams` accepts both — wire bytes diverge from the Go CLI by one key, semantics are identical.
+
+5. **`activity.verify` sends `params: {}` (empty object, not omitted).** Unlike `query`, the SDK sends `{}` here because the Go CLI's `daemonCall("…verify", struct{}{}, …)` does the same (encodes to `{}`), and the empty-object form is the more conventional "I have no parameters but I'm not making a malformed request" signal. The two-rule split (omit for `query`, `{}` for `verify`) tracks the CLI's intent — `query` sends an all-omitempty struct that legitimately encodes to `{}`; `verify` sends a literal empty struct. Making the Python side omit on `query` and send `{}` on `verify` mirrors that intent rather than the encoded bytes.
+
+6. **`provider.list` and `activity.query` normalise null-result to `[]`.** Mirrors `memory.search` from session 32 — Go's nil slice encodes as JSON `null`, the SDK lifts that to `[]` so callers can iterate without a guard. Keeps the iteration ergonomics consistent across all list-returning verbs.
+
+**What landed:**
+
+- **`sdk/python/daimon/client.py`** — added `_ProviderNamespace` (list, invoke) and `_ActivityNamespace` (append, query, verify), wired into `Client.__init__` as `self.provider` and `self.activity`. +124 lines, no other files in `daimon/` touched (the wire layer in `_rpc.py` and the error taxonomy in `errors.py` were complete in session 32).
+
+- **`sdk/python/tests/test_client.py`** — added 13 tests covering the new surface:
+  - `test_provider_list_returns_entries`, `test_provider_list_normalises_null_to_empty_list`
+  - `test_provider_invoke_assembles_nested_request` (the load-bearing one — verifies the SDK's flat-kwargs → nested-wire assembly bit-for-bit)
+  - `test_provider_invoke_threads_optional_fields` (system/temperature/max_tokens all land under `request` when supplied)
+  - `test_provider_invoke_passes_inject_context_verbatim` (dict passes through; `injected_memory_ids` envelope metadata is preserved on the return)
+  - `test_provider_invoke_no_provider_registry_propagates_rpc_error` (CodeNotFound -32002 surfaces as RPCError with `.code` intact)
+  - `test_activity_append_minimal`, `test_activity_append_with_payload`
+  - `test_activity_query_returns_entries` (no-filter case sends `params: <omitted>`, not `{}`), `test_activity_query_threads_filters`, `test_activity_query_normalises_null_to_empty_list`
+  - `test_activity_verify_returns_envelope` (sends `params: {}`, returns `{verified, ok}`)
+  - `test_activity_verify_chain_failure_propagates` (CodeInternalError -32603 with chain-broken message surfaces as RPCError)
+
+**Test count:** 22 → 35 PASS (+13). Same harness, same wall (~5.7s — pytest collection still dominates; actual stub-RPC round-trips are sub-millisecond). Go suite untouched at 287.
+
+**End-to-end smoke against a real daimon (this session):**
+
+```
+$ DAIMON_HOME=/tmp/dt-sdk-s2.XXX
+$ printf 'testpw\ntestpw\n' | bin/daimon init      # produces genesis row
+$ printf 'testpw\n'         | bin/daimon unlock    # spawns daimond (Ollama auto-detected)
+$ python /tmp/dt_sdk_s2_smoke.py
+DID: did:key:z6Mkg6ACSVda7vTNLnZ495Q2MPMtRQQHMCgBRNgTFhFwkrLe
+
+provider.list:
+  ollama       configured=False models=['llama3.2:latest']
+  openai       configured=True  models=['gpt-5', 'gpt-5-mini', 'gpt-4.1']
+
+activity.append (before-invoke): {'id': '01KQYFPKS8…', 'hash': 'blake3:0b9c…'}
+
+provider.invoke (ollama / llama3.2:latest):
+  content: 'Pong'
+  stop_reason: end_turn
+  usage: {'input_tokens': 32, 'output_tokens': 3}
+  injected_memory_ids: None
+
+activity.append (after-invoke): {'id': '01KQYFPN5R…', 'hash': 'blake3:b468…'}
+
+activity.query (limit=20):
+  daimon.created            01KQYFPK7SVX… prev=blake3:0… hash=blake3:9…
+  smoke.session2            01KQYFPKS8KN… prev=blake3:9… hash=blake3:0…
+  provider.invoke           01KQYFPN5JVN… prev=blake3:0… hash=blake3:2…
+  smoke.session2            01KQYFPN5RFJ… prev=blake3:2… hash=blake3:b…
+
+activity.verify: {'verified': 5, 'ok': True}
+
+activity.query (kind=smoke.session2):
+  smoke.session2  01KQYFPKS8KN…  payload={'actor': 'sdk', 'step': 'before-invoke'}
+  smoke.session2  01KQYFPN5RFJ…  payload={'actor': 'sdk', 'step': 'after-invoke'}
+
+$ bin/daimon activity verify
+verified 7 entries — chain ok    # 5 from SDK's verify + activity.queried (kind-filtered) + activity.verified (the SDK verify itself)
+```
+
+**The structural property worth naming:** the Python SDK now writes audit rows under arbitrary `kind` values (`smoke.session2` here) and triggers the daemon's own audit writes (`provider.invoke` from the Ollama call) on the same chain, both indistinguishable from CLI-driven rows. The cross-language `daimon activity verify` walks all 7 entries — genesis, two SDK-appended customs, one daemon-written `provider.invoke` from the SDK's invoke call, plus the verify-chain self-appends from query + kind-filtered query + verify itself — and reports chain ok. The audit trail does not, and should not, distinguish "Python SDK called" from "CLI called" from "daemon-internal write": every meaningful action against the principal's data is logged under the same chain, whatever the entry point.
+
+**What we explicitly did NOT ship in this session (per the kickoff's session-by-session arc):**
+
+- **Streaming via `daimon.provider.stream` notifications** — session 3. The wire shape is documented in `cmd/daimon/rpc.go::rpcStream` (request/notifications/terminal-response over the same conn). Needs a generator-based API surface (`for delta in client.provider.stream(...)`) and a different connection lifecycle than `_rpc.py` currently supports — the half-close write-side trick won't work because the server keeps writing notifications until the stream ends. Probably ~100 lines of net-new code in a `_stream.py` module plus tests with a stub daemon that writes notifications.
+- **Type modelling** — still deferred. Raw dicts on every return; pydantic/dataclass models can land in a polish session once both SDKs (Python + TypeScript) are shipping and the wire surface is stable.
+- **PyPI publishing** — session 4. `pip install -e .` from source is the v0.1 milestone; PyPI is a v0.1.x polish step.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Five-minute close when LM Studio is running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Five-minute close when a real key is in the shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Five-minute close when a real key is in the shell env.
+4. **TypeScript SDK session 1** — mirror port of Python session 1 + 2 in one TS arc. Same wire shape (Node `net.createConnection` over `'unix'` socket replaces Python's `socket.AF_UNIX`); same `Client.identity.get` + `Client.memory.*` + `Client.provider.*` + `Client.activity.*` namespaces; same `DaemonNotRunning` / `DaemonLocked` / `RPCError` taxonomy. Porting both Python sessions in one TS sweep reads cleaner than zigzagging language-by-language. ~400 lines + vitest harness.
+5. **Python SDK session 3** — `provider.stream` (the deferred verb above). After TypeScript catches up to Python session 2, both languages can adopt streaming together rather than Python-only.
+6. **v0.2 design — x402 / agent wallet, design-only session.** Multi-session arc; SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** the Python SDK is feature-complete on v0.1's non-streaming surface. Identity + memory + provider + activity, all five namespaces, all over the same Unix-socket JSON-RPC client, all tested against a stub daemon, all smoke-validated against a real daemon producing chain-verifiable audit rows. The v0.1 SDK milestone is now ⅔ closed: TypeScript port is the remaining ⅓. If the doctor footer shows a live-readiness READY, take the 5-minute close (items 1-3); otherwise TypeScript SDK session 1 is the natural lean (one TS arc that ports Python sessions 1 + 2 together — Memory/Identity/Provider/Activity — closes the v0.1 SDK milestone modulo streaming). `provider.stream` and v0.2 design are the further-out arcs after the TS port.
+
