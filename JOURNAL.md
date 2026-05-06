@@ -1907,3 +1907,107 @@ The structural property worth naming: **the audit trail is now totally meaningfu
 
 **Next session begins with:** the audit-trail subsystem is closed end-to-end **and from entry 0**. Every chain begins with a meaningful named action (the genesis); every subsequent meaningful action extends it; every read of the chain itself extends it; every action is inspectable and chain-verifiable from the CLI. The daimon's "every meaningful action against the principal's data is logged, including its own birth" promise has zero carve-outs in v0.1. If the doctor footer says any of "Claude streaming READY", "OpenAI streaming READY", or "LM Studio (any) READY" the corresponding live round-trip closes in ~5 minutes; otherwise pick from items 4–6 above by huckgod's preference. With the audit-trail closure now complete (sessions 28 + 29 + 30 + 31 in sequence), the strongest external-facing follow-ups (asciicast, NLnet) get their cleanest demo material yet.
 
+## 2026-05-06 — Day Zero, thirty-second session: Python SDK session 1 — package skeleton + Unix-socket JSON-RPC client + identity/memory verbs + pytest harness
+
+**The v0.1 SDK gap that's been the real v0.1 hole since session 16 starts closing.** v0.1 scope listed Python and TypeScript SDKs; neither had a single line. This session ships the Python SDK's first arc: package skeleton at `sdk/python/`, pure-stdlib Unix-socket JSON-RPC client mirroring `cmd/daimon/rpc.go`'s wire shape exactly, namespaced verb groups (`Client.identity.get`, `Client.memory.write|read|search|list`), and a pytest harness with a stub Unix-socket daemon for byte-for-byte protocol testing. Plus an end-to-end smoke against a real `daimond serve` proving the SDK's writes are recorded as audited principal actions indistinguishable from CLI actions.
+
+**Probe at start:** `./bin/daimon doctor` showed all three live round-trips still blocked (no Anthropic/OpenAI keys, LM Studio not running, Ollama up with `llama3.2:latest`). Took the kickoff's lean — Python SDK over v0.2 design — because it's the only thing that closes the v0.1 SDK gap with code, and it removes a v0.1 hole that's older (session 16) than every other punted item except the asciicast.
+
+**Bundled commit shape decision held in-session:** sessions 28-31 had been uncommitted in the working tree. Kickoff offered per-session (4 commits, JOURNAL granularity, easier bisect) vs bundled (1 commit, cleaner `git log --oneline` story). Surveyed the diff: 7 files spanned multiple sessions (`activity.go`, `handlers.go`, `server_test.go`, `cmd_activity.go`, `cmd_activity_test.go`, `SPEC.md`, `CHECKPOINT.md`). Splitting per-session would require hunk-level surgery to reconstruct history that never had real test runs at each boundary — fake bisect granularity, real merge-conflict risk. Chose bundled. JOURNAL preserves per-session granularity at the doc level (canonical record); git carries the arc-level summary. Single commit "Close audit-trail subsystem: verify + inject-preview + context.previewed + genesis" landed at `703dd23` and pushed to `origin/main` before the SDK work began — clean baseline for the SDK's own commit.
+
+**Architectural decisions (this session):**
+
+1. **Pure stdlib, no dependencies.** The SDK is one Unix socket and `json.dumps` away from working — adding `httpx` or `pydantic` for a v0.1 alpha would be carry-over weight. Returns are raw decoded JSON (dicts/lists/scalars), not pydantic models, so the SDK doesn't drift behind the Go side's evolving record shapes between SDK sessions. Type modelling is deferred to a later session when the wire shapes have stabilised under multiple consumers.
+
+2. **Two-step error taxonomy.** `DaimonError` (base) → `DaemonNotRunning` (socket ENOENT/ECONNREFUSED) / `DaemonLocked` (RPC code -32001) / `RPCError` (everything else, with `code`/`message`/`data`). Mirrors `cmd/daimon/client.go::humaniseDaemonErr`'s two-failure-mode rewrite plus a generic catch-all. The two-step lets callers `except DaemonNotRunning` to handle the "daemon never started" case differently from the locked case differently from the unknown-code case.
+
+3. **`identity.unlock` deliberately not exposed.** Unlocking from a library would mean holding the password in process memory, which is the wrong default posture. The CLI's `daimon unlock` is the canonical path — the SDK assumes the daemon is already unlocked. Advanced callers can hit `Client._call("daimon.identity.unlock", {"password": ...})` directly if they really want to, but it's not a verb on the namespace.
+
+4. **`memory.list()` is `memory.search("")` underneath.** The Go server registers six methods under `daimon.memory.*` (write/read/search/delete/export/import) — there is no `list`. The CLI's `cmdMemoryList` (cmd_memory.go:172) is a thin wrapper around search-with-empty-query; the SDK matches that exactly. One verb on the wire, two on the namespace.
+
+5. **`Client(home=..., socket_path=..., timeout=...)` constructor shape.** `socket_path` overrides everything (test harnesses dial a stub directly), `home` overrides `$DAIMON_HOME` resolution (multi-daimon setups), default resolves the same way the Go CLI does — through `_home.resolve_home()` that mirrors `internal/daimonhome/daimonhome.go` byte-for-byte (env var, then platform default — macOS `~/Library/Application Support/daimon`, Linux `$XDG_CONFIG_HOME/daimon` or `~/.config/daimon`, Windows `%APPDATA%/daimon`). AF_UNIX `sun_path` 104-byte fallback to `$TMPDIR/daimon-<uid>.sock` is implemented in `_home.socket_path()` too — the Python SDK and the Go binaries cannot disagree about where the socket lives.
+
+6. **Connection lifecycle: one RPC per connection, half-close the write side.** Mirrors the Go side's `json.NewEncoder(c).Encode(req)` + `json.NewDecoder(c).Decode(&resp)` flow. The Python side sends one JSON object + newline, calls `sock.shutdown(SHUT_WR)` so the server's decoder sees EOF promptly after the single request, then drains the read side until the peer closes. Without the half-close the server's decoder would block waiting for more requests on the same connection — the Go server is happy with the one-request-then-close shape, but `json.Decoder` is permissive enough that we have to be explicit about end-of-stream on our side.
+
+7. **`params` omission matches Go's `omitempty`.** When `params is None` the SDK omits the `params` key entirely from the JSON-RPC envelope (not `params: null`) — matches what `json.Marshal` does on the Go client side for nil. The server's `decodeParams` happens to accept both, but the wire bytes match the Go CLI's exactly.
+
+**What landed:**
+
+```
+sdk/python/
+├── pyproject.toml        # setuptools, requires-python>=3.10, dev-extra=[pytest]
+├── README.md             # usage + dev install
+├── daimon/
+│   ├── __init__.py       # public surface: Client, errors, __version__
+│   ├── _home.py          # mirrors internal/daimonhome/daimonhome.go
+│   ├── _rpc.py           # mirrors cmd/daimon/rpc.go::rpcCall
+│   ├── client.py         # Client + _IdentityNamespace + _MemoryNamespace
+│   └── errors.py         # DaimonError, DaemonNotRunning, DaemonLocked, RPCError
+└── tests/
+    ├── conftest.py       # StubDaemon (Unix-socket JSON-RPC listener), fixtures
+    ├── test_home.py      # 5 tests: env-var, default-creates, file-rejection, sock-primary, sock-fallback
+    ├── test_rpc.py       # 7 tests: round-trip, params, ENOENT->DaemonNotRunning, -32001->DaemonLocked, other code->RPCError, unknown method, result-omitted
+    └── test_client.py    # 10 tests: socket resolution, identity.get, memory.write minimal/full, memory.read, memory.search, memory.list, kind filter, locked propagation
+```
+
+**Test infrastructure:** `StubDaemon` is a tiny `socket.AF_UNIX` listener in a daemon thread that accepts one request per connection, decodes the JSON-RPC envelope, dispatches to a per-method handler (callable or static value), and writes back a response. Handlers raise `StubRPCError` to send a JSON-RPC error envelope. The `stub_daemon` fixture starts/stops one per test; the `short_tmp` fixture (mkdtemp under `/tmp` not pytest's tmp_path) keeps socket paths under the AF_UNIX 104-byte cap on macOS — pytest's default tmp_path lives at `/private/var/folders/9v/.../pytest-of-huckgod/pytest-N/<test>/` which is already over cap before any filename is appended. Test fixtures need to know this; production code has the fallback baked in via `_home.socket_path()`.
+
+**Edge case caught during testing:** `Client.socket_path` after `Client()` with `$DAIMON_HOME=/tmp/dt-...` resolves to `/private/tmp/dt-...` because macOS `/tmp` symlinks to `/private/tmp` and `Path.resolve()` follows it. The assertion in `test_client_resolves_socket_via_home_env` was originally checking against the unresolved form and failed; fix was `(daimon_home / "daimon.sock").resolve()` on the assertion side. Both sides canonical, both sides agree.
+
+**Test count:** SDK suite adds 22 tests (5 _home + 7 _rpc + 10 client). Separate suite from the Go `go test ./...` count (still 287). All 22 pass green; ~3.1s total wall (most of it is pytest collection overhead — actual RPC round-trips through the stub are sub-millisecond).
+
+**End-to-end smoke against a real daimon:**
+
+```
+$ DAIMON_HOME=/tmp/dt-sdk-smoke.AXImKU
+$ printf 'testpw\ntestpw\n' | bin/daimon init     # produces genesis row
+$ printf 'testpw\n'         | bin/daimon unlock   # spawns daimond
+$ python -c '
+from daimon import Client
+c = Client()
+print(c.identity.get()["did"])
+m1 = c.memory.write(kind="fact", content="alpha first thing huckgod ships")
+m2 = c.memory.write(kind="observation", content="beta", metadata={"tag":"draft"})
+m3 = c.memory.write(kind="fact", content="gamma")
+print(c.memory.read(m2["id"])["content"])
+print(c.memory.search("alpha")[0]["score"])
+print(len(c.memory.list()))
+print(len(c.memory.list(kind="fact")))
+'
+did:key:z6Mkw2r4FHAQFvU5WLLj4CwmXRMshv6BDLFqEbskGETCor5q
+beta
+1.0
+3
+2
+
+$ bin/daimon activity query --limit 8
+TIME                       KIND            ID                          SUMMARY
+2026-05-06T18:06:57+08:00  daimon.created  01KQYC2GX1XTG95TH6XPYV47PW  did=did:key:z6Mkw...
+2026-05-06T18:07:18+08:00  memory.write    01KQYC35F185PA0VGMQ5ZW5CBR  id=01KQYC35EZD5F6H4VN41B3PNF6 kind=fact
+2026-05-06T18:07:18+08:00  memory.write    01KQYC35F6JABXDAP7AMKW2VW2  id=01KQYC35F6P9TG0WDW5HFPK0XG kind=observation
+2026-05-06T18:07:18+08:00  memory.write    01KQYC35FAW1DGTJANNGDNTF0R  id=01KQYC35FAT01VXKJ0MVWW3PS4 kind=fact
+
+$ bin/daimon activity verify
+verified 5 entries — chain ok    # 1 genesis + 3 sdk-writes + 1 self-append from this verify
+```
+
+**The structural property worth naming:** the Python SDK's writes are recorded in the audit trail as `memory.write` rows indistinguishable from CLI writes. The audit trail does not — and should not — distinguish "which client process called the RPC"; it records the principal's actions, regardless of which language called the daemon. Same chain integrity, same encryption-at-rest, same audit guarantees apply to SDK callers as to CLI callers. The protocol is behaving exactly as designed: the daemon is the trust boundary, and the SDK is just another client over the same wire.
+
+**What we explicitly did NOT ship in this session (per the kickoff's session-1-of-3-4 plan):**
+
+- **Provider verbs** (`daimon.provider.{list,invoke}`) — session 2. Will require an `Invoke` shape decision: surface the full `provider.Response` envelope to Python or wrap it. Probably the former (matches the v0.1 thin-layer philosophy).
+- **Activity verbs** (`daimon.activity.{append,query,verify}`) — session 2. Trivial port of the same shape as memory.
+- **Streaming via `daimon.provider.stream` notifications** — session 3. Needs a generator-based API (`for delta in client.provider.stream(...)`). Wire shape is documented in `cmd/daimon/rpc.go::rpcStream`.
+- **Type modelling** — deferred. Returns are raw dicts in v0.1; pydantic models can be added over the same wire surface in a v0.1.x SDK polish session once the surface is stable enough that drift between Python/Go shapes is unlikely.
+- **PyPI publishing** — session 4. `pip install -e .` smoke is the v0.1 milestone.
+
+**What we explicitly punted (in priority order for next session):**
+
+1. **Live LM Studio streaming round-trip** (still carry-over from session 21). Five-minute close when LM Studio is running locally.
+2. **Live OpenAI streaming round-trip** (still carry-over from session 20). Five-minute close when a real key is in the shell env.
+3. **Live Claude streaming round-trip** (still carry-over from session 19). Five-minute close when a real key is in the shell env.
+4. **Python SDK session 2** — provider + activity verbs over the same wire/error/test scaffolding this session shipped. Expected ~150 lines + tests, ~30 min once the harness pattern is in muscle memory.
+5. **v0.2 design — x402 / agent wallet, design-only session.** Multi-session arc; SPEC has no § for it; session 1 is design only.
+
+**Next session begins with:** the v0.1 SDK gap is half-closed on the Python side. Memory + identity verbs over a real Unix-socket JSON-RPC client; tests against a stub daemon; smoke against the real daemon proving SDK writes are audited principal actions. If the doctor footer shows a live-readiness READY, take the 5-minute close (items 1-3); otherwise the natural next pick is Python SDK session 2 (provider + activity verbs — same scaffolding, mostly mechanical), or v0.2 design (multi-session arc, SPEC-only deliverable). TypeScript SDK is also live as a v0.1 deliverable; v0.1.0 doesn't ship without it. The v0.1 SDK milestone is now half-built.
+
