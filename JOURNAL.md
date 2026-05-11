@@ -2170,3 +2170,73 @@ verified 7 entries — chain ok    # 5 from SDK's verify + activity.queried (kin
 5. **PyPI + npm publishing.** v0.1.x polish; non-load-bearing for the v0.1 milestone.
 
 **Next session begins with:** the v0.1 SDK milestone is structurally closed on the non-streaming surface in both languages — `daimon` (Python, `pip install -e sdk/python`) and `@daimon/sdk` (TypeScript, `cd sdk/typescript && npm install && npm run build`). Identity, memory, provider, activity all four namespaces, same wire shape, same error taxonomy, same StubDaemon harness pattern, 35 + 35 test cases all green. If the doctor footer shows a live-readiness READY AND huckgod is at the terminal to type a passphrase, take the cross-language live smoke first (items 21/23 close + a TS-side smoke at the same time). Otherwise streaming is the natural next arc — Python SDK session 3 brings `provider.stream` to the Python side; TypeScript SDK session 2 follows for parity. Both can ship sequentially or one combined session. After streaming, the v0.2 design arc opens; v0.1.0 final is then a publishing-and-polish step.
+
+## 2026-05-11 — Day Zero, thirty-fifth session: cross-language live smoke — Python + TypeScript SDKs round-trip a single unlocked daimon, audit chain verified by all three (Python SDK, TS SDK, CLI)
+
+**No code changes this session. Pure live evidence.** Session 34 shipped the TypeScript SDK; this session points both SDKs at the same real daemon for the first time, captures the interleaved audit chain, and walks it with three independent verifiers. The v0.1 SDK milestone now has end-to-end live proof on top of its structural close.
+
+**Probe + setup:** `./bin/daimon doctor` showed OpenAI streaming READY (key sourced from `~/Library/Application Support/daimon/env`) and LM Studio READY (4 models loaded — including `liquid/lfm2.5-1.2b`, the lightest one used here). Anthropic stayed parked per huckgod's call (no `ANTHROPIC_API_KEY` in env). Provisioned a fresh daimon under `DAIMON_HOME=/tmp/dt-sdk-s34`: `printf 'testpw\ntestpw\n' | ./bin/daimon init` produced a new DID `did:key:z6MkvM5PkRam6DpVsswit9Ja675GvdnGJMGFM5R44XyDtUss` and the genesis `daimon.created` row; `printf 'testpw\n' | ./bin/daimon unlock` spawned the daemon (pid 71000 — referenced later in the tear-down).
+
+**One discovered gotcha in the SDKs' kind set:** the Python SDK README example uses `kind="note"` and so did my initial smoke script. The Go daemon's `memory.Kind.Valid()` (internal/memory/memory.go:41) accepts only `fact`, `preference`, `task`, `observation` — `note` is not valid and the round-trip raised `RPCError -32004: invalid memory kind`. The Python SDK's pytest suite uses `kind="note"` against the StubDaemon (which doesn't validate), so this category of mismatch is invisible to the unit suite. **This is a real docs/examples bug — but not load-bearing for the v0.1 SDK milestone close.** The smoke pivoted to `kind="fact"` and round-tripped cleanly. (Punted to a polish session: align both SDKs' README examples + the StubDaemon's set of accepted kinds with the daemon's actual `Valid()` list, or — better — pull the canonical list into a shared definition the SDKs can import. Either way, a tiny session.)
+
+**The smoke arc itself, in order written to the chain:**
+
+```
+genesis  daimon.created     payload={version, did=z6Mk…tUss}
+
+—— Python SDK arc (sdk/python/.venv/bin/python) ——
+1        memory.write       id=01KRB6WS67… kind=fact (content: "python sdk smoke — session 34", metadata={actor: python-sdk, session: 34})
+2        provider.invoke    ollama/llama3.2:latest streamed=false matched=0  → returned 'Pong' (stop=end_turn, in=32, out=3)
+3        smoke.session34    payload={actor: python-sdk, step: after-invoke}
+4        activity.queried   matched=4   ← Python SDK's client.activity.query(limit=20) auto-logged this row
+5        activity.verified  verified=5  ← Python SDK's client.activity.verify() walked entries 0-4 then appended this
+
+—— standalone OpenAI calls (carry-over from session 20: live OpenAI round-trip) ——
+6        provider.invoke    openai/gpt-5-mini-2025-08-07  ← FAILED with `Invalid 'max_output_tokens': integer below minimum value. Expected a value >= 16, but got 4`. The row was still written: the daemon logs the *intent* to invoke, not just successful invocations.
+7        provider.invoke    openai/gpt-5-mini-2025-08-07  ← SUCCEEDED with max_tokens=512: returned 'ok' (stop=end_turn, in=13, out=89). gpt-5-mini emits reasoning tokens that inflate the output count even for a 2-character visible reply.
+
+—— TypeScript SDK arc (node /tmp/dt_sdk_s34_ts_smoke.mjs, importing /Users/huckgod/Developer/network/sdk/typescript/dist/index.js) ——
+8        provider.invoke    lmstudio/liquid/lfm2.5-1.2b streamed=false matched=0  → returned 'pong' (stop=end_turn, in=17, out=3)  ← THIS CLOSES PUNCH-LIST ITEM 21 (live LM Studio round-trip)
+9        memory.write       id=01KRB6YBA2… kind=fact (content: "typescript sdk smoke — session 34", metadata={actor: typescript-sdk, session: 34})
+10       smoke.session34    payload={actor: typescript-sdk, step: after-invoke}
+11       activity.queried   matched=11  ← TS SDK's client.activity.query({limit: 20}) auto-logged
+12       activity.verified  verified=12 ← TS SDK's client.activity.verify() walked entries 0-11 then appended this
+
+—— CLI verify ——
+13       activity.verified  verified=13 ← `daimon activity verify` walked entries 0-12 then appended this
+```
+
+**Three independent verifiers, all agree the chain is intact:**
+
+- Python SDK's `client.activity.verify()` returned `{verified: 5, ok: True}` (walked the 5 entries that existed when it ran)
+- TypeScript SDK's `client.activity.verify()` returned `{verified: 12, ok: true}` (walked the 12 entries that existed when it ran, including Python's earlier verify-self-append row)
+- CLI's `daimon activity verify` reported `verified 13 entries — chain ok` (walked everything above, including the TS SDK's verify-self-append row)
+
+Each verifier is a different code path: the Python SDK's verify is `_call("daimon.activity.verify", {})` over the Unix socket; the TS SDK's is `rpcCall` over `net.createConnection({path})` with `socket.end(payload)`; the CLI's is the Go-internal call directly into `internal/activity.Verify`. Three different languages, three different implementations, three identical answers. **The protocol's audit-integrity claim is empirically true across language boundaries.**
+
+**The cross-language equivalence property worth naming explicitly:** the chain entries are indistinguishable by *language of caller*. The two `smoke.session34` rows differ only in their `payload.actor` field (`python-sdk` vs `typescript-sdk`) — but the row's signature, hash, and chain position are computed the same way regardless of who triggered the append. The two `memory.write` rows (one Python, one TS, both `kind=fact`) have identical wire structure. The `provider.invoke` rows for ollama (Python-triggered), openai (Python-triggered × 2), and lmstudio (TS-triggered) follow the same shape; the daemon doesn't know or record which SDK sent the request, only that it received a valid `daimon.provider.invoke` over the socket. **This is the v0.1 SDK story in one sentence:** the SDK is purely a wire-shape wrapper; the trust boundary and the audit boundary both live in the daemon; SDKs in any language are equivalent at the protocol level.
+
+**Live-readiness lanes after this session:**
+
+- ✅ Live LM Studio round-trip — closed (punch-list item 21)
+- ✅ Live OpenAI round-trip — closed (carry-over from session 20)
+- ⏸ Live Claude streaming — still blocked; huckgod chose to keep `ANTHROPIC_API_KEY` off the harness for now. When the key is added, the same smoke pattern closes the third lane in 60 seconds.
+
+**Tear-down:** killed daimond pid 71000 (no graceful `daimon lock` subcommand exists — daemon stays running until killed). Temp `DAIMON_HOME=/tmp/dt-sdk-s34/` left in place at huckgod's request for inspection; smoke scripts in `/tmp/dt_sdk_s34_*.{py,mjs}` similarly preserved. None of these directories are under git; huckgod can `rm -rf /tmp/dt-sdk-s34 /tmp/dt_sdk_s34_*.{py,mjs}` whenever.
+
+**What we explicitly did NOT do (kept the session tight):**
+
+- **Streaming smoke** — neither SDK has streaming yet (`provider.stream` is the next code-arc). Streaming is the natural next session for either language; smoke-testing streaming is part of that session, not this one.
+- **Live Claude round-trip** — no key in env per huckgod's call. Future huckgod can drop the key into `~/Library/Application Support/daimon/env`, run the same kind of one-off smoke (`client.provider.invoke({provider: "anthropic", model: "claude-sonnet-4-6", ...})`) and the third live-readiness lane closes.
+- **Polishing the memory-kind docs mismatch** — flagged above; sized as a small docs session (align Python README example + TS README example + StubDaemon's accepted-kinds set with `memory.Kind.Valid()`'s real list, or hoist the canonical list to a shared place both SDKs can read from). Not load-bearing for v0.1; punted.
+
+**Punted (in priority order for next session):**
+
+1. **Python SDK session 3 — `provider.stream`.** Streaming on the Python side. ~100 lines net-new in a `_stream.py` module + tests against a stub daemon that writes notifications. Generator-based API: `for delta in client.provider.stream(...)`. Now that non-streaming live evidence exists in both languages, streaming is the natural next move.
+2. **TypeScript SDK session 2 — `provider.stream`.** Symmetric to (1). Async-iterator API: `for await (const delta of client.provider.stream(...))`. Lands alongside or right after Python session 3.
+3. **Memory-kind canonicalisation polish session.** Align SDK READMEs + StubDaemon allowed-kinds with `memory.Kind.Valid()`. ~15 min.
+4. **Live Claude smoke.** When the Anthropic key is added. ~60 seconds.
+5. **v0.2 design — x402 / agent wallet.** Multi-session arc; design-only session 1.
+6. **PyPI + npm publishing.** v0.1.x polish; non-load-bearing for the v0.1 milestone.
+
+**Next session begins with:** the v0.1 SDK milestone is now closed on the non-streaming surface in both languages with end-to-end live evidence in both — Python + TypeScript SDKs writing memories and invoking real providers (ollama, openai, lmstudio) against the same daemon, single chain, chain-integrity verified by three independent code paths. Streaming is the natural next arc for either SDK; both can ship sequentially or in one combined session. After streaming, v0.2 design opens; v0.1.0 final is then a publishing-and-polish step (PyPI + npm + Anthropic-side live smoke when the key shows up).
