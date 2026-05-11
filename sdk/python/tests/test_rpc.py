@@ -33,9 +33,9 @@ def test_call_sends_params_when_given(stub_daemon: StubDaemon):
     _rpc.rpc_call(
         stub_daemon.socket_path,
         "daimon.memory.write",
-        {"kind": "note", "content": "hi"},
+        {"kind": "fact", "content": "hi"},
     )
-    assert received == {"kind": "note", "content": "hi"}
+    assert received == {"kind": "fact", "content": "hi"}
 
 
 def test_call_raises_daemon_not_running_when_socket_absent(short_tmp: Path):

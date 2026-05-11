@@ -86,9 +86,9 @@ describe("Client verbs", () => {
       Object.assign(received, p as Record<string, unknown>);
       return { id: "01K7Q" };
     });
-    const out = await client.memory.write({ kind: "note", content: "hello" });
+    const out = await client.memory.write({ kind: "fact", content: "hello" });
     expect(out).toEqual({ id: "01K7Q" });
-    expect(received).toEqual({ kind: "note", content: "hello" });
+    expect(received).toEqual({ kind: "fact", content: "hello" });
   });
 
   it("memory.write threads metadata and source", async () => {
@@ -98,7 +98,7 @@ describe("Client verbs", () => {
       return { id: "01K" };
     });
     await client.memory.write({
-      kind: "note",
+      kind: "fact",
       content: "x",
       metadata: { tag: "draft" },
       source: "cli",
@@ -110,7 +110,7 @@ describe("Client verbs", () => {
   it("memory.read round-trips", async () => {
     daemon.handle("daimon.memory.read", (p) => ({
       id: (p as { id: string }).id,
-      kind: "note",
+      kind: "fact",
       content: "the content",
       metadata: {},
       created_at: 1_700_000_000,
@@ -122,15 +122,15 @@ describe("Client verbs", () => {
 
   it("memory.search returns a list", async () => {
     daemon.handle("daimon.memory.search", () => [
-      { id: "01A", kind: "note", content: "alpha", score: 0.9 },
-      { id: "01B", kind: "note", content: "alpha-ish", score: 0.7 },
+      { id: "01A", kind: "fact", content: "alpha", score: 0.9 },
+      { id: "01B", kind: "fact", content: "alpha-ish", score: 0.7 },
     ]);
-    const hits = await client.memory.search("alpha", { limit: 5, kind: "note" });
+    const hits = await client.memory.search("alpha", { limit: 5, kind: "fact" });
     expect(hits.length).toBe(2);
     expect((hits[0] as { score: number }).score).toBe(0.9);
     const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.memory.search");
-    expect(last.params).toEqual({ query: "alpha", limit: 5, kind: "note" });
+    expect(last.params).toEqual({ query: "alpha", limit: 5, kind: "fact" });
   });
 
   it("memory.search normalises null to []", async () => {
@@ -146,12 +146,30 @@ describe("Client verbs", () => {
     expect(last.params).toEqual({ query: "" });
   });
 
+  it("stub rejects invalid kind like the daemon", async () => {
+    // The stub mirrors the Go daemon's -32004 validation
+    // (internal/memory/memory.go:41) so SDK test fixtures can't drift
+    // away from production by using a kind the real daemon would refuse.
+    daemon.handle("daimon.memory.write", () => ({ id: "01K" }));
+    try {
+      await client.memory.write({
+        kind: "note" as unknown as string,
+        content: "x",
+      });
+      throw new Error("expected RPCError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RPCError);
+      expect((e as RPCError).code).toBe(-32004);
+      expect((e as RPCError).rpcMessage).toContain("invalid memory kind");
+    }
+  });
+
   it("locked daemon propagates as DaemonLocked", async () => {
     daemon.handle("daimon.memory.write", () => {
       throw new StubRPCError(-32001, "daemon is locked");
     });
     await expect(
-      client.memory.write({ kind: "note", content: "x" }),
+      client.memory.write({ kind: "fact", content: "x" }),
     ).rejects.toBeInstanceOf(DaemonLocked);
   });
 

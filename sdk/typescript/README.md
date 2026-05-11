@@ -37,7 +37,7 @@ const client = new Client();                                // resolves $DAIMON_
 console.log(await client.identity.get());                   // { did: "did:key:..." }
 
 const { id } = await client.memory.write({
-  kind: "note",
+  kind: "fact",
   content: "hello world",
 });
 const mem = await client.memory.read(id as string);
@@ -65,7 +65,7 @@ const { verified, ok } = await client.activity.verify() as {
 import { DaemonNotRunning, DaemonLocked, RPCError } from "@daimon/sdk";
 
 try {
-  await client.memory.write({ kind: "note", content: "x" });
+  await client.memory.write({ kind: "fact", content: "x" });
 } catch (e) {
   if (e instanceof DaemonNotRunning) {
     // daimon binary isn't serving on this $DAIMON_HOME

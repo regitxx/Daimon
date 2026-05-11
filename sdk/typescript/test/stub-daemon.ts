@@ -13,6 +13,17 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 
+// Valid memory kinds per SPEC §5.2. Keep in sync with
+// internal/memory/memory.go:41 — the daemon rejects writes with any other
+// kind via -32004 invalid memory kind, and the stub mirrors that so test
+// fixtures can't silently drift from production validation.
+const VALID_MEMORY_KINDS = new Set([
+  "fact",
+  "preference",
+  "task",
+  "observation",
+]);
+
 export type Handler = unknown | ((params: unknown) => unknown);
 
 export class StubRPCError extends Error {
@@ -99,6 +110,20 @@ export class StubDaemon {
       const params = req.params;
       const reqId = req.id ?? 1;
       this.calls.push({ method, params });
+
+      if (
+        method === "daimon.memory.write" &&
+        params !== null &&
+        typeof params === "object"
+      ) {
+        const kind = (params as { kind?: unknown }).kind;
+        if (typeof kind !== "string" || !VALID_MEMORY_KINDS.has(kind)) {
+          conn.end(
+            JSON.stringify(errResponse(reqId, -32004, "invalid memory kind")) + "\n",
+          );
+          return;
+        }
+      }
 
       const handler = this.handlers.get(method);
       if (handler === undefined) {

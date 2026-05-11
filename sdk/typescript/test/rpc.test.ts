@@ -42,10 +42,10 @@ describe("rpc", () => {
       return { id: "01K" };
     });
     await rpcCall(daemon.socketPath, "daimon.memory.write", {
-      kind: "note",
+      kind: "fact",
       content: "hi",
     });
-    expect(received).toEqual({ kind: "note", content: "hi" });
+    expect(received).toEqual({ kind: "fact", content: "hi" });
   });
 
   it("raises DaemonNotRunning when socket absent", async () => {

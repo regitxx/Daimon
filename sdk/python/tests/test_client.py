@@ -47,11 +47,11 @@ def test_memory_write_minimal(stub_daemon: StubDaemon):
 
     stub_daemon.handle("daimon.memory.write", write)
     client = Client(socket_path=stub_daemon.socket_path)
-    out = client.memory.write(kind="note", content="hello")
+    out = client.memory.write(kind="fact", content="hello")
     assert out == {"id": "01K7Q"}
     # Optional fields stay omitted on the wire when not passed — keeps the
     # Python SDK aligned with the Go CLI's request body.
-    assert received == {"kind": "note", "content": "hello"}
+    assert received == {"kind": "fact", "content": "hello"}
 
 
 def test_memory_write_passes_metadata_and_source(stub_daemon: StubDaemon):
@@ -64,7 +64,7 @@ def test_memory_write_passes_metadata_and_source(stub_daemon: StubDaemon):
     stub_daemon.handle("daimon.memory.write", write)
     client = Client(socket_path=stub_daemon.socket_path)
     client.memory.write(
-        kind="note",
+        kind="fact",
         content="x",
         metadata={"tag": "draft"},
         source="cli",
@@ -78,7 +78,7 @@ def test_memory_read_round_trip(stub_daemon: StubDaemon):
         "daimon.memory.read",
         lambda p: {
             "id": p["id"],
-            "kind": "note",
+            "kind": "fact",
             "content": "the content",
             "metadata": {},
             "created_at": 1700000000,
@@ -94,17 +94,17 @@ def test_memory_search_returns_list(stub_daemon: StubDaemon):
     stub_daemon.handle(
         "daimon.memory.search",
         lambda p: [
-            {"id": "01A", "kind": "note", "content": "alpha", "score": 0.9},
-            {"id": "01B", "kind": "note", "content": "alpha-ish", "score": 0.7},
+            {"id": "01A", "kind": "fact", "content": "alpha", "score": 0.9},
+            {"id": "01B", "kind": "fact", "content": "alpha-ish", "score": 0.7},
         ],
     )
     client = Client(socket_path=stub_daemon.socket_path)
-    hits = client.memory.search("alpha", limit=5, kind="note")
+    hits = client.memory.search("alpha", limit=5, kind="fact")
     assert len(hits) == 2
     assert hits[0]["score"] == 0.9
     method, params = stub_daemon.calls[-1]
     assert method == "daimon.memory.search"
-    assert params == {"query": "alpha", "limit": 5, "kind": "note"}
+    assert params == {"query": "alpha", "limit": 5, "kind": "fact"}
 
 
 def test_memory_search_returns_empty_list_on_null_result(stub_daemon: StubDaemon):
@@ -132,7 +132,19 @@ def test_locked_daemon_propagates_as_daemon_locked(stub_daemon: StubDaemon):
     stub_daemon.handle("daimon.memory.write", locked)
     client = Client(socket_path=stub_daemon.socket_path)
     with pytest.raises(DaemonLocked):
+        client.memory.write(kind="fact", content="x")
+
+
+def test_stub_rejects_invalid_kind_like_daemon(stub_daemon: StubDaemon):
+    # The stub mirrors the Go daemon's -32004 validation (memory.go:41) so
+    # SDK test fixtures can't drift away from production by using a kind
+    # the real daemon would refuse.
+    stub_daemon.handle("daimon.memory.write", lambda _p: {"id": "01K"})
+    client = Client(socket_path=stub_daemon.socket_path)
+    with pytest.raises(RPCError) as ei:
         client.memory.write(kind="note", content="x")
+    assert ei.value.code == -32004
+    assert "invalid memory kind" in ei.value.message
 
 
 # --- Client.provider ---------------------------------------------------------

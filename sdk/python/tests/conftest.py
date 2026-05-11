@@ -22,6 +22,13 @@ from typing import Any
 import pytest
 
 
+# Valid memory kinds per SPEC §5.2. Keep in sync with
+# internal/memory/memory.go:41 — the daemon rejects writes with any other
+# kind via -32004 invalid memory kind, and the stub mirrors that so test
+# fixtures can't silently drift from production validation.
+VALID_MEMORY_KINDS = frozenset({"fact", "preference", "task", "observation"})
+
+
 class StubDaemon:
     """A tiny Unix-socket JSON-RPC server for SDK tests.
 
@@ -136,6 +143,13 @@ class StubDaemon:
             params = req.get("params")
             req_id = req.get("id", 1)
             self.calls.append((method, params))
+
+            if method == "daimon.memory.write" and isinstance(params, dict):
+                kind = params.get("kind")
+                if not isinstance(kind, str) or kind not in VALID_MEMORY_KINDS:
+                    resp = _err_response(req_id, -32004, "invalid memory kind")
+                    conn.sendall((json.dumps(resp) + "\n").encode())
+                    return
 
             stream_pair = self._stream_handlers.get(method)
             if stream_pair is not None:

@@ -74,7 +74,7 @@ result = client.activity.verify()                  # {"verified": N, "ok": True}
 from daimon import DaemonNotRunning, DaemonLocked, RPCError
 
 try:
-    client.memory.write(kind="note", content="x")
+    client.memory.write(kind="fact", content="x")
 except DaemonNotRunning:
     # daimon binary isn't serving on this $DAIMON_HOME
     ...
