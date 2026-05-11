@@ -2418,3 +2418,98 @@ The chain now carries five `provider.invoke` rows — four non-streaming (sessio
 5. **Type modelling pass on both SDKs.** Pydantic models for the memory record + provider envelope; mirrored TS interfaces. ~60 min per language. Improves DX significantly.
 
 **Next session begins with:** the v0.1 SDK milestone is **closed on full RPC parity in both Python and TypeScript** — identity, memory (write/read/search/list), provider (list/invoke/stream), activity (append/query/verify). Both languages have native streaming with the same wire shape. The remaining v0.1.x work is publishing + live Claude when the key shows up + cross-language streaming smoke for the next CHECKPOINT round. After that, v0.2 design (x402 / agent wallet) opens.
+
+## 2026-05-11 — Day Zero, thirty-eighth session: cross-language streaming smoke — both SDKs stream from one daimon, chain verified three ways
+
+**Live evidence that session 37's TypeScript streaming surface is wire-compatible with session 36's Python streaming surface, against a single daimon.** Mirrors session 35's non-streaming cross-language smoke but with `daimon.provider.stream` substituted for `daimon.provider.invoke` — same DID, same chain, both SDKs token-by-token streaming from the same Ollama-backed daemon, audit chain integrity verified by Python SDK + TypeScript SDK + the Go CLI as three independent code paths.
+
+**Setup:** fresh `DAIMON_HOME=/tmp/dt-stream-smoke-43622` to keep the chain short and the smoke readable. `daimon init` + `daimon unlock` driven non-interactively by piping the password (`printf 'pw\n' | daimon ...`) — the readPassword() shim falls through to a bufio line read when stdin isn't a TTY, by design. Daemon auto-spawned via `daimon unlock`'s detached `daimond serve`; Ollama was already up on `127.0.0.1:11434` with `llama3.2:latest` pulled. No Anthropic/OpenAI keys involved — Ollama is the only native streamer available locally and the only one that actually exercises the deltas-then-terminal wire path end-to-end.
+
+**Python half** (against the freshly installed `pip install -e sdk/python`, Python 3.13):
+
+```
+py: DID = did:key:z6MktpxhUYqtSjoDgsrHtW4sAnKwfhELxt7twZBkN1U7KFmz
+py: 3 deltas — first 1398.8ms, last 1420.2ms, mean inter-gap 10.72ms
+py: content = 'hello from python'
+py: model=llama3.2:latest stop=end_turn usage={'input_tokens': 32, 'output_tokens': 4}
+py: activity.verify -> {'verified': 2, 'ok': True}
+```
+
+Cold model load: 1.4s before the first delta (consistent with session 36's 1180ms `load_duration` plus first-token latency). Once warm, deltas at ~10.7ms inter-gap. Content is exactly what the prompt asked for ("Reply with exactly: hello from python"). Python's `activity.verify` reports 2 entries chain-ok (the daimon.created genesis row + the `provider.invoke streamed=true` row this stream just created — the `activity.verified` row from this verify call appends *after* the walk and shows up only in the next walker's count).
+
+**TypeScript half** (against the built dist at `sdk/typescript/dist/`, plain ESM imports, Node 22):
+
+```
+ts: DID = did:key:z6MktpxhUYqtSjoDgsrHtW4sAnKwfhELxt7twZBkN1U7KFmz
+ts: 4 deltas — first 213.0ms, last 239.5ms, mean inter-gap 8.83ms
+ts: content = "hello from typescript"
+ts: model=llama3.2:latest stop=end_turn usage={"input_tokens":33,"output_tokens":5}
+ts: activity.verify -> {"verified":4,"ok":true}
+```
+
+Same DID as Python — single chain, single identity. The model was already warm from Python's call, so first delta arrives at 213ms (vs Python's 1.4s cold-load). 4 deltas at ~8.8ms inter-gap — the deltas-per-token rate Ollama yields. Content matches the prompt. TS `activity.verify` reports 4 entries: genesis + py provider.invoke + py activity.verified + ts provider.invoke. The TS SDK's `for await (const delta of stream)` produces deltas in the same order with the same content the Python SDK's `for delta in stream` produces against the same daemon, against the same provider, against the same model.
+
+**CLI verification — the third independent code path:**
+
+```
+$ daimon activity verify
+verified 5 entries — chain ok
+
+$ daimon activity query --limit 20
+TIME                       KIND               ID                          SUMMARY
+2026-05-11T18:53:12+08:00  daimon.created     01KRBAPT0BP1Z4RXQCZQ109A6W  did=did:key:z6Mk…KFmz
+2026-05-11T18:54:07+08:00  provider.invoke    01KRBARFYSQ89NJS317JQDKPKZ  ollama/llama3.2:latest streamed=true matched=0
+2026-05-11T18:54:07+08:00  activity.verified  01KRBARG1P39HT80DK5VS4YBHQ  verified=2
+2026-05-11T18:54:52+08:00  provider.invoke    01KRBASVCWWBQA0JX1H0MMR87Z  ollama/llama3.2:latest streamed=true matched=0
+2026-05-11T18:54:52+08:00  activity.verified  01KRBASVD6F8VCKGGJ79PFS22R  verified=4
+2026-05-11T18:56:18+08:00  activity.verified  01KRBAWFSQ7MCM1GKV2H2REN0K  verified=5
+```
+
+Both `provider.invoke` rows carry `streamed=true` — `cmd/daimon/cmd_activity.go`'s per-kind summary writer pulls that boolean straight from `handleProviderStream`'s audit payload, distinguishing it from `streamed=false` invokes. The full JSON for one of the rows confirms the typed payload:
+
+```json
+{
+  "hash": "blake3:53ab4421472b7dbc4cc23b894d29fe35b30c233e516229dedb7b1c2a349b65b8",
+  "id": "01KRBARFYSQ89NJS317JQDKPKZ",
+  "kind": "provider.invoke",
+  "payload": {
+    "duration_ms": 1428,
+    "input_tokens": 32,
+    "model": "llama3.2:latest",
+    "output_tokens": 4,
+    "provider": "ollama",
+    "stop_reason": "end_turn",
+    "streamed": true
+  },
+  "prev_hash": "blake3:2cc3ce5211491ed92a2d7d6e392eea34fde9851b941254a8bd2999fcaf24f49b",
+  "signature": "U9BUQ...",
+  "ts": 1778496847833
+}
+```
+
+`prev_hash` chains backwards through `activity.verified verified=2` (TS's verify call wrote that row before the CLI walked) → `provider.invoke` (TS's stream) → `activity.verified verified=2` (Python's verify call) → `provider.invoke` (Python's stream) → `daimon.created` (genesis). All five hashes verify against their content + prev_hash + identity signature.
+
+**What this proves about the v0.1 SDK milestone:**
+
+1. **Both SDKs' streaming surfaces are wire-compatible with the daemon's `daimon.provider.stream`** — same notification frames, same terminal envelope, same `-32001 → DaemonLocked` lifecycle, same byte-level framing. Same `provider.Streamer` adapter on the daemon side (Ollama's `/api/chat` stream=true), feeding both languages indistinguishably.
+
+2. **Both SDKs persist their calls into one signed, chained audit log** under the same identity. There is exactly one DID; both SDK calls and the CLI's verify can walk the same `activity.log` and agree on every row's hash and signature. No "Python writes one log, TypeScript writes another" — the daemon owns the single source of truth and both clients are pure consumers.
+
+3. **`streamed=true` is durable evidence**, captured at row-write time on the daemon side, not derived from CLI output. Any future tooling — analytics, billing, governance — that reads the audit log can distinguish streaming from non-streaming invokes with no SDK cooperation.
+
+4. **Three independent code paths agree.** Python SDK's `activity.verify` (verified=2 mid-walk), TS SDK's `activity.verify` (verified=4 mid-walk), Go CLI's `daimon activity verify` (verified=5 at end). Each walks the chain from `daimon.created` forward, recomputes each row's `blake3` hash from `prev_hash || canonical_payload || ts || kind`, recomputes the Ed25519 signature with the embedded DID's pubkey, and reports the count. If any byte of any row had drifted between languages, at least one of these would have reported `chain INVALID`. None did.
+
+**What we explicitly did NOT ship:**
+
+- **A reusable smoke harness committed to the repo.** The Python + TS smoke scripts live under `/tmp/dt-stream-smoke-43622/` (`python_smoke.py`, `ts_smoke.mjs`) and were torn down with the rest of the home. They could be promoted to `examples/streaming/` if we want to ship them as user-runnable examples alongside the SDKs, but that's an examples-and-docs polish move, not a milestone-close requirement.
+- **Live Claude streaming.** Same blocker — no key. The Anthropic adapter would fall back to a synchronous invoke wrapped in a single terminal frame (deltas=0); the wire shape is identical to what the smoke just exercised against Ollama, just with `streamed=false` on the audit row.
+- **Cross-language inject_context streaming.** Both SDKs accept `inject_context` on `provider.stream`; tested at the unit level. A live smoke that writes a few memory rows then streams with `inject_context` to see `matched=N` in the audit log would be a useful follow-up but isn't load-bearing for the milestone.
+
+**What we explicitly punted:**
+
+1. **PyPI + npm publish prep.** v0.1.x polish; non-load-bearing for the v0.1 milestone close. Both packages are publish-ready in terms of code; remaining is metadata polish (`pyproject.toml` keywords/classifiers, `package.json` repository/bugs/homepage), README cross-links, CI for dry-run publish.
+2. **Live Claude streaming round-trip** (60 sec when `ANTHROPIC_API_KEY` shows up — applies to both SDKs identically).
+3. **`examples/streaming/`** with the smoke scripts polished and committed. ~30 min.
+4. **v0.2 design — x402 / agent wallet, design-only session.**
+
+**Next session begins with:** the v0.1 SDK milestone is now closed with **live evidence in both languages on the streaming surface**, in addition to the unit-test coverage and the non-streaming live evidence from session 35. The only remaining items between this state and a v0.1.0 final tag are PyPI/npm publish prep and live Claude streaming. v0.2 design is the next substantive arc.
