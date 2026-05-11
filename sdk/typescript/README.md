@@ -4,9 +4,9 @@ Thin TypeScript client over the Daimon daemon's Unix-socket JSON-RPC
 surface (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI and the Python SDK's
 wire-level behaviour: one connection per RPC, no pipelining, JSON-RPC 2.0.
 
-> Status: v0.1.0-dev.0 — alpha. Identity, memory, provider, and activity
-> verbs implemented (non-streaming surface). Provider streaming
-> (`daimon.provider.stream`) lands in a later session.
+> Status: v0.1.0-dev.0 — alpha. Identity, memory, provider (list /
+> invoke / stream), and activity verbs all surfaced. Full RPC parity
+> with the Python SDK.
 
 ## Install
 
@@ -51,6 +51,18 @@ const env = await client.provider.invoke({
   messages: [{ role: "user", content: "hi" }],
 });
 
+// Streaming — async-iterable of delta strings; terminal envelope on .final
+const stream = await client.provider.stream({
+  provider: "ollama",
+  model: "llama3.2",
+  messages: [{ role: "user", content: "count to 3" }],
+});
+for await (const delta of stream) {
+  process.stdout.write(delta);
+}
+console.log();
+console.log("usage:", (stream.final as { response: { usage: unknown } }).response.usage);
+
 await client.activity.append({ kind: "custom.event", payload: { n: 1 } });
 const entries = await client.activity.query({ limit: 20 });
 const { verified, ok } = await client.activity.verify() as {
@@ -88,5 +100,6 @@ npm run build
 ```
 
 The test suite uses a stub Unix-socket daemon (no real keys, no real
-storage); 35 cases mirror the Python SDK's pytest coverage byte-for-byte
-on the wire shape.
+storage); 46 cases mirror the Python SDK's pytest coverage byte-for-byte
+on the wire shape, including the streaming notification + terminal-frame
+protocol.

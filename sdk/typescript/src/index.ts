@@ -18,9 +18,11 @@ export type {
   MemoryWriteParams,
   MemorySearchParams,
   ProviderInvokeParams,
+  ProviderStreamParams,
   ActivityQueryParams,
   ActivityAppendParams,
 } from "./client.js";
+export { StreamHandle, DEFAULT_STREAM_TIMEOUT_MS } from "./stream.js";
 export {
   DaimonError,
   DaemonNotRunning,

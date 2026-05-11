@@ -16,6 +16,7 @@ import * as path from "node:path";
 
 import { resolveHome, socketPath } from "./home.js";
 import { rpcCall, type RpcOptions } from "./rpc.js";
+import { openStream, StreamHandle } from "./stream.js";
 
 export type JsonObject = Record<string, unknown>;
 export type JsonArray = unknown[];
@@ -49,6 +50,11 @@ export interface ProviderInvokeParams {
   temperature?: number;
   max_tokens?: number;
   inject_context?: JsonObject;
+}
+
+export interface ProviderStreamParams extends ProviderInvokeParams {
+  /** Per-stream timeout in milliseconds. Defaults to 5 minutes. */
+  timeoutMs?: number;
 }
 
 export interface ActivityQueryParams {
@@ -135,6 +141,33 @@ class ProviderNamespace {
     const wire: JsonObject = { provider: params.provider, request };
     if (params.inject_context !== undefined) wire["inject_context"] = params.inject_context;
     return (await this.c._call("daimon.provider.invoke", wire)) as JsonObject;
+  }
+
+  /**
+   * Stream a provider response as an async iterable of delta strings.
+   *
+   * The terminal envelope ({response, injected_memory_ids?}) is
+   * populated on the returned handle's `.final` after iteration
+   * completes. Providers without native streaming (Claude / OpenAI /
+   * LM Studio) return zero deltas with the full content carried in
+   * the terminal envelope; native streamers (Ollama) yield deltas
+   * token-by-token.
+   */
+  stream(params: ProviderStreamParams): Promise<StreamHandle> {
+    const request: JsonObject = {
+      model: params.model ?? "",
+      messages: params.messages,
+    };
+    if (params.system !== undefined) request["system"] = params.system;
+    if (params.temperature !== undefined) request["temperature"] = params.temperature;
+    if (params.max_tokens !== undefined) request["max_tokens"] = params.max_tokens;
+
+    const wire: JsonObject = { provider: params.provider, request };
+    if (params.inject_context !== undefined) wire["inject_context"] = params.inject_context;
+
+    const opts: { timeoutMs?: number } = {};
+    if (params.timeoutMs !== undefined) opts.timeoutMs = params.timeoutMs;
+    return openStream(this.c.socketPath, "daimon.provider.stream", wire, opts);
   }
 }
 

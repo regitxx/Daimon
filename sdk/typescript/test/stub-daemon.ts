@@ -26,6 +26,25 @@ const VALID_MEMORY_KINDS = new Set([
 
 export type Handler = unknown | ((params: unknown) => unknown);
 
+/**
+ * Streaming handler shape.
+ *
+ *   `deltas` — either a list of strings (sent verbatim as
+ *   `daimon.provider.stream.delta` notifications, in order) or a callable
+ *   `(params) => string[]` evaluated lazily against the inbound request.
+ *
+ *   `terminal` — the final response: a plain object (sent as `result`), a
+ *   `StubRPCError` instance (sent as `error`), or a callable returning
+ *   either.
+ */
+export type StreamHandler = {
+  deltas: string[] | ((params: unknown) => string[]);
+  terminal:
+    | Record<string, unknown>
+    | StubRPCError
+    | ((params: unknown) => Record<string, unknown> | StubRPCError);
+};
+
 export class StubRPCError extends Error {
   constructor(
     readonly code: number,
@@ -46,6 +65,11 @@ interface RecordedCall {
 export class StubDaemon {
   readonly calls: RecordedCall[] = [];
   private readonly handlers = new Map<string, Handler>();
+  private readonly streamHandlers = new Map<string, StreamHandler>();
+  /** Optional override for custom stream serving (used by frame-injection tests). */
+  serveStream:
+    | ((conn: net.Socket, handler: StreamHandler, params: unknown, reqId: number | string) => void)
+    | null = null;
   private server: net.Server | null = null;
 
   constructor(readonly socketPath: string) {}
@@ -58,11 +82,23 @@ export class StubDaemon {
     this.handlers.set(method, response);
   }
 
+  /**
+   * Register a streaming handler. The stub will send each entry of
+   * `deltas` as a `daimon.provider.stream.delta` notification, then the
+   * `terminal` frame carrying either result or error.
+   *
+   * Does not require the client to half-close the write side — the stub
+   * dispatches on the first newline-terminated frame on the wire.
+   */
+  stream(method: string, handler: StreamHandler): void {
+    this.streamHandlers.set(method, handler);
+  }
+
   start(): Promise<void> {
     if (fs.existsSync(this.socketPath)) {
       fs.unlinkSync(this.socketPath);
     }
-    this.server = net.createServer((conn) => this.serveOne(conn));
+    this.server = net.createServer((conn) => this.serveConnection(conn));
     return new Promise((resolve, reject) => {
       this.server!.once("error", reject);
       this.server!.listen(this.socketPath, () => {
@@ -86,22 +122,24 @@ export class StubDaemon {
     }
   }
 
-  private serveOne(conn: net.Socket): void {
-    const chunks: Buffer[] = [];
-    conn.on("data", (chunk: Buffer) => chunks.push(chunk));
-    conn.on("end", () => {
-      const data = Buffer.concat(chunks).toString("utf8");
-      if (!data) {
+  /**
+   * Read one newline-terminated request line, dispatch to either the
+   * streaming handler (multi-frame response) or the single-response
+   * handler. Mirrors the Python conftest's `_serve_one` post-refactor.
+   */
+  private serveConnection(conn: net.Socket): void {
+    let buf = "";
+    let dispatched = false;
+
+    const dispatch = (line: string): void => {
+      dispatched = true;
+      if (!line.trim()) {
         conn.end();
         return;
       }
-      let req: {
-        method?: string;
-        params?: unknown;
-        id?: number | string | null;
-      };
+      let req: { method?: string; params?: unknown; id?: number | string | null };
       try {
-        req = JSON.parse(data);
+        req = JSON.parse(line);
       } catch {
         conn.end(JSON.stringify(errResponse(null, -32700, "parse error")) + "\n");
         return;
@@ -123,6 +161,17 @@ export class StubDaemon {
           );
           return;
         }
+      }
+
+      const streamHandler = this.streamHandlers.get(method);
+      if (streamHandler !== undefined) {
+        const customServe = this.serveStream;
+        if (customServe !== null) {
+          customServe(conn, streamHandler, params, reqId);
+          return;
+        }
+        this.runStream(conn, streamHandler, params, reqId);
+        return;
       }
 
       const handler = this.handlers.get(method);
@@ -149,10 +198,73 @@ export class StubDaemon {
           );
         }
       }
+    };
+
+    conn.on("data", (chunk: Buffer) => {
+      if (dispatched) return;
+      buf += chunk.toString("utf8");
+      const nl = buf.indexOf("\n");
+      if (nl >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        dispatch(line);
+      }
+    });
+    conn.on("end", () => {
+      if (!dispatched && buf.length > 0) {
+        dispatch(buf);
+      } else if (!dispatched) {
+        conn.end();
+      }
     });
     conn.on("error", () => {
       // ignore — peer hang-ups happen in tests
     });
+  }
+
+  private runStream(
+    conn: net.Socket,
+    handler: StreamHandler,
+    params: unknown,
+    reqId: number | string,
+  ): void {
+    let deltas: string[];
+    try {
+      deltas = typeof handler.deltas === "function" ? handler.deltas(params) : handler.deltas.slice();
+    } catch (e) {
+      conn.end(JSON.stringify(errResponse(reqId, -32603, (e as Error).message)) + "\n");
+      return;
+    }
+    let terminal: Record<string, unknown> | StubRPCError;
+    try {
+      terminal = typeof handler.terminal === "function" ? handler.terminal(params) : handler.terminal;
+    } catch (e) {
+      conn.end(JSON.stringify(errResponse(reqId, -32603, (e as Error).message)) + "\n");
+      return;
+    }
+
+    let broken = false;
+    conn.on("error", () => {
+      broken = true;
+    });
+
+    for (const d of deltas) {
+      if (broken || conn.destroyed) return;
+      const notif = {
+        jsonrpc: "2.0",
+        method: "daimon.provider.stream.delta",
+        params: { content: d },
+      };
+      conn.write(JSON.stringify(notif) + "\n");
+    }
+
+    if (broken || conn.destroyed) return;
+    if (terminal instanceof StubRPCError) {
+      conn.end(JSON.stringify(errResponse(reqId, terminal.code, terminal.rpcMessage, terminal.data)) + "\n");
+      return;
+    }
+    const resp = { jsonrpc: "2.0" as const, result: terminal, id: reqId };
+    conn.end(JSON.stringify(resp) + "\n");
   }
 }
 
