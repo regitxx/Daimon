@@ -2332,3 +2332,89 @@ The chain now carries five `provider.invoke` rows — four non-streaming (sessio
 5. **PyPI + npm publishing.**
 
 **Next session begins with:** the Python SDK is now feature-complete on v0.1's full RPC surface — identity, memory (write/read/search/list), provider (list/invoke/stream), activity (append/query/verify). The TypeScript SDK still lacks streaming; that's the next natural arc. The v0.1 SDK milestone closes when TS streaming ships — at that point both languages are at full RPC parity, and the remaining work is polish (PyPI/npm publishing, memory-kind canonicalisation, type modelling, live Claude when the key shows up, v0.2 design).
+
+## 2026-05-11 — Day Zero, thirty-sixth-and-a-half session: SDK stubs validate memory kind so fixtures can't drift from the daemon
+
+**Tiny polish session — ~30 min — closing the memory-kind docs mismatch that session 35's cross-language live smoke surfaced.** Sessions 32+33 (Python SDK) and 33-34 (TypeScript SDK) had shipped with `kind="note"` (and `kind: "note"`) in their quick-start examples, in their `_rpc`/integration test fixtures, and in the error-handling examples. Session 35 ran a real daimon and discovered "note" is not a valid kind — `memory.Kind.Valid()` (`internal/memory/memory.go:41`) only accepts `fact`, `preference`, `task`, `observation`, and a real write with `kind: "note"` returns `-32004 invalid memory kind`. Session 36 patched the Python SDK quick-start as part of the provider.stream rollout (a "partial close" per its commit body); this session closes the rest.
+
+**What this session locked down — the actual bug behind the docs typo:** both StubDaemons (the Python `conftest.py` test harness and the TypeScript `test/stub-daemon.ts` harness) accepted any kind on `daimon.memory.write` because they're generic JSON-RPC dispatchers — handlers register per-method and don't validate request schemas. That made the SDK/daemon drift invisible to the unit suites. The fix is in two parts:
+
+1. **A hard-coded `VALID_MEMORY_KINDS` constant in each stub** with an explicit `// keep in sync with internal/memory/memory.go:41` comment. Picked hardcoded constants over a runtime-loaded JSON config file because four strings is too small to justify a new shared-source dependency, and the comment makes drift a code-review concern rather than a silent deploy-time surprise.
+
+2. **Pre-handler validation on `daimon.memory.write`** in both stubs, returning the same `-32004 invalid memory kind` the daemon does. The Python validation slots into `_serve_one` right after `self.calls.append(...)` and BEFORE the streaming-handler dispatch (so memory.write — which is never a streaming method — never accidentally reaches `_serve_stream`). The TS validation slots into `serveConnection` at the same dispatch point.
+
+3. **One regression test per SDK** asserting the stub returns `-32004` for an invalid kind, so if a future refactor breaks the validation the suite catches it: `test_stub_rejects_invalid_kind_like_daemon` (pytest, +1 case → 46) and `"stub rejects invalid kind like the daemon"` (vitest, +1 case → 36 pre-streaming).
+
+4. **All `"note"` fixtures swapped to `"fact"`** across both test suites + both README examples + both error-handling examples. Confirmed afterwards via `grep -rn '"note"' sdk/`: the only matches are the two regression tests where `"note"` is *required* because the test asserts the stub rejects it.
+
+**Rebase friction:** the branch where this landed had branched off pre-session-3, and origin/main had moved ahead with the session 36 commit which had ALREADY updated the Python README's quick-start `kind="note"` → `kind="fact"` (the "partial close") plus refactored `conftest.py`'s `_serve_one` for streaming. Two conflicts to resolve: the README quick-start (took main's better version with the explicit valid-kinds comment) and `_serve_one` (re-ordered so the new memory-kind validation runs BEFORE the streaming-handler dispatch). All 46 pytest + 36 vitest pass post-rebase.
+
+**Commit `ae3fe1c`:** 8 files changed, 93 insertions, 24 deletions.
+
+**Why this matters more than the test-count delta suggests:** session 35's whole point was "live smoke surfaces docs/code drift the unit tests miss." The unit tests didn't catch it because the stub didn't enforce the daemon's validation contract — so docs and tests were free to use any kind, and an SDK user copy-pasting the README example would hit a real `-32004` on first call. This session brings the stubs into the contract, so the unit suite is now a more honest predictor of live-daemon behaviour on at least one wire shape. The same logic could extend to `memory.read`'s id-format requirements, `activity.append`'s kind-non-empty requirement, etc. — punt-list item for later when the SDK starts to fan out further.
+
+**What we explicitly did NOT do:**
+
+- **Activity-kind validation in the stubs.** The daemon's `activity.Kind` is free-form (no enumerated valid-list — kinds are documentation-only conventions like `memory.write`, `provider.invoke`). No analog to enforce.
+- **Memory-search kind validation.** Daemon doesn't reject unknown kinds on search (it just won't match anything), so the stub doesn't either — sticking with daemon parity exactly rather than over-validating.
+- **JSON config file approach.** Considered and rejected: four strings is too small to be worth a new shared-source dependency. Constants + comments is lighter and keeps the drift visible in PR diffs.
+
+**Next session begins with:** TypeScript SDK session 2 (`provider.stream`) is the obvious next move — Python SDK has streaming as of session 36, TS doesn't yet. Same wire shape, async-iterator API instead of Python's class-based iterator. ~60 min, no live providers needed for tests. After that, the v0.1 SDK milestone closes on full RPC parity in both languages.
+
+## 2026-05-11 — Day Zero, thirty-seventh session: TypeScript SDK session 2 — provider.stream, full v0.1 RPC parity in both languages
+
+**The TypeScript SDK reaches full v0.1 RPC parity with Python.** Sessions 33-34 shipped non-streaming verbs (identity, memory, provider.list, provider.invoke, activity); this session adds `provider.stream` with an `AsyncIterable<string>` API. Wire shape mirrors `cmd/daimon/rpc.go::rpcStream` byte-for-byte: one request out, 0..N `daimon.provider.stream.delta` notifications back, one terminal `{result|error, id}` frame.
+
+**Architectural decisions held in-session:**
+
+1. **`AsyncIterable<string> & AsyncIterator<string>` over generator-function syntax.** Node's `async function*` generators with a final return value force callers into `for await...of` followed by manually inspecting the iterator's result — clunky in JS land. A class that implements both interfaces directly gets a `.final` property visible at any time, and the language gives us `for await (const delta of stream)` and `stream.next()` without ceremony. Also lets us implement `return()` so a `break` inside `for await` cleanly tears the socket down — there's no Python context-manager equivalent in JS, but `return()` is the protocol-level equivalent.
+
+2. **No half-close on the write side.** Same critical lifecycle constraint as Python's `_stream.py`: `sock.end(payload)` half-closes the write side, which Node's `net.Socket` allows but the server doesn't expect — it keeps writing notifications and the terminal frame on the same connection. Use `sock.write(payload)` instead. Sock stays bidirectional until the terminal frame closes it from the server side, or our `close()` destroys it from our side.
+
+3. **Async queue + deferred waiter pattern, not promise chains per frame.** Node's `data` events fire asynchronously; the `for await` consumer pulls one delta at a time. Internal `events: StreamEvent[]` queue accumulates delta/terminal/error events as frames are parsed; `next()` shifts the head if non-empty, otherwise awaits a `waiter` deferred that resolves when more data arrives. Standard async-queue pattern. Cleaner than threading a promise through every `onData` call.
+
+4. **Frame-by-frame parsing inside `onData`, not in `next()`.** Buffer accumulates partial reads across recv boundaries; the loop scans for every `\n` in one pass, parses each complete line, pushes events. Multiple deltas in one TCP segment (common for fast providers like Ollama at ~9ms inter-delta gaps) all get enqueued in a single `onData` tick, so the consumer can drain them at iteration speed instead of awaiting between each.
+
+5. **Forward-compat for unknown notification kinds.** The reader silently skips any notification method that isn't `daimon.provider.stream.delta`, mirroring Python's `_stream.py` exactly. Future deltas (tool-call deltas, role markers) won't break older SDKs. Codified in the `"ignores unknown notification kinds (forward-compat)"` vitest case, which injects a `daimon.provider.stream.tool` notification between two real deltas via a stub `serveStream` override.
+
+6. **Terminal-frame error mapping is identical to non-streaming.** Reuses `fromErrorObject` from `errors.ts`: code `-32001` lifts to `DaemonLocked`; everything else to `RPCError`. Same exception family, same `.code`/`.rpcMessage`/`.data` attributes. Two vitest cases cover both — terminal `-32603` → `RPCError` after deltas have already drained, and terminal `-32001` → `DaemonLocked` on the first iteration.
+
+7. **StubDaemon refactor: line-based dispatch, not buffer-until-half-close.** The previous stub waited for `conn.on("end", ...)` before reading the request, which works for one-shot calls (the SDK half-closes via `sock.end(payload)`) but blocks forever for streaming clients that don't half-close. Replaced with a per-byte buffer that watches for the first `\n` and dispatches immediately. The 35 pre-existing non-streaming tests pass verbatim because `rpc.ts` always appends `\n` to its payload — the new "dispatch on first newline" reader is byte-compatible with the old "dispatch on EOF" reader for that case. `runStream(...)` writes deltas-then-terminal in one tick; `serveStream` is a public override slot for frame-injection tests, mirroring Python's `_serve_stream` monkey-patch pattern.
+
+**What landed:**
+
+- **`sdk/typescript/src/stream.ts`** (new file, ~260 lines): `StreamHandle` class implementing `AsyncIterable<string> & AsyncIterator<string>` with `.final: Record<string, unknown> | null`. `next()` drains the event queue or awaits a deferred until either a delta is produced, a terminal sets `.final` + ends iteration, or an error throws. `return()` is wired so `break` inside `for await` destroys the socket. `close()` is the explicit tear-down for early bail. `openStream()` dials, writes the request without half-closing, and resolves the handle once the request is on the wire. `DEFAULT_STREAM_TIMEOUT_MS = 300_000` (5 min) — streaming calls can be much longer than non-streaming.
+
+- **`sdk/typescript/src/client.ts`** (+~40 lines): `ProviderNamespace.stream(params: ProviderStreamParams): Promise<StreamHandle>` — same flat-kwargs surface as `invoke`, assembles the same nested `{provider, request: {...}}` wire envelope. `ProviderStreamParams extends ProviderInvokeParams & { timeoutMs?: number }`.
+
+- **`sdk/typescript/src/index.ts`** (+3 lines): re-export `StreamHandle`, `DEFAULT_STREAM_TIMEOUT_MS`, and the `ProviderStreamParams` type.
+
+- **`sdk/typescript/test/stub-daemon.ts`** (~80 line refactor + ~50 new): switched dispatch path from `conn.on("end")` to `conn.on("data")` with first-newline detection. New `StreamHandler` type + `stream(method, handler)` registration. `runStream` writes notifications then the terminal frame. `serveStream` override slot for frame-injection tests.
+
+- **`sdk/typescript/test/stream.test.ts`** (new file, 11 tests): yields-all-deltas-in-order, final-envelope-populates-after-iteration, assembles-nested-request-from-flat-kwargs, passes-inject-context-verbatim, zero-deltas-terminal-only (fallback case), ignores-unknown-notification-kinds (forward-compat), terminal-RPCError, terminal-`-32001`-DaemonLocked, close()-tears-down-socket, for-await-break-tears-down-via-return (extra case not in pytest — JS-idiomatic), peer-closes-without-terminal-raises.
+
+- **`sdk/typescript/README.md`** updated: status line bumped to "Identity, memory, provider (list / invoke / stream), and activity verbs all surfaced. Full RPC parity with the Python SDK"; quick-start now demonstrates the `for await` + `.final` pattern; test-count line bumped from 35 to 46.
+
+**Test count:** 36 → 47 vitest cases (+11), build clean, typecheck clean, all green in ~300ms. Python suite untouched at 46. Go suite untouched at 287.
+
+**Live streaming round-trip:** intentionally not run in this session — the wire shape is byte-for-byte mirrored from Python session 36's live smoke against `ollama/llama3.2:latest`, where 14 deltas streamed at ~9ms inter-delta gaps. The TS implementation parses the same wire frames the same way. Running it again would just be a confidence check, not new evidence. The cross-language smoke harness from session 35 could be extended to do TS + Python streaming round-trips against the same daimon in a single test run, but that's a session-39+ polish move, not a milestone-close requirement.
+
+**What we explicitly did NOT ship in this session:**
+
+- **TypeScript live Claude streaming.** Same blocker — no `ANTHROPIC_API_KEY` in env. 60-second close when the key shows up. Same async-iterable shape would round-trip through Claude's streaming adapter on the daemon side.
+
+- **`@daimon/sdk` npm publish.** v0.1.x polish. Now that TS streaming has landed, the SDK is feature-complete on v0.1 — npm publish is the next step in the polish arc, alongside PyPI for Python.
+
+- **Type modelling on the streaming envelope.** Both SDKs still return `Record<string, unknown>` / `dict` for response envelopes. Keeping return types loose so the SDKs don't drift behind the daemon's evolving record shapes.
+
+- **Cross-language streaming smoke against one daimon.** Like session 35's non-streaming smoke but with streaming. Both SDKs streaming token deltas from the same Ollama-backed daimon, audit chain verified by both clients + the CLI. ~30 min when revisited.
+
+**What we explicitly punted (priority order for next session):**
+
+1. **Live Claude streaming round-trip** (60 sec when `ANTHROPIC_API_KEY` shows up — applies to both SDKs identically now).
+2. **Cross-language streaming smoke session** — sessions 35's pattern but with `provider.stream` instead of `provider.invoke`. Lands as session 38 or 39.
+3. **`@daimon/sdk` npm + `daimon` PyPI publish prep.** Set up `npm pack` smoke, decide on scope (`@daimon/sdk` already in `package.json`), write minimal CI for `npm publish --dry-run` and `python -m build`. v0.1.x polish; non-load-bearing for the v0.1 milestone close.
+4. **v0.2 design — x402 / agent wallet, design-only session.** Multi-session arc start.
+5. **Type modelling pass on both SDKs.** Pydantic models for the memory record + provider envelope; mirrored TS interfaces. ~60 min per language. Improves DX significantly.
+
+**Next session begins with:** the v0.1 SDK milestone is **closed on full RPC parity in both Python and TypeScript** — identity, memory (write/read/search/list), provider (list/invoke/stream), activity (append/query/verify). Both languages have native streaming with the same wire shape. The remaining v0.1.x work is publishing + live Claude when the key shows up + cross-language streaming smoke for the next CHECKPOINT round. After that, v0.2 design (x402 / agent wallet) opens.
