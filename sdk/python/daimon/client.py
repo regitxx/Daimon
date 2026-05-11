@@ -16,7 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import _home, _rpc
+from . import _home, _rpc, _stream
 
 
 class _MemoryNamespace:
@@ -102,10 +102,9 @@ class _IdentityNamespace:
 class _ProviderNamespace:
     """Verbs under ``daimon.provider.*``.
 
-    ``list`` and ``invoke`` are surfaced. Streaming
-    (``daimon.provider.stream``) is deferred to a later SDK session — it
-    requires a generator-based API and notification handling that the
-    one-request-per-connection lifecycle in :mod:`._rpc` doesn't support.
+    ``list``, ``invoke``, and ``stream`` are surfaced. ``stream`` returns
+    a :class:`daimon._stream.StreamHandle` — iterable for delta strings
+    with the terminal envelope on ``.final``.
     """
 
     def __init__(self, client: "Client") -> None:
@@ -162,6 +161,55 @@ class _ProviderNamespace:
         if inject_context is not None:
             params["inject_context"] = inject_context
         return self._c._call("daimon.provider.invoke", params)
+
+    def stream(
+        self,
+        *,
+        provider: str,
+        messages: list[dict],
+        model: str = "",
+        system: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        inject_context: dict | None = None,
+        timeout: float | None = None,
+    ) -> _stream.StreamHandle:
+        """Stream a provider response token-by-token.
+
+        Returns a :class:`daimon._stream.StreamHandle`. Iterate it to
+        consume delta strings; the terminal envelope (``{response,
+        injected_memory_ids?}``) is available as ``.final`` once the
+        iteration completes.
+
+        The wire shape is identical to :meth:`invoke` — flat kwargs are
+        assembled into the nested ``{provider, request: {...}}`` envelope
+        the daemon expects. The transport differs: streaming keeps the
+        socket open in both directions and yields a notification frame
+        per delta until the terminal frame arrives.
+
+        Provider support follows the daemon's adapter capabilities:
+        Ollama streams natively; Claude/OpenAI/LM Studio fall back to a
+        synchronous invoke on the daemon side (the SDK still returns a
+        :class:`StreamHandle`, but it yields the full content as a
+        single delta).
+        """
+        request: dict[str, Any] = {"model": model, "messages": messages}
+        if system is not None:
+            request["system"] = system
+        if temperature is not None:
+            request["temperature"] = temperature
+        if max_tokens is not None:
+            request["max_tokens"] = max_tokens
+        params: dict[str, Any] = {"provider": provider, "request": request}
+        if inject_context is not None:
+            params["inject_context"] = inject_context
+        effective_timeout = timeout if timeout is not None else self._c._timeout
+        return _stream.open_stream(
+            self._c._socket,
+            "daimon.provider.stream",
+            params,
+            timeout=effective_timeout,
+        )
 
 
 class _ActivityNamespace:

@@ -4,8 +4,9 @@ Thin Python client over the Daimon daemon's Unix-socket JSON-RPC surface
 (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI's wire-level behaviour: one
 connection per RPC, no pipelining, JSON-RPC 2.0.
 
-> Status: v0.1.0.dev0 — alpha. Identity + memory verbs only. Provider /
-> activity / streaming come in subsequent SDK sessions.
+> Status: v0.1.0.dev0 — alpha. Identity, memory, provider (list / invoke
+> / stream), and activity verbs all surfaced. Type modelling and PyPI
+> publishing are v0.1.x polish.
 
 ## Install
 
@@ -33,12 +34,38 @@ from daimon import Client
 client = Client()                                  # resolves $DAIMON_HOME
 print(client.identity.get())                       # {"did": "did:key:..."}
 
-mid = client.memory.write(kind="note", content="hello world")
+# memory.Kind.Valid() accepts: "fact", "preference", "task", "observation"
+mid = client.memory.write(kind="fact", content="the sky is blue")
 print(mid)                                         # {"id": "01K..."}
 
 mem = client.memory.read(mid["id"])
-hits = client.memory.search("hello")               # [{...mem, "score": 0.7}, ...]
+hits = client.memory.search("sky")                 # [{...mem, "score": 0.7}, ...]
 all_mems = client.memory.list()                    # search with empty query
+
+# provider verbs
+providers = client.provider.list()
+env = client.provider.invoke(
+    provider="ollama",
+    model="llama3.2:latest",
+    messages=[{"role": "user", "content": "hi"}],
+)
+print(env["response"]["content"])
+
+# streaming — yields delta strings; final envelope on .final
+stream = client.provider.stream(
+    provider="ollama",
+    model="llama3.2:latest",
+    messages=[{"role": "user", "content": "count to 3"}],
+)
+for delta in stream:
+    print(delta, end="", flush=True)
+print()
+print("usage:", stream.final["response"]["usage"])
+
+# activity verbs (audit trail)
+client.activity.append(kind="custom.event", payload={"n": 1})
+entries = client.activity.query(limit=20)
+result = client.activity.verify()                  # {"verified": N, "ok": True}
 ```
 
 ## Errors

@@ -2240,3 +2240,95 @@ Each verifier is a different code path: the Python SDK's verify is `_call("daimo
 6. **PyPI + npm publishing.** v0.1.x polish; non-load-bearing for the v0.1 milestone.
 
 **Next session begins with:** the v0.1 SDK milestone is now closed on the non-streaming surface in both languages with end-to-end live evidence in both — Python + TypeScript SDKs writing memories and invoking real providers (ollama, openai, lmstudio) against the same daemon, single chain, chain-integrity verified by three independent code paths. Streaming is the natural next arc for either SDK; both can ship sequentially or in one combined session. After streaming, v0.2 design opens; v0.1.0 final is then a publishing-and-polish step (PyPI + npm + Anthropic-side live smoke when the key shows up).
+
+## 2026-05-11 — Day Zero, thirty-sixth session: Python SDK session 3 — provider.stream, the deferred streaming verb
+
+**The Python SDK reaches full v0.1 RPC surface, including streaming.** Sessions 32+33 shipped non-streaming verbs (identity, memory, provider.list, provider.invoke, activity); this session adds `provider.stream` with a generator-style iterator API and ~10 new pytest cases. Wire shape mirrors `cmd/daimon/rpc.go::rpcStream` byte-for-byte: one request out, 0..N `daimon.provider.stream.delta` notifications back, one terminal `{result|error, id}` frame.
+
+**Probe at start:** doctor showed OpenAI + LM Studio + Ollama all live (carry-over from session 35's env file). The temp `DAIMON_HOME=/tmp/dt-sdk-s34/` from session 35 still existed; resumed that daimon (same DID `did:key:z6Mk…tUss`) so the streaming smoke would extend the existing 14-entry chain rather than start a fresh one. That made the cross-session continuity demonstrable in the audit log.
+
+**Architectural decisions held in-session:**
+
+1. **Class-based iterator (`StreamHandle`) over a `yield`/`return` generator.** Python 3 supports generators that both yield values and `return` a final value — the return value comes through `StopIteration.value`. But that pattern forces every caller into `try/except StopIteration: envelope = exc.value` or a `yield from` indirection. A class with an `.final` attribute populated before `__next__` raises `StopIteration` is much more pythonic and matches the mental model users already have for HTTP-streaming libraries (OpenAI's stream object exposes chunks via iteration with no terminal envelope; we have a terminal envelope and we want it visible). The class also gets `__enter__`/`__exit__` for free, so callers who bail mid-stream get deterministic socket close: `with client.provider.stream(...) as stream: for delta in stream: ...`.
+
+2. **No half-close on the write side.** This is the key lifecycle difference from `_rpc.py`'s one-shot path. The non-streaming client does `sock.shutdown(SHUT_WR)` after sending the request so the server's `json.Decoder` sees EOF promptly — but in streaming, the server reads our single request, then writes notifications and the terminal frame on the same connection. Half-closing the write side could surface as a write-side error on some kernels even though the read side is still open, and there's no semantic reason to half-close anyway (the server doesn't need EOF to know our request is complete — the newline-terminated JSON frame is self-delimiting). Match the Go CLI's `rpcStream` exactly: no half-close, just keep reading until the terminal frame.
+
+3. **Newline-delimited frame reader.** Go's `json.Encoder.Encode` always writes one JSON object followed by `\n`. The Python SDK's `_read_one_frame` exploits this by splitting the recv buffer on raw `\n` bytes. This is safe because JSON-encoded strings escape literal newlines as `\\n` (two ASCII chars — `5c 6e`), so the only actual newline byte (`0a`) on the wire is the frame separator. Buffer-based reader accumulates partial reads across `recv` boundaries — useful when a delta straddles a TCP segment, or when multiple frames arrive coalesced in one `recv` (which happens for fast-yielding providers like Ollama at ~9ms inter-delta gaps where multiple notifications can land in one buffer).
+
+4. **Forward-compat for unknown notification kinds.** The reader silently skips any notification method that isn't `daimon.provider.stream.delta`, mirroring the Go CLI's `rpcStream` exactly. Future deltas — tool-call deltas, role markers, function-call markers — won't break older SDKs. Test `test_stream_ignores_unknown_notification_kinds` codifies this contract by injecting a `daimon.provider.stream.tool` notification between two real deltas and asserting the SDK yields only the real deltas.
+
+5. **Terminal-frame error mapping is identical to non-streaming.** Reuses `_from_error_object` from `errors.py`: code `-32001` lifts to `DaemonLocked`; everything else to `RPCError`. Same exception family, same `.code`/`.message`/`.data` attributes. Tests cover both — `test_stream_terminal_error_raises_rpc_error` (chain-broken with `-32603`) and `test_stream_terminal_minus_32001_raises_daemon_locked`.
+
+6. **StubDaemon refactor: read one newline-terminated request, dispatch by method registration.** The previous `_serve_one` read all bytes until peer half-close, which works for `_rpc.py`'s one-shot pattern but blocks forever against `_stream.py`'s "no half-close" client. Replaced with a "read until first `\n`" loop, then dispatch: if the method is registered via `.stream(...)` use `_serve_stream` (writes notifications + terminal); otherwise `.handle(...)` use the existing one-response path. **The 35 pre-existing non-streaming tests all still pass verbatim** because the SDK's `_rpc.rpc_call` always appends `\n` to its request payload — the new "read one line" reader is byte-compatible with the old "read all" reader for that case. Added `_serve_stream`'s broken-pipe tolerance: when a client closes the socket mid-stream (the early-exit test case), the stub gets `BrokenPipeError` on the next `sendall` and silently returns — matches real-daemon behaviour where mid-stream client disconnects are routine.
+
+7. **Provider-side capability lives in the daemon, not the SDK.** Per CHECKPOINT item 22 (session 18): Ollama implements `provider.Streamer` natively (delta-per-token); Claude/OpenAI/LM Studio fall back to a synchronous invoke on the daemon side and return the full content as a single terminal frame with no deltas in between. The Python SDK doesn't replicate the fallback logic — the wire shape is the same regardless, so the SDK just sees "0 deltas, terminal carries full content" for fallback providers. Codified in `test_stream_zero_deltas_terminal_only` against a stubbed-fallback case.
+
+**What landed:**
+
+- **`sdk/python/daimon/_stream.py`** (new file, 200 lines): `StreamHandle` class + `open_stream(socket_path, method, params, timeout)`. `StreamHandle.__next__` reads frames until it sees a delta (returns its content) or the terminal frame (stores envelope on `.final`, raises `StopIteration`). Socket is closed on terminal frame, on `close()`, on `__exit__`, or implicitly when the handle is garbage-collected. `DEFAULT_TIMEOUT = 300.0` (5 min) — streaming calls can be much longer than non-streaming.
+
+- **`sdk/python/daimon/client.py`** (+47 lines): `_ProviderNamespace.stream(*, provider, messages, model="", system=None, temperature=None, max_tokens=None, inject_context=None, timeout=None)` — same flat-kwargs surface as `invoke`, assembles the same nested `{provider, request: {...}}` wire envelope. Routes through `_stream.open_stream` with method `daimon.provider.stream`. Docstring + `_ProviderNamespace` class docstring updated to reflect the new surface.
+
+- **`sdk/python/daimon/__init__.py`** (+2 lines): re-export `StreamHandle` for caller-side type hints.
+
+- **`sdk/python/tests/conftest.py`** (+~50 lines): `StubDaemon.stream(method, deltas, terminal)` registration; `_serve_one` refactored to read one newline-terminated request line and dispatch; new `_serve_stream` writes notifications + terminal with broken-pipe tolerance for early-client-exit cases.
+
+- **`sdk/python/tests/test_stream.py`** (new file, 10 tests): yields-all-deltas-in-order, terminal-envelope-populates-after-iteration, assembles-nested-request-from-flat-kwargs, passes-inject-context-verbatim, zero-deltas-terminal-only (fallback case), ignores-unknown-notification-kinds (forward-compat), terminal-RPCError, terminal-`-32001`-DaemonLocked, context-manager-early-exit, peer-closes-without-terminal-raises.
+
+- **`sdk/python/README.md`** updated: status line bumped to "Identity, memory, provider (list / invoke / stream), and activity verbs all surfaced"; quick-start example now uses `kind="fact"` (closes part of the memory-kind docs mismatch flagged in session 35) and demonstrates streaming with the `stream.final` pattern.
+
+**Test count:** 35 → 45 SDK pytest cases (+10), all race-clean at ~5.6s wall. Go suite untouched at 287. TypeScript suite untouched at 35.
+
+**Live smoke against ollama/llama3.2:latest** (resumed `DAIMON_HOME=/tmp/dt-sdk-s34/`):
+
+```
+$ python -c "<smoke script: stream 'Count from 1 to 5, one number per line.'>"
+received 14 deltas
+first delta at: 1380.6ms; last delta at: 1499.2ms
+mean inter-delta gap: 9.1ms, min: 8.3ms, max: 9.7ms
+content: 'Here is the count:\n\n1\n\n2\n\n3\n\n4\n\n5'
+
+terminal envelope: {'response': {'model': 'llama3.2:latest', 'content': '...',
+  'stop_reason': 'end_turn', 'usage': {'input_tokens': 38, 'output_tokens': 15},
+  'raw': {...total_duration: 1507547625, load_duration: 1180986750,
+   eval_count: 15, eval_duration: 125781125...}}}
+```
+
+Token-by-token rendering is real on huckgod's hardware: after the 1180ms cold-model load_duration, the 14 deltas streamed in 125ms at ~9ms inter-delta gaps. The audit log got a new `provider.invoke` row with **`streamed=true`** — distinguishing it from the four `streamed=false` invokes from session 35:
+
+```
+$ daimon activity query --kind provider.invoke --limit 5
+...
+2026-05-11T17:46:35  provider.invoke  ollama/llama3.2:latest    streamed=false matched=0
+2026-05-11T17:46:55  provider.invoke  openai/gpt-5-mini-...     streamed=false matched=0
+2026-05-11T17:47:06  provider.invoke  openai/gpt-5-mini-...     streamed=false matched=0
+2026-05-11T17:47:25  provider.invoke  lmstudio/liquid/lfm2.5    streamed=false matched=0
+2026-05-11T18:07:30  provider.invoke  ollama/llama3.2:latest    streamed=true  matched=0  ← new
+
+$ daimon activity verify
+verified 17 entries — chain ok
+```
+
+The chain now carries five `provider.invoke` rows — four non-streaming (sessions 33+35), one streaming (this session) — all chain-verified by the CLI walking the full 17-entry log under the same identity.
+
+**What we explicitly did NOT ship in this session:**
+
+- **TypeScript streaming.** Same wire shape applies; the implementation is an async-iterator API (`for await (const delta of client.provider.stream(...))`) over Node's `net.Socket` with no half-close. Estimated ~150 lines + vitest cases mirroring this session's pytest suite — a natural single-session arc as TS SDK session 2.
+
+- **Pydantic/dataclass type modelling on the streaming envelope.** Still deferred — same reasoning as for the rest of the SDK: keep return types loose so the SDK doesn't drift behind the Go side's evolving record shapes.
+
+- **PyPI publishing.** v0.1.x polish; non-load-bearing for the v0.1 milestone close. The Python SDK is feature-complete on v0.1's full RPC surface now (including streaming); publishing is the next step in the polish arc, alongside npm for the TS SDK.
+
+- **Live Claude streaming** — still blocked, no `ANTHROPIC_API_KEY` in env per huckgod's call. 60-second close when the key shows up; same stream pattern would round-trip through Claude's streaming adapter.
+
+- **Memory-kind canonicalisation polish session.** Only partial close: the Python SDK's README example was updated to `kind="fact"` in this session (the immediate user-facing fix), but the StubDaemon still doesn't validate kinds and the TypeScript SDK README still uses `kind: "note"`. Spawn-task chip remains live in CHECKPOINT for the full canonicalisation pass.
+
+**What we explicitly punted (priority order for next session):**
+
+1. **TypeScript SDK session 2 — `provider.stream`.** Now that Python has streaming, TS-side parity is the next natural arc. Same wire shape, async-iterator API instead of class-based iterator. ~60 min, no live providers needed for tests.
+2. **Live Claude streaming round-trip** (60 sec when `ANTHROPIC_API_KEY` shows up).
+3. **Memory-kind canonicalisation polish session.**
+4. **v0.2 design — x402 / agent wallet, design-only session.**
+5. **PyPI + npm publishing.**
+
+**Next session begins with:** the Python SDK is now feature-complete on v0.1's full RPC surface — identity, memory (write/read/search/list), provider (list/invoke/stream), activity (append/query/verify). The TypeScript SDK still lacks streaming; that's the next natural arc. The v0.1 SDK milestone closes when TS streaming ships — at that point both languages are at full RPC parity, and the remaining work is polish (PyPI/npm publishing, memory-kind canonicalisation, type modelling, live Claude when the key shows up, v0.2 design).

@@ -38,6 +38,7 @@ class StubDaemon:
         self.socket_path = socket_path
         self.calls: list[tuple[str, Any]] = []
         self._handlers: dict[str, Any] = {}
+        self._stream_handlers: dict[str, tuple[Any, Any]] = {}
         self._sock: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -45,6 +46,25 @@ class StubDaemon:
     def handle(self, method: str, response: Any) -> None:
         """Register a handler for one method. Overwrites any prior."""
         self._handlers[method] = response
+
+    def stream(self, method: str, deltas: Any, terminal: Any) -> None:
+        """Register a streaming handler.
+
+        ``deltas`` is either a list of strings (sent verbatim as
+        ``daimon.provider.stream.delta`` notifications, in order) or a
+        callable ``(params) -> list[str]``.
+
+        ``terminal`` is the final response — either a dict (sent as the
+        terminal frame's ``result``), a :class:`StubRPCError` instance
+        (sent as the terminal frame's ``error``), or a callable
+        ``(params) -> dict | StubRPCError``.
+
+        The stub does not require the client to half-close the write
+        side — it dispatches based on the first newline-terminated JSON
+        object on the wire, which matches both the streaming and the
+        non-streaming wire framing.
+        """
+        self._stream_handlers[method] = (deltas, terminal)
 
     def start(self) -> None:
         if self.socket_path.exists():
@@ -86,20 +106,27 @@ class StubDaemon:
 
     def _serve_one(self, conn: socket.socket) -> None:
         with conn:
-            data = bytearray()
-            conn.settimeout(2.0)
-            while True:
+            conn.settimeout(5.0)
+            # Read until the first newline — the SDK always appends one,
+            # for both streaming and non-streaming. This works regardless
+            # of whether the client half-closes the write side.
+            buf = bytearray()
+            while b"\n" not in buf:
                 try:
-                    buf = conn.recv(4096)
+                    chunk = conn.recv(4096)
                 except OSError:
+                    return
+                if not chunk:
                     break
-                if not buf:
-                    break
-                data.extend(buf)
-            if not data:
+                buf.extend(chunk)
+            if not buf:
+                return
+            nl = buf.find(b"\n")
+            line = bytes(buf[:nl] if nl >= 0 else buf)
+            if not line.strip():
                 return
             try:
-                req = json.loads(data)
+                req = json.loads(line)
             except json.JSONDecodeError:
                 resp = _err_response(None, -32700, "parse error")
                 conn.sendall((json.dumps(resp) + "\n").encode())
@@ -109,6 +136,11 @@ class StubDaemon:
             params = req.get("params")
             req_id = req.get("id", 1)
             self.calls.append((method, params))
+
+            stream_pair = self._stream_handlers.get(method)
+            if stream_pair is not None:
+                self._serve_stream(conn, stream_pair, params, req_id)
+                return
 
             handler = self._handlers.get(method)
             if handler is None:
@@ -124,6 +156,37 @@ class StubDaemon:
                     resp = _err_response(req_id, e.code, e.message, e.data)
 
             conn.sendall((json.dumps(resp) + "\n").encode())
+
+    def _serve_stream(
+        self,
+        conn: socket.socket,
+        stream_pair: tuple[Any, Any],
+        params: Any,
+        req_id: Any,
+    ) -> None:
+        deltas_arg, terminal_arg = stream_pair
+        deltas = deltas_arg(params) if callable(deltas_arg) else list(deltas_arg)
+        terminal = terminal_arg(params) if callable(terminal_arg) else terminal_arg
+
+        try:
+            for d in deltas:
+                notif = {
+                    "jsonrpc": "2.0",
+                    "method": "daimon.provider.stream.delta",
+                    "params": {"content": d},
+                }
+                conn.sendall((json.dumps(notif) + "\n").encode())
+
+            if isinstance(terminal, StubRPCError):
+                resp = _err_response(req_id, terminal.code, terminal.message, terminal.data)
+            else:
+                resp = {"jsonrpc": "2.0", "result": terminal, "id": req_id}
+            conn.sendall((json.dumps(resp) + "\n").encode())
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Client may have closed the socket mid-stream (early exit, etc).
+            # Real daemons swallow this; tests should too — surfacing it as
+            # a thread exception was failing the suite on the early-exit case.
+            return
 
 
 class StubRPCError(Exception):

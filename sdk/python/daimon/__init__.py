@@ -16,6 +16,7 @@ from .errors import (
     DaemonLocked,
     RPCError,
 )
+from ._stream import StreamHandle
 
 __version__ = "0.1.0.dev0"
 
@@ -25,5 +26,6 @@ __all__ = [
     "DaemonNotRunning",
     "DaemonLocked",
     "RPCError",
+    "StreamHandle",
     "__version__",
 ]
