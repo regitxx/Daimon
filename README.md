@@ -1,5 +1,7 @@
 # Daimon
 
+[![CI](https://github.com/regitxx/Daimon/actions/workflows/ci.yml/badge.svg)](https://github.com/regitxx/Daimon/actions/workflows/ci.yml)
+
 > One sovereign agent. For life. Owned by you.
 
 **Daimon is a protocol giving every human one personal AI agent that holds their memory, identity, reputation, and money — portable across any AI provider, encrypted, owned entirely by them.**
@@ -20,13 +22,30 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — vision crystallized, spec drafting.
+**Phase**: Day Zero — v0.1 in tree, being polished toward release.
 
-There is no production code yet. The protocol is being designed in the open.
+The v0.1 surface is implemented end-to-end: a Go daemon (`daimond`) and CLI (`daimon`) plus first-party SDKs in Python and TypeScript at full RPC parity. Identity, encrypted persistent memory, signed activity log, four provider adapters (Claude / OpenAI / Ollama / LM Studio — all streaming), and a conversational chat REPL all ship. 287 Go test pass-lines + 46 pytest cases + 47 vitest cases run on every commit (see CI badge above).
 
 - [`SPEC.md`](./SPEC.md) — the protocol document
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
 - [`JOURNAL.md`](./JOURNAL.md) — chronological build log
+
+## Try it
+
+```sh
+git clone https://github.com/regitxx/Daimon.git && cd Daimon
+make build
+./bin/daimon init        # once — choose a password
+./bin/daimon unlock      # auto-spawns daimond
+./bin/daimon memory write --kind fact "the sky is blue"
+./bin/daimon memory search "sky"
+```
+
+Or use one of the SDKs:
+
+- [`sdk/python`](./sdk/python) — `pip install -e sdk/python`, then `from daimon import Client`
+- [`sdk/typescript`](./sdk/typescript) — `cd sdk/typescript && npm install && npm run build`, then `import { Client } from "@daimon/sdk"`
+- [`examples/streaming`](./examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through the same daemon, audit chain verified three ways
 
 ## What composes with what
 
@@ -45,17 +64,18 @@ Daimon does not compete with the existing protocol stack. It sits *above* it as 
 
 A single daimon running on your machine. Holds your identity and memory. Routes requests to any LLM provider. Logs every action you can verify.
 
-- DID identity (`did:key` default, optional `did:ion` anchor)
-- Encrypted persistent memory (SQLCipher + vector index)
-- Hash-chained signed activity log
-- Provider adapters: Claude, OpenAI, Ollama
+- DID identity (`did:key`, with `did:ion` anchor reserved for v0.1.x)
+- Encrypted persistent memory — application-level AES-256-GCM rows under an identity-bound HKDF key (no SQLCipher, no CGO)
+- Hash-chained, Ed25519-signed activity log walkable end-to-end via `daimon activity verify`
+- Provider adapters: Claude, OpenAI, Ollama, LM Studio — all four also stream token-by-token
+- First-party SDKs in Python and TypeScript at full RPC parity, both with native streaming surfaces
 - **Single-player killer feature**: switch providers without losing context, memory, or identity
 
 ## Roadmap
 
 | Phase | Months | Ships |
 |---|---|---|
-| v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 3 provider adapters |
+| v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 4 provider adapters (in tree; polish toward release) |
 | v0.2 | 2–4 | x402 payment integration, agent wallet |
 | v0.3 | 4–6 | A2A discovery, federation, encrypted channels |
 | v0.4 | 6–9 | Biscuit-token capability delegation, reputation primitive |
