@@ -2513,3 +2513,46 @@ Both `provider.invoke` rows carry `streamed=true` — `cmd/daimon/cmd_activity.g
 4. **v0.2 design — x402 / agent wallet, design-only session.**
 
 **Next session begins with:** the v0.1 SDK milestone is now closed with **live evidence in both languages on the streaming surface**, in addition to the unit-test coverage and the non-streaming live evidence from session 35. The only remaining items between this state and a v0.1.0 final tag are PyPI/npm publish prep and live Claude streaming. v0.2 design is the next substantive arc.
+
+## 2026-05-12 — Day Zero, thirty-ninth session: first SDK pre-release published — daimon-protocol on PyPI + @daimon-protocol/sdk on npm
+
+**Both SDKs landed on their respective public registries as v0.1.0.dev0 pre-releases.** First time the protocol's first-party clients are installable from outside a repo checkout. Smoke of the entire publish pipeline before cutting v0.1.0 GA — caught two real issues at zero blast-radius cost (a stale dist on the first build attempt and an npm scope mismatch from a name collision).
+
+**The naming detour.** The `daimon` namespace is contested on both registries. Survey-of-the-landscape:
+
+- PyPI `daimon`: held by Alexander Fedotov, v0.0.2 from 2024-05-19 ("δαίμων, pronounced daimon or daemon — 'god', 'godlike', 'power', 'fate'"). Dormant hobby package; reclaim under PEP 541 is possible but slow (PyPI's bar is high and last upload was only ~2y ago).
+- PyPI `daimon-sdk`: TAKEN. v0.4.3 (uploaded 2026-05-09 — three days before this session). Authored by "processd contributors": "Typed async Python SDK for `processd-mcp` and `processd-sandbox-manager`". An unrelated MCP wrapper that has nothing to do with this project but uses the same word.
+- PyPI `daimon-client`: TAKEN. v0.2.0 (2026-05-07). "Python client for the daimon AI sidecar." Yet another unrelated "daimon"-themed project. Three on PyPI already.
+- PyPI `daimon-protocol`: FREE.
+- PyPI `pydaimon`: FREE.
+- npm `daimon` org: TAKEN.
+- npm `daimon-protocol` org: free, registered fresh this session by huckgod via <https://www.npmjs.com/org/create> (web-only — `npm org create` is not a thing).
+- npm `@daimon-protocol/sdk`: FREE.
+
+**Decision:** `daimon-protocol` on both registries. The import name in user code stays `daimon` (Python distribution name and import name are independent in setuptools; npm just uses the package name as the import identifier). Documented in pyproject.toml's `name=` comment and both CHANGELOGs' `### Naming` sections so future maintainers don't have to re-litigate. Reclaim of `daimon` (PyPI from Fedotov, npm org from whoever holds it) stays a punt-list item; trivial to republish under both names if either becomes available.
+
+**Publish auth setup.** PyPI: `~/.pypirc` at mode 0600 with `[pypi] username=__token__ password=pypi-...` (an account-scoped token; project-scoped tokens can't be issued before the project exists — important pre-publish gotcha that PUBLISH.md now documents). npm: already logged in as `reziiix-ai` from a prior session via `npm login`; that CLI session is what `npm publish` uses (no separate token setup, no env vars).
+
+**What actually happened during publish.** PyPI side was uneventful: `python -m build` produces `daimon_protocol-0.1.0.dev0-py3-none-any.whl` + `.tar.gz`; `twine check` passes both; `twine upload dist/*` succeeds with the wheel rendering at <https://pypi.org/project/daimon-protocol/0.1.0.dev0/>. JSON API confirms 13 classifiers, 5 project URLs, correct author/license/keywords. `pip install --pre daimon-protocol` from a clean venv installs the wheel and imports resolve.
+
+**The npm publish gotcha.** First `npm publish --tag dev` completed with `+ @daimon-protocol/sdk@0.1.0-dev.0` printed to the terminal — looked like a clean success. But subsequent `npm view`, `npm install`, and the web page at <https://www.npmjs.com/package/@daimon-protocol/sdk> all returned 404/403 for several minutes. Diagnostics: a retry `npm publish --tag dev` returned `npm error 403 — You cannot publish over the previously published versions: 0.1.0-dev.0` — definitive confirmation the first publish succeeded server-side. Unauthenticated `curl https://registry.npmjs.org/@daimon-protocol/sdk/-/sdk-0.1.0-dev.0.tgz` returns 200, confirming the **tarball storage layer committed**. The **manifest packument index** was the slow link — npm's registry seems to commit tarballs to S3-or-equivalent immediately, then a separate indexing service updates the packument that `npm view` / `npm install` consume. For first-publishes to brand-new orgs, that gap can be tens of minutes. Worth knowing for future first-publishes; PUBLISH.md needs a note.
+
+**Git tag.** `v0.1.0.dev0` annotated tag pushed to origin (separate tag namespace from `v0.1.0` so the GA cut later won't conflict). Tag message documents the registry locations and the wire-shape inventory.
+
+**What we explicitly did NOT do:**
+
+- **GA cut to v0.1.0.** Intentionally deferred. The dev0 smoke is the bridge — if anything's wrong with the published artifacts (wrong import path, missing metadata, etc.) we can iterate `dev1`/`dev2` without burning the GA version slot. Both PyPI and npm reject re-uploads of the same version forever (PyPI yank doesn't free the version; npm unpublish has a 72-hour window then becomes deprecate).
+- **CHANGELOG ### Released section.** Both CHANGELOGs still have everything under `[Unreleased]`. Will move under a dated `[0.1.0]` section when GA is cut.
+- **Documentation pivot from "once published" hedging language to "is published".** The top-level README still says `pip install daimon-protocol` *or* `pip install -e sdk/python`, with both equally valid; could drop the "once published" caveat. Doing that now would be slight overclaim until manifest propagation finishes — better to update on GA cut.
+- **Live Claude smoke.** Still blocked, no `ANTHROPIC_API_KEY` in the shell.
+
+**What we explicitly punted (priority order for next session):**
+
+1. **Wait 10–30 min, re-verify `npm install @daimon-protocol/sdk@dev` from a clean shell works.** If it does, cut GA: bump versions in both manifests to `0.1.0` (PyPI) / `0.1.0` (npm), commit, push, wait for CI green, tag `v0.1.0`, re-publish both. If it doesn't after a reasonable wait, contact npm support — package may be stuck in a moderation queue or hit a propagation bug.
+2. **Move both CHANGELOGs from `[Unreleased]` → `[0.1.0]` section** as part of the GA cut.
+3. **Update top-level README + SDK READMEs** to drop the "once published" hedging once GA is cut.
+4. **Optional: PEP 541 reclaim attempt on PyPI `daimon`**, or direct email to Fedotov. If `daimon` becomes available, dual-publish with `daimon-protocol` as a compatibility shim and the import name continuity means zero user breakage.
+5. **Live Claude streaming** when key shows up (~60 sec).
+6. **v0.2 design** — x402 / agent wallet, design-only session 1.
+
+**Next session begins with:** v0.1.0.dev0 is live on both registries. The publish ritual is now battle-tested end-to-end (PyPI smooth, npm with a propagation-lag surprise). Cutting v0.1.0 GA is now a 3-step ceremony: bump both manifests, re-publish, re-tag. The remaining v0.1.x items are exactly: (a) the GA cut, (b) live Claude smoke, (c) optional PyPI/npm name reclaims. After that, v0.2 design is the next substantive arc.
