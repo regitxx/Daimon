@@ -2620,3 +2620,94 @@ Both registries' default install paths now resolve to `0.1.0`. Pre-release `0.1.
 5. **Promote `examples/streaming/` scripts** into a CI step that runs against a live daimon + Ollama on every release tag — would catch the kind of metadata skew this session caught manually.
 
 **Next session begins with:** the v0.1 SDK milestone is now **closed end-to-end** — daemon + CLI + both SDKs + four streaming providers + CI matrix + per-SDK LICENSE + classifiers + CHANGELOGs + cross-language live smoke + publish pipeline + GA cut on both registries. The remaining v0.1.x items are non-load-bearing (TS VERSION fix, name reclaims) or blocked (Claude streaming on key). v0.2 (x402 / agent wallet) is the next substantive arc; its first session is design-only.
+
+## 2026-05-12 — Day Zero, thirty-ninth session, part 3: live Claude streaming round-trip — the last v0.1.x blocker, closed
+
+**The deferred live Claude streaming smoke landed.** huckgod added `ANTHROPIC_API_KEY` to `~/.zshrc` after pre-checking the Anthropic Acceptable Use Policy / Commercial Terms via WebFetch (none of the April 2026 third-party-tool restrictions apply to Daimon's design — each user supplies their own key, no reselling, no proxy, no multi-tenant routing). With the key in env, the Claude provider auto-registered on `daimon unlock`:
+
+```
+$ daimon provider list
+NAME      CONFIGURED  MODELS
+claude    yes         claude-opus-4-7, claude-sonnet-4-6, claude-haiku-4-5-20251001
+lmstudio  no          google/gemma-4-26b-a4b, ...
+ollama    no          llama3.2:latest
+openai    yes         gpt-5, gpt-5-mini, gpt-4.1
+```
+
+The provider name on the wire is `claude` (not `anthropic`); the daemon registered three models from the Anthropic catalog. Fresh `DAIMON_HOME=/tmp/dt-claude-smoke-48197/` to keep the chain short and the run-evidence readable.
+
+**Python SDK half** (against `claude-haiku-4-5-20251001`, `max_tokens=32`, "Reply with exactly: hello from claude (python)"):
+
+```
+py: DID = did:key:z6MkfTdNPGzMSgPADCzPwumEfpBirfQJ5w2gwsbKUaHVTYj8
+py: 2 deltas — first 742.2ms, last 787.8ms, mean inter-gap 45.62ms
+py: content = 'hello from claude (python)'
+py: model=claude-haiku-4-5-20251001 stop=end_turn usage={'input_tokens': 17, 'output_tokens': 9}
+py: activity.verify -> {'verified': 2, 'ok': True}
+```
+
+Two deltas (Claude's SSE batches chunks more aggressively than Ollama — fewer-but-larger delta frames). First delta at 742ms (network round-trip to Anthropic's edge). Content matches the prompt instruction byte-for-byte. 17 input tokens, 9 output tokens. Cost ~$0.00005 for this call (Haiku 4.5 pricing at the time of writing).
+
+**TypeScript SDK half** (same daimon, same model, "Reply with exactly: hello from claude (typescript)"):
+
+```
+ts: DID = did:key:z6MkfTdNPGzMSgPADCzPwumEfpBirfQJ5w2gwsbKUaHVTYj8
+ts: 2 deltas — first 637.7ms, last 685.9ms, mean inter-gap 48.20ms
+ts: content = "hello from claude (typescript)"
+ts: model=claude-haiku-4-5-20251001 stop=end_turn usage={"input_tokens":17,"output_tokens":9}
+ts: activity.verify -> {"verified":4,"ok":true}
+```
+
+Same DID, same wire shape, same content fidelity. The 100ms-faster first delta is just network jitter — both calls hit Anthropic's edge inside a 1-second window.
+
+**Three-way chain verification:**
+
+```
+$ daimon activity verify
+verified 5 entries — chain ok
+
+$ daimon activity query --kind provider.invoke --json | jq '.[].payload'
+{
+  "duration_ms": 815, "input_tokens": 17, "output_tokens": 9,
+  "model": "claude-haiku-4-5-20251001", "provider": "claude",
+  "stop_reason": "end_turn", "streamed": true
+}
+{
+  "duration_ms": 712, "input_tokens": 17, "output_tokens": 9,
+  "model": "claude-haiku-4-5-20251001", "provider": "claude",
+  "stop_reason": "end_turn", "streamed": true
+}
+```
+
+Both audit rows have `streamed=true` (sourced from `handleProviderStream` at row-write time, not derived from CLI output). Python `verified=2` (genesis + py invoke), TS `verified=4` (+ py verify + ts invoke), CLI `verified=5` (+ ts verify). Three independent code paths, one chain, one DID.
+
+**What this closes structurally:**
+
+Sessions 31-onwards have been building toward this single verifiable assertion: **a daimon owns the user's memory, holds the user's identity, and routes the user's prompts to whichever LLM provider the user chooses — and the audit trail proves which provider answered which prompt.** All four streaming providers now have live evidence:
+
+| Provider | Live smoke session | Wire shape | Inter-delta gap |
+|---|---|---|---|
+| Ollama (`/api/chat`) | 36 (Python), 38 (cross-language) | newline-delimited JSON | ~9ms (warm) |
+| OpenAI (Responses API) | 35 | SSE `response.created/delta/completed` | per Anthropic note in session 35 |
+| LM Studio (Chat Completions) | 35 | OpenAI-compat SSE | per session 35 |
+| Claude (Messages API) | **39 part 3 (this entry)** | Anthropic SSE | ~48ms |
+
+The cross-provider portable-identity demonstration is now fully observable: the chain at `did:key:z6MkfTdNPGzMSgPADCzPwumEfpBirfQJ5w2gwsbKUaHVTYj8` has streamed=true rows for `claude`; sessions 35/38's chains had them for `openai`/`lmstudio`/`ollama`. Same memory store underneath; same audit log structure; same Ed25519 signing path; user owns all of it.
+
+**What we explicitly did NOT do (and why):**
+
+- **Add an inject_context smoke against Claude.** Wire shape is identical (`inject_context` is parsed by the daemon, not the provider adapter); covered by unit tests on both SDKs. Live evidence is incremental at best.
+- **Sustained / large-prompt benchmark.** This was the smallest possible smoke (17 input tokens) to verify the wire path, not a performance test. Larger prompts would be useful for sizing context windows and rate-limit margins, but that's a separate concern.
+- **Sweep the other two Claude models** (opus-4-7, sonnet-4-6). Same adapter code path; one model is enough to verify the wire shape works.
+
+**What's left on the v0.1.x punt list (nothing load-bearing):**
+
+1. PyPI / npm bare-`daimon` reclaim attempts (email Fedotov for the PyPI namespace; identify the npm `daimon` org owner). Pure naming aesthetics; the import name in user code is already `daimon` regardless.
+2. `examples/streaming/` promoted into a release-tag CI step running against a live daimon + Ollama on every tag push. Would catch metadata-skew bugs like the VERSION-constant one we hit during 0.1.0.
+3. The Claude/OpenAI/LM Studio live smokes could be added to PUBLISH.md's pre-release checklist for future versions.
+
+**What's next:**
+
+The substantive next arc is v0.2 design — x402 payment integration + agent wallet. Design-only first session: read the x402 spec / proof-of-concept code, sketch how the daimon would hold its own keypair, what new RPC verbs are needed, what activity-log kinds get added, what new memory record kinds (`payment.received`, `payment.sent`?) appear. Multi-session arc; no code in session 1.
+
+**Next session begins with:** v0.1.x is closed end-to-end. Every primitive SPEC v0.1 promises is in tree, every wrapper is shipped, every adapter has live evidence, both SDKs are published GA on their public registries, every audit row is signed and chain-verifiable. v0.2 design opens.
