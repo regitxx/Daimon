@@ -97,3 +97,9 @@ pytest
 The test suite uses a stub Unix-socket daemon (no real keys, no real
 storage) plus optional smoke tests against a live daimon when one is
 running.
+
+## See also
+
+- [TypeScript SDK](../typescript) — sister SDK, same wire shape, async-iterator streaming surface.
+- [`examples/streaming`](../../examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through one daemon, audit chain verified three ways.
+- [`CHANGELOG.md`](./CHANGELOG.md) — release notes per version.

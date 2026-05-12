@@ -100,6 +100,12 @@ npm run build
 ```
 
 The test suite uses a stub Unix-socket daemon (no real keys, no real
-storage); 46 cases mirror the Python SDK's pytest coverage byte-for-byte
+storage); 47 cases mirror the Python SDK's pytest coverage byte-for-byte
 on the wire shape, including the streaming notification + terminal-frame
 protocol.
+
+## See also
+
+- [Python SDK](../python) — sister SDK, same wire shape, generator-based streaming surface.
+- [`examples/streaming`](../../examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through one daemon, audit chain verified three ways.
+- [`CHANGELOG.md`](./CHANGELOG.md) — release notes per version.
