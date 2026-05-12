@@ -36,7 +36,8 @@ export {
   CODE_NOT_FOUND,
 } from "./errors.js";
 
-// Keep in sync with package.json#version on each release. Build-time
-// inlining would be cleaner; until that lands, bump both fields when
-// cutting a version.
-export const VERSION = "0.1.0";
+// VERSION is auto-generated from package.json#version by
+// scripts/gen-version.mjs (chained ahead of `npm run build` and
+// `prepublishOnly`). Edit package.json to bump versions; the constant
+// follows. See sdk/typescript/scripts/gen-version.mjs for details.
+export { VERSION } from "./version.js";

@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Fixed
+
+- `VERSION` runtime export is now derived from `package.json#version`
+  at build time via `scripts/gen-version.mjs`, chained ahead of
+  `npm run build`, `npm run typecheck`, and `prepublishOnly`. The
+  hardcoded constant that caused the `0.1.0` GA to ship with stale
+  `VERSION === "0.1.0-dev.0"` is structurally eliminated — version
+  drift between `package.json` and runtime metadata can no longer
+  happen.
 
 ## [0.1.0] — 2026-05-12
 

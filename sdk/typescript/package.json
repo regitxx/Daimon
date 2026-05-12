@@ -23,7 +23,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src", "LICENSE", "README.md", "CHANGELOG.md"],
+  "files": ["dist", "src", "scripts", "LICENSE", "README.md", "CHANGELOG.md"],
   "sideEffects": false,
   "engines": {
     "node": ">=18"
@@ -32,10 +32,11 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "gen-version": "node scripts/gen-version.mjs",
+    "build": "npm run gen-version && tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "npm run gen-version && tsc --noEmit",
     "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
