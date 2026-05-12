@@ -3,7 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "daimon"
+# PyPI distribution name. The import name remains `daimon` (see
+# tool.setuptools.packages.find): `from daimon import Client` continues
+# to work unchanged. The PyPI namespace is shared with two unrelated
+# active projects (daimon-sdk for processd-mcp, daimon-client for an
+# "AI sidecar"), so we publish as `daimon-protocol` to disambiguate.
+# `daimon` itself on PyPI is held by Alexander Fedotov's dormant
+# 0.0.2 hobby package; revisit if/when reclaimed.
+name = "daimon-protocol"
 version = "0.1.0.dev0"
 description = "Python SDK for the Daimon protocol — sovereign personal AI"
 readme = "README.md"

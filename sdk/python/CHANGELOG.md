@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Preparing the first published `0.1.0` release. The pre-release tag in
 `pyproject.toml` is currently `0.1.0.dev0`.
 
+### Naming
+
+- **PyPI distribution name** is `daimon-protocol`. The unqualified
+  `daimon` name on PyPI belongs to an unrelated dormant hobby
+  package (Alexander Fedotov, v0.0.2 from 2024-05); `daimon-sdk` and
+  `daimon-client` are both held by other active unrelated projects
+  (an MCP wrapper for `processd-mcp`, and a different "AI sidecar"
+  client, respectively). `daimon-protocol` is uncontested, accurately
+  describes what the package is, and aligns with the project's own
+  framing in `SPEC.md`.
+- **Import name** stays `daimon` — `from daimon import Client` works
+  unchanged regardless of distribution name. This means the SDK can
+  be republished under the bare `daimon` name in the future without
+  user-facing breakage if the namespace becomes available.
+
 ### Added
 
 - **Streaming surface (`client.provider.stream`)** — `StreamHandle` class

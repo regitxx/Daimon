@@ -10,11 +10,23 @@ connection per RPC, no pipelining, JSON-RPC 2.0.
 
 ## Install
 
+From PyPI (once published):
+
+```
+pip install daimon-protocol
+```
+
 From a checkout of the Daimon repo:
 
 ```
 pip install -e sdk/python
 ```
+
+> The PyPI distribution name is `daimon-protocol` because the
+> unqualified `daimon` name on PyPI is held by an unrelated dormant
+> package, and `daimon-sdk` / `daimon-client` belong to other active
+> projects. The **import name remains `daimon`** — `from daimon import
+> Client` works regardless of how you installed it.
 
 ## Use
 

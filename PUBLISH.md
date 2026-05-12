@@ -1,9 +1,17 @@
 # Publishing the Daimon SDKs
 
-This file is the playbook for cutting a release of `daimon` (PyPI) and
-`@daimon/sdk` (npm). It's deliberately concrete: every step is a
-verbatim command. The Go daemon + CLI are not published as a package
-right now — users build from source via `make build`.
+This file is the playbook for cutting a release of `daimon-protocol`
+(PyPI) and `@daimon/sdk` (npm). It's deliberately concrete: every
+step is a verbatim command. The Go daemon + CLI are not published as
+a package right now — users build from source via `make build`.
+
+> The PyPI distribution name is `daimon-protocol` because the
+> unqualified `daimon` name on PyPI is held by an unrelated dormant
+> hobby package and `daimon-sdk` / `daimon-client` are both taken by
+> active unrelated projects. The import name in user code remains
+> `daimon` (`from daimon import Client`). The npm package is scoped
+> as `@daimon/sdk` under the `daimon` organization, which is
+> uncontested.
 
 The two SDKs are released together in lock-step on shared semver
 (`0.1.0`, `0.1.1`, ...). Don't drift them; the live cross-language smoke
@@ -13,7 +21,10 @@ tests rely on wire-shape parity.
 
 1. **PyPI account + token.** Create at <https://pypi.org/account/register/>,
    then [generate a project-scoped API token](https://pypi.org/manage/account/token/)
-   for `daimon`. Store as the password under user `__token__` in
+   for `daimon-protocol`. (For the very first publish, you'll need an
+   account-scoped token; project-scoped tokens can only be issued
+   against an already-published project.) Store as the password under
+   user `__token__` in
    `~/.pypirc` or pass via `TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-...`.
 2. **npm account + organization.** Create at <https://www.npmjs.com/signup>,
    then `npm login`. The package is scoped (`@daimon/sdk`) so you also
@@ -77,7 +88,7 @@ Run from a clean checkout of `main`:
    python -m twine check dist/*
    python -m twine upload dist/*           # prompts for token if not in ~/.pypirc
    ```
-   Verify at <https://pypi.org/project/daimon/>.
+   Verify at <https://pypi.org/project/daimon-protocol/>.
 
 3. **Publish to npm:**
    ```sh
@@ -96,7 +107,7 @@ only show up after the registry has the artifact:
 ```sh
 # Python
 python -m venv /tmp/daimon-pubsmoke && source /tmp/daimon-pubsmoke/bin/activate
-pip install daimon
+pip install daimon-protocol
 python -c "from daimon import Client, StreamHandle; print('imports OK')"
 
 # TypeScript
@@ -120,8 +131,8 @@ For dev / RC builds, bump the pre-release suffix and re-publish:
 
 `npm publish --tag dev` keeps a dev version off the `latest` channel
 so `npm install @daimon/sdk` doesn't pick it up. PyPI doesn't have a
-direct equivalent; `pip install daimon` always resolves to the
-highest stable version unless you pass `--pre`.
+direct equivalent; `pip install daimon-protocol` always resolves to
+the highest stable version unless you pass `--pre`.
 
 ## If you need to unpublish
 
@@ -133,11 +144,11 @@ shipping `0.1.1` with a fix over yanking `0.1.0`.
 
 Yank PyPI: there's no `twine` subcommand for this — yanks are an
 operator action through the web UI at
-<https://pypi.org/manage/project/daimon/releases/>, under the broken
-release's "Options" menu → "Yank". Yanked versions stay installable
-by pinned-version requests (`pip install daimon==0.1.0`) but stop
-appearing as default resolutions. Document the reason in the yank
-form so it surfaces in the resolver error message users see.
+<https://pypi.org/manage/project/daimon-protocol/releases/>, under
+the broken release's "Options" menu → "Yank". Yanked versions stay
+installable by pinned-version requests (`pip install daimon-protocol==0.1.0`)
+but stop appearing as default resolutions. Document the reason in the
+yank form so it surfaces in the resolver error message users see.
 
 Unpublish npm (within 72h):
 
