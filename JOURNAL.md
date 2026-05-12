@@ -2711,3 +2711,57 @@ The cross-provider portable-identity demonstration is now fully observable: the 
 The substantive next arc is v0.2 design — x402 payment integration + agent wallet. Design-only first session: read the x402 spec / proof-of-concept code, sketch how the daimon would hold its own keypair, what new RPC verbs are needed, what activity-log kinds get added, what new memory record kinds (`payment.received`, `payment.sent`?) appear. Multi-session arc; no code in session 1.
 
 **Next session begins with:** v0.1.x is closed end-to-end. Every primitive SPEC v0.1 promises is in tree, every wrapper is shipped, every adapter has live evidence, both SDKs are published GA on their public registries, every audit row is signed and chain-verifiable. v0.2 design opens.
+
+## 2026-05-12 — Day Zero, fortieth session: v0.2 arc opens — wallet + x402 design draft
+
+**v0.1.x is closed; v0.2 design begins.** First session of the v0.2 multi-session arc is design-only as planned: no code, no SPEC.md edits, just a discoverable draft at [`design/v0.2-wallet.md`](design/v0.2-wallet.md) that puts the x402 landscape, proposed primitives, and open questions in one place.
+
+**Why x402, in one sentence:** it's the only payment protocol designed for agent access patterns (no API keys, no OAuth, no pre-registration — any client that can sign a blockchain transaction can pay any x402 server on first contact), and it composes with HTTP at the level Daimon already speaks. Pioneered by Coinbase in October 2025; v2 of the spec (early 2026) moved payment data to headers (`PAYMENT-REQUIRED` / `PAYMENT-SIGNATURE` / `PAYMENT-RESPONSE`). Facilitators (`/verify` + `/settle`) handle the chain bridge so the resource server stays stateless. Stablecoin-settled (USDC on Base is the canonical happy-path), but the protocol is chain-agnostic — EVM, SVM, and Stellar all have reference implementations.
+
+**Draft architecture (proposed, not committed):**
+
+- **Wallet primitive lives in `$DAIMON_HOME/wallet.keystore`** alongside `identity.keystore`, opened together on `daimon unlock`. AES-256-GCM under an HKDF subkey, same encryption pattern as memory rows / activity payloads. One keystore, N keypairs (one per chain).
+- **Separate keys from the identity key.** The Ed25519 identity key signs audit rows; chain-specific wallet keys (EVM secp256k1, etc.) sign payment payloads on-chain. Compromise isolation; chain-required different signing curves anyway.
+- **RPC verbs:** `daimon.wallet.{list, create, address, balance, sign}` for low-level wallet ops; `daimon.payment.{required, pay}` for the high-level "give me the resource, handle the payment" verb pair.
+- **Activity log kinds:** `wallet.created`, `payment.required`, `payment.signed`, `payment.settled`, `payment.failed`. Each chain-of-trust extending the existing v0.1 hash-chain.
+- **Open question on `provider.invoke` auto-pay:** if `provider.invoke` gets a 402, should it auto-trigger the payment flow and continue? Probably yes (tight SDK surface) but it complicates audit-row linkage.
+
+**Implementation phases proposed (sessions 40.1–40.6):**
+
+| Phase | Scope |
+|---|---|
+| 40.0 (this entry) | Design doc. |
+| 40.1 | `internal/wallet/` — keystore + EVM keypair generation + unit tests. |
+| 40.2 | RPC handlers + `cmd/daimon/cmd_wallet.go`. |
+| 40.3 | `internal/payment/` — x402 client (parse PAYMENT-REQUIRED, build PaymentPayload, retry with PAYMENT-SIGNATURE, parse PAYMENT-RESPONSE). EVM `exact` scheme only. |
+| 40.4 | Live integration with a facilitator (Coinbase public or self-hosted) against a test x402 endpoint. |
+| 40.5 | `provider.invoke` auto-pays 402 (optional, gated by open question 3). |
+| 40.6 | SDK wrappers + cross-language smoke + CHANGELOG. |
+
+After 40.6, v0.2.0 ships and v0.3 (federation, A2A) opens.
+
+**Seven open questions surfaced in the draft, in priority order for huckgod's call:**
+
+1. Custodial vs non-custodial wallet (protocol purity vs onboarding ergonomics).
+2. HD derivation (BIP-32 / SLIP-10) vs independent keypairs.
+3. `provider.invoke` auto-pay yes/no.
+4. New memory kind for payment history, or fold into `observation`?
+5. First chain (my vote: EVM Base; SVM/Stellar deferred to v0.2.x).
+6. Public facilitator vs self-hosted (or both, configurable).
+7. Receive-side semantics — does the daimon also *accept* x402 payments? Probably defer to v0.3 (federation territory).
+
+**What we explicitly did NOT do in this session:**
+
+- **Touch SPEC.md.** v0.2 SPEC additions wait until at least one open question is resolved.
+- **Write any wallet/payment code.** That's 40.1+.
+- **Pick the first chain or the first facilitator.** Strategic decisions for huckgod.
+- **Commit to a custodial / non-custodial direction.** Both are defensible; the draft says so.
+
+**What this session DID land:**
+
+- Survey of x402 v2 wire format from the canonical Coinbase docs.
+- Proposed wallet/payment Daimon primitives that fit the existing internal/identity + internal/memory shape (so the v0.2 code lands as additions, not surgery on v0.1).
+- Phased implementation plan that respects the established session cadence.
+- Explicit open-question list so huckgod's next session can resolve the strategic shape before any 40.1 code is written.
+
+**Next session begins with:** read [`design/v0.2-wallet.md`](design/v0.2-wallet.md), resolve the seven open questions (or as many as huckgod is ready to lock in), and either start 40.1 (wallet primitive) or push back on the draft's architecture. If huckgod prefers a different first-chain or a custodial path, the draft's phases are independent of those decisions — the wallet primitive ships either way, the payment layer's shape changes.
