@@ -4,13 +4,12 @@ Thin Python client over the Daimon daemon's Unix-socket JSON-RPC surface
 (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI's wire-level behaviour: one
 connection per RPC, no pipelining, JSON-RPC 2.0.
 
-> Status: v0.1.0.dev0 — alpha. Identity, memory, provider (list / invoke
-> / stream), and activity verbs all surfaced. Type modelling and PyPI
-> publishing are v0.1.x polish.
+> Status: v0.1.0 — first GA release. Identity, memory, provider (list /
+> invoke / stream), and activity verbs all surfaced.
 
 ## Install
 
-From PyPI (once published):
+From PyPI:
 
 ```
 pip install daimon-protocol

@@ -43,8 +43,8 @@ make build
 
 Or use one of the SDKs:
 
-- [`sdk/python`](./sdk/python) — `pip install -e sdk/python` (or `pip install daimon-protocol` once published), then `from daimon import Client`
-- [`sdk/typescript`](./sdk/typescript) — `cd sdk/typescript && npm install && npm run build` (or `npm install @daimon-protocol/sdk` once published), then `import { Client } from "@daimon-protocol/sdk"`
+- [`sdk/python`](./sdk/python) — `pip install daimon-protocol`, then `from daimon import Client`
+- [`sdk/typescript`](./sdk/typescript) — `npm install @daimon-protocol/sdk`, then `import { Client } from "@daimon-protocol/sdk"`
 - [`examples/streaming`](./examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through the same daemon, audit chain verified three ways
 
 ## What composes with what

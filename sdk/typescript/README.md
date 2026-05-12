@@ -4,11 +4,17 @@ Thin TypeScript client over the Daimon daemon's Unix-socket JSON-RPC
 surface (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI and the Python SDK's
 wire-level behaviour: one connection per RPC, no pipelining, JSON-RPC 2.0.
 
-> Status: v0.1.0-dev.0 — alpha. Identity, memory, provider (list /
+> Status: v0.1.0 — first GA release. Identity, memory, provider (list /
 > invoke / stream), and activity verbs all surfaced. Full RPC parity
 > with the Python SDK.
 
 ## Install
+
+From npm:
+
+```
+npm install @daimon-protocol/sdk
+```
 
 From a checkout of the Daimon repo:
 

@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Preparing the first published `0.1.0` release. The pre-release tag in
-`package.json` is currently `0.1.0-dev.0`.
+_No unreleased changes yet._
+
+## [0.1.0] — 2026-05-12
+
+First general-availability release. Predecessor `0.1.0-dev.0`
+(2026-05-12) was published under the `dev` dist-tag for
+publish-pipeline smoke; GA promotes the same surface to `latest`.
 
 ### Naming
 
