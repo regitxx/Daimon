@@ -36,4 +36,7 @@ export {
   CODE_NOT_FOUND,
 } from "./errors.js";
 
-export const VERSION = "0.1.0-dev.0";
+// Keep in sync with package.json#version on each release. Build-time
+// inlining would be cleaner; until that lands, bump both fields when
+// cutting a version.
+export const VERSION = "0.1.0";

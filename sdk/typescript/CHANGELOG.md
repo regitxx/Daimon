@@ -15,6 +15,14 @@ First general-availability release. Predecessor `0.1.0-dev.0`
 (2026-05-12) was published under the `dev` dist-tag for
 publish-pipeline smoke; GA promotes the same surface to `latest`.
 
+### Known issues
+
+- The `VERSION` runtime export was hardcoded to `"0.1.0-dev.0"` at
+  source-code level and not bumped in lockstep with `package.json`
+  when cutting GA. Functional surface (`Client`, `StreamHandle`, all
+  types and methods) is unaffected. Source is corrected in main;
+  next release will return the right string from `VERSION`.
+
 ### Naming
 
 - **npm package name** is `@daimon-protocol/sdk`. The bare `daimon`

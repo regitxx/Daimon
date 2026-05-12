@@ -2556,3 +2556,67 @@ Both `provider.invoke` rows carry `streamed=true` — `cmd/daimon/cmd_activity.g
 6. **v0.2 design** — x402 / agent wallet, design-only session 1.
 
 **Next session begins with:** v0.1.0.dev0 is live on both registries. The publish ritual is now battle-tested end-to-end (PyPI smooth, npm with a propagation-lag surprise). Cutting v0.1.0 GA is now a 3-step ceremony: bump both manifests, re-publish, re-tag. The remaining v0.1.x items are exactly: (a) the GA cut, (b) live Claude smoke, (c) optional PyPI/npm name reclaims. After that, v0.2 design is the next substantive arc.
+
+## 2026-05-12 — Day Zero, thirty-ninth session, part 2: v0.1.0 GA cut on both registries
+
+Same calendar day as the `0.1.0.dev0` pre-release; the pre-release served as the publish-pipeline smoke and exposed exactly one issue (npm manifest-vs-tarball propagation lag — non-blocking, resolved within ~10 min). With the dev0 install round-trip confirmed on both registries, cut GA:
+
+**Version bumps (lock-step):**
+  - `sdk/python/pyproject.toml`: `0.1.0.dev0` → `0.1.0`
+  - `sdk/typescript/package.json`: `0.1.0-dev.0` → `0.1.0` (lockfile regenerated)
+
+**CHANGELOGs:** moved all entries out of `[Unreleased]` into a dated `[0.1.0] — 2026-05-12` section in both SDKs. `[Unreleased]` kept empty for next-release accumulation. Each release section notes the dev pre-release that preceded it.
+
+**Docs:** dropped the "(once published)" hedging from all three READMEs (top-level + per-SDK) since the dev0 publish had confirmed the install path actually works. SDK README status lines bumped from "alpha / pre-release" to "v0.1.0 — first GA release".
+
+**Pipeline run:**
+1. CI green on the GA-prep commit ([Run 25724140994](https://github.com/regitxx/Daimon/actions/runs/25724140994)) — all 8 matrix shards (Go + Python 3.10/3.11/3.12/3.13 + Node 18/20/22) passed before any publish.
+2. `python -m build` → `daimon_protocol-0.1.0-py3-none-any.whl` + `.tar.gz`, twine check PASSED both.
+3. `python -m twine upload dist/*` → <https://pypi.org/project/daimon-protocol/0.1.0/> live.
+4. `npm publish` (no `--tag` this time) → `+ @daimon-protocol/sdk@0.1.0` to `latest`.
+5. Git tag `v0.1.0` annotated, pushed to origin.
+
+**Post-publish smoke (clean shells, no editable install bleed-through):**
+
+```
+$ pip install --no-cache-dir daimon-protocol
+$ pip show daimon-protocol | head -3
+Name: daimon-protocol
+Version: 0.1.0    ← GA, not dev0
+$ python -c "from daimon import Client, StreamHandle, DaemonNotRunning, RPCError; print('OK')"
+OK
+
+$ npm install @daimon-protocol/sdk
+$ cat node_modules/@daimon-protocol/sdk/package.json | jq .version
+"0.1.0"           ← GA, not dev0
+$ node -e 'import("@daimon-protocol/sdk").then(m => console.log(typeof m.Client, typeof m.StreamHandle))'
+function function
+```
+
+Both registries' default install paths now resolve to `0.1.0`. Pre-release `0.1.0.dev0` remains available via `pip install --pre` / `npm install @daimon-protocol/sdk@dev` but doesn't shadow GA.
+
+**Caveat caught in post-publish smoke:** the TS SDK's runtime `VERSION` constant in `src/index.ts` was hardcoded as `"0.1.0-dev.0"` and I forgot to bump it when bumping `package.json#version` — so the published `0.1.0` tarball returns `m.VERSION === "0.1.0-dev.0"`. Functional surface unaffected (`Client`, `StreamHandle`, the typed errors, all exports work). Source-of-truth (`src/index.ts`) is now fixed in main + commented to keep in sync with `package.json#version` on each cut, so the next release inherits the correct value automatically. Logged as a known-issue in `sdk/typescript/CHANGELOG.md` under `[0.1.0]`. **Worth wiring build-time inlining later** so this can't drift again — punt-list item, not load-bearing.
+
+**Two registries, two release artifacts now live:**
+
+| Registry | Package | Page | Default install picks up |
+|---|---|---|---|
+| PyPI | `daimon-protocol` | https://pypi.org/project/daimon-protocol/0.1.0/ | `0.1.0` ✓ |
+| npm | `@daimon-protocol/sdk` | https://www.npmjs.com/package/@daimon-protocol/sdk | `0.1.0` ✓ |
+
+**What we explicitly did NOT do:**
+
+- **Bump to 0.1.1 to fix the VERSION-constant cosmetic bug.** Considered and rejected: the bug is non-functional, the fix is in main, and any actual 0.1.1 should bundle at least one substantive change. Premature version churn is more user-hostile than a stale runtime metadata field that nobody is reading.
+- **Move out of `Development Status :: 3 - Alpha` classifier.** Considered Beta (semantically defensible for a GA with 287 + 93 tests + live cross-language evidence) but reverted — that's a stability-framing decision that's huckgod's call, not a mechanical version bump.
+- **PyPI/npm reclaim of bare `daimon` namespaces.** Still a punt-list item; not load-bearing.
+- **Live Claude streaming round-trip.** Still blocked, no `ANTHROPIC_API_KEY`.
+
+**What we explicitly punted (priority order for next session):**
+
+1. **Build-time version inlining for TS SDK** — replace the hand-maintained `VERSION` constant with something derived from `package.json` at build, so the GA-skew bug can't recur. Small change to `tsconfig.build.json` or a generated file.
+2. **Live Claude streaming round-trip** (~60 sec when key shows up).
+3. **PyPI / npm bare-`daimon` reclaim attempts** — email Fedotov; identify npm `daimon` org owner; PEP 541 if both fail.
+4. **v0.2 design — x402 / agent wallet, design-only session 1.**
+5. **Promote `examples/streaming/` scripts** into a CI step that runs against a live daimon + Ollama on every release tag — would catch the kind of metadata skew this session caught manually.
+
+**Next session begins with:** the v0.1 SDK milestone is now **closed end-to-end** — daemon + CLI + both SDKs + four streaming providers + CI matrix + per-SDK LICENSE + classifiers + CHANGELOGs + cross-language live smoke + publish pipeline + GA cut on both registries. The remaining v0.1.x items are non-load-bearing (TS VERSION fix, name reclaims) or blocked (Claude streaming on key). v0.2 (x402 / agent wallet) is the next substantive arc; its first session is design-only.
