@@ -3,7 +3,7 @@
  *
  * Public surface:
  *
- *   import { Client, DaemonNotRunning, DaemonLocked, RPCError } from "@daimon/sdk";
+ *   import { Client, DaemonNotRunning, DaemonLocked, RPCError } from "@daimon-protocol/sdk";
  *
  * The package mirrors the Go cmd/daimon CLI's wire-level behaviour: one
  * Unix-socket connection per RPC, JSON-RPC 2.0 envelope, no pipelining.

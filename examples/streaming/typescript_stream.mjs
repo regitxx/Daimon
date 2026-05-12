@@ -9,8 +9,8 @@
  *
  * The example imports directly from the built dist so it's runnable
  * without any package manager step beyond `npm run build` inside the
- * SDK. If you've published or linked @daimon/sdk in your own project,
- * replace the import with `import { Client } from "@daimon/sdk"`.
+ * SDK. If you've published or linked @daimon-protocol/sdk in your own project,
+ * replace the import with `import { Client } from "@daimon-protocol/sdk"`.
  *
  * Prerequisites:
  *

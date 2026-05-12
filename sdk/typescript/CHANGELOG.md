@@ -10,6 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 Preparing the first published `0.1.0` release. The pre-release tag in
 `package.json` is currently `0.1.0-dev.0`.
 
+### Naming
+
+- **npm package name** is `@daimon-protocol/sdk`. The bare `daimon`
+  org on npm was already claimed by someone else, so we registered
+  the `daimon-protocol` org to align with the PyPI distribution name
+  (`daimon-protocol`). One brand, parallel scoping on both
+  ecosystems.
+- `publishConfig.access: public` is set so the first `npm publish`
+  lands on the public registry as expected; without it, scoped
+  packages default to a private (paid) registry.
+
 ### Added
 
 - **Streaming surface (`client.provider.stream`)** — `StreamHandle`
@@ -47,6 +58,4 @@ Preparing the first published `0.1.0` release. The pre-release tag in
 - Cross-language live smoke (sessions 35, 38) verified this SDK
   round-trips a daimon with the Python SDK against the same DID, audit
   chain verified by both SDKs and the Go CLI.
-- Package is scoped as `@daimon/sdk` with `publishConfig.access: public`
-  so the first `npm publish` lands on the public registry as expected.
 - See [JOURNAL.md](../../JOURNAL.md) for the per-session build log.

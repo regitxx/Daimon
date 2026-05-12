@@ -1,5 +1,5 @@
 {
-  "name": "@daimon/sdk",
+  "name": "@daimon-protocol/sdk",
   "version": "0.1.0-dev.0",
   "description": "TypeScript SDK for the Daimon protocol — sovereign personal AI",
   "license": "Apache-2.0",

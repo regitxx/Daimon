@@ -1,7 +1,7 @@
 # Publishing the Daimon SDKs
 
 This file is the playbook for cutting a release of `daimon-protocol`
-(PyPI) and `@daimon/sdk` (npm). It's deliberately concrete: every
+(PyPI) and `@daimon-protocol/sdk` (npm). It's deliberately concrete: every
 step is a verbatim command. The Go daemon + CLI are not published as
 a package right now — users build from source via `make build`.
 
@@ -10,8 +10,9 @@ a package right now — users build from source via `make build`.
 > hobby package and `daimon-sdk` / `daimon-client` are both taken by
 > active unrelated projects. The import name in user code remains
 > `daimon` (`from daimon import Client`). The npm package is scoped
-> as `@daimon/sdk` under the `daimon` organization, which is
-> uncontested.
+> as `@daimon-protocol/sdk` under the `daimon-protocol` npm organization
+> (the bare `daimon` org on npm was already taken, so the org was
+> registered under the same disambiguated name as PyPI for symmetry).
 
 The two SDKs are released together in lock-step on shared semver
 (`0.1.0`, `0.1.1`, ...). Don't drift them; the live cross-language smoke
@@ -27,9 +28,11 @@ tests rely on wire-shape parity.
    user `__token__` in
    `~/.pypirc` or pass via `TWINE_USERNAME=__token__ TWINE_PASSWORD=pypi-...`.
 2. **npm account + organization.** Create at <https://www.npmjs.com/signup>,
-   then `npm login`. The package is scoped (`@daimon/sdk`) so you also
-   need the `daimon` organization on npm, with you as an owner. Two-factor
-   on the org is recommended; `npm publish` will prompt for the OTP.
+   then `npm login`. The package is scoped (`@daimon-protocol/sdk`) so you
+   also need to be a member of the `daimon-protocol` organization on npm.
+   Org creation is web-only (<https://www.npmjs.com/org/create>); pick the
+   free plan for unlimited public packages. Two-factor on the org is
+   recommended; `npm publish` will prompt for the OTP.
 3. **Local tools.**
    ```sh
    python -m pip install --upgrade build twine
@@ -97,7 +100,7 @@ Run from a clean checkout of `main`:
    ```
    `prepublishOnly` runs `npm run typecheck && npm run test && npm run
    build` first, so this can't ship a stale dist. Verify at
-   <https://www.npmjs.com/package/@daimon/sdk>.
+   <https://www.npmjs.com/package/@daimon-protocol/sdk>.
 
 ## Post-release smoke
 
@@ -113,14 +116,14 @@ python -c "from daimon import Client, StreamHandle; print('imports OK')"
 # TypeScript
 mkdir /tmp/daimon-npm-smoke && cd /tmp/daimon-npm-smoke
 npm init -y >/dev/null
-npm install @daimon/sdk
-node -e 'import("@daimon/sdk").then(m => console.log("imports OK; VERSION=", m.VERSION))'
+npm install @daimon-protocol/sdk
+node -e 'import("@daimon-protocol/sdk").then(m => console.log("imports OK; VERSION=", m.VERSION))'
 ```
 
 If a running daimon is available, the smoke scripts in
 [`examples/streaming/`](./examples/streaming) work against the
 published packages with minor import path swaps (drop the `dist/`
-relative import and use `@daimon/sdk` directly).
+relative import and use `@daimon-protocol/sdk` directly).
 
 ## Iterating between releases
 
@@ -130,7 +133,7 @@ For dev / RC builds, bump the pre-release suffix and re-publish:
 - TypeScript: `0.1.1-dev.0` → `0.1.1-dev.1` → `0.1.1-rc.0` → `0.1.1`
 
 `npm publish --tag dev` keeps a dev version off the `latest` channel
-so `npm install @daimon/sdk` doesn't pick it up. PyPI doesn't have a
+so `npm install @daimon-protocol/sdk` doesn't pick it up. PyPI doesn't have a
 direct equivalent; `pip install daimon-protocol` always resolves to
 the highest stable version unless you pass `--pre`.
 
@@ -153,11 +156,11 @@ yank form so it surfaces in the resolver error message users see.
 Unpublish npm (within 72h):
 
 ```sh
-npm unpublish @daimon/sdk@0.1.0
+npm unpublish @daimon-protocol/sdk@0.1.0
 ```
 
 Deprecate npm (any time, preferred for older releases):
 
 ```sh
-npm deprecate @daimon/sdk@0.1.0 "Use 0.1.1+; 0.1.0 had <issue>"
+npm deprecate @daimon-protocol/sdk@0.1.0 "Use 0.1.1+; 0.1.0 had <issue>"
 ```

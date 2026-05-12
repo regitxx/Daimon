@@ -31,7 +31,7 @@ daimon unlock
 Then:
 
 ```ts
-import { Client } from "@daimon/sdk";
+import { Client } from "@daimon-protocol/sdk";
 
 const client = new Client();                                // resolves $DAIMON_HOME
 console.log(await client.identity.get());                   // { did: "did:key:..." }
@@ -74,7 +74,7 @@ const { verified, ok } = await client.activity.verify() as {
 ## Errors
 
 ```ts
-import { DaemonNotRunning, DaemonLocked, RPCError } from "@daimon/sdk";
+import { DaemonNotRunning, DaemonLocked, RPCError } from "@daimon-protocol/sdk";
 
 try {
   await client.memory.write({ kind: "fact", content: "x" });
