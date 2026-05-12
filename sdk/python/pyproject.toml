@@ -10,14 +10,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Johannes Christian Koeleman" }]
-keywords = ["daimon", "ai", "sovereign", "protocol"]
+keywords = ["daimon", "ai", "sovereign", "protocol", "agent", "did", "jsonrpc"]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Communications",
+    "Topic :: Internet",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = []
@@ -28,6 +34,9 @@ dev = ["pytest>=7.0"]
 [project.urls]
 Homepage = "https://github.com/regitxx/Daimon"
 Repository = "https://github.com/regitxx/Daimon"
+Issues = "https://github.com/regitxx/Daimon/issues"
+Documentation = "https://github.com/regitxx/Daimon/blob/main/sdk/python/README.md"
+Changelog = "https://github.com/regitxx/Daimon/blob/main/JOURNAL.md"
 
 [tool.setuptools.packages.find]
 include = ["daimon*"]

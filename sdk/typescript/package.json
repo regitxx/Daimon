@@ -4,12 +4,16 @@
   "description": "TypeScript SDK for the Daimon protocol — sovereign personal AI",
   "license": "Apache-2.0",
   "author": "Johannes Christian Koeleman",
-  "homepage": "https://github.com/regitxx/Daimon",
+  "homepage": "https://github.com/regitxx/Daimon#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/regitxx/Daimon.git"
+    "url": "git+https://github.com/regitxx/Daimon.git",
+    "directory": "sdk/typescript"
   },
-  "keywords": ["daimon", "ai", "sovereign", "protocol"],
+  "bugs": {
+    "url": "https://github.com/regitxx/Daimon/issues"
+  },
+  "keywords": ["daimon", "ai", "sovereign", "protocol", "agent", "did", "jsonrpc"],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -19,15 +23,20 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src", "README.md"],
+  "files": ["dist", "src", "LICENSE", "README.md"],
+  "sideEffects": false,
   "engines": {
     "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
