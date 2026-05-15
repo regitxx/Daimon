@@ -58,6 +58,10 @@ func (s *Server) registerMethods() {
 		"daimon.activity.verify": s.handleActivityVerify,
 		"daimon.provider.list":   s.handleProviderList,
 		"daimon.provider.invoke": s.handleProviderInvoke,
+		"daimon.wallet.list":     s.handleWalletList,
+		"daimon.wallet.create":   s.handleWalletCreate,
+		"daimon.wallet.address":  s.handleWalletAddress,
+		"daimon.wallet.sign":     s.handleWalletSign,
 	}
 }
 
@@ -69,6 +73,14 @@ type identityUnlockParams struct {
 
 type identityUnlockResult struct {
 	DID string `json:"did"`
+	// Mnemonic is the freshly-generated BIP-39 24-word wallet recovery
+	// phrase, returned EXACTLY ONCE on the first unlock that auto-creates
+	// the wallet keystore (v0.2 §3). Subsequent unlocks omit this field.
+	// The mnemonic is the only way to recover the wallet's private keys —
+	// the keystore is encrypted at rest, so losing both the keystore file
+	// AND the mnemonic is unrecoverable. Clients MUST surface this to the
+	// principal with safe-backup framing.
+	Mnemonic []string `json:"mnemonic,omitempty"`
 }
 
 // handleIdentityUnlock loads the keystore, populates the server's principal
@@ -108,7 +120,7 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 		return identityUnlockResult{DID: s.id.DID()}, nil
 	}
 
-	id, store, alog, err := s.unlockFn(ctx, p.Password)
+	id, store, alog, wstore, freshMnemonic, err := s.unlockFn(ctx, p.Password)
 	if err != nil {
 		// We do not log the password or hash thereof. The error message is
 		// surfaced verbatim — typically "wrong password or corrupted
@@ -118,6 +130,9 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 	if id == nil || store == nil || alog == nil {
 		return nil, newError(CodeInternalError, "unlock callback returned nil trio without error")
 	}
+	// wstore MAY be nil if wallet keystore failed to load for a non-fatal
+	// reason (corrupted, future-version format, etc.); the daemon stays
+	// unlocked but wallet RPCs surface "no wallet store" until fixed.
 
 	// Field writes happen-before the atomic.Store(true) below; subsequent
 	// dispatch.Load() returning true is paired with these writes via
@@ -125,9 +140,14 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 	s.id = id
 	s.store = store
 	s.alog = alog
+	s.wstore = wstore
 	s.unlocked.Store(true)
 
-	return identityUnlockResult{DID: id.DID()}, nil
+	out := identityUnlockResult{DID: id.DID()}
+	if freshMnemonic != nil {
+		out.Mnemonic = append([]string(nil), freshMnemonic.Words...)
+	}
+	return out, nil
 }
 
 // --- daimon.identity.get -----------------------------------------------------

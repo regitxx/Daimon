@@ -12,6 +12,7 @@ import (
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
+	"github.com/regitxx/Daimon/internal/wallet"
 )
 
 // --- locked-mode harness -----------------------------------------------------
@@ -63,18 +64,18 @@ func newLockedFixture(t *testing.T, password string) *lockedFixture {
 	f.unlocks.store = store
 	f.unlocks.alog = alog
 
-	unlock := func(_ context.Context, pw string) (*identity.Identity, *memory.Store, *activity.Log, error) {
+	unlock := func(_ context.Context, pw string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
 		f.unlocks.Lock()
 		defer f.unlocks.Unlock()
 		f.unlocks.n++
 		f.unlocks.gotPassword = pw
 		if pw != password {
-			return nil, nil, nil, identity.ErrWrongPassword
+			return nil, nil, nil, nil, nil, identity.ErrWrongPassword
 		}
 		if f.unlocks.err != nil {
-			return nil, nil, nil, f.unlocks.err
+			return nil, nil, nil, nil, nil, f.unlocks.err
 		}
-		return f.unlocks.id, f.unlocks.store, f.unlocks.alog, nil
+		return f.unlocks.id, f.unlocks.store, f.unlocks.alog, nil, nil, nil
 	}
 
 	srv, err := New(Options{Unlock: unlock})
@@ -136,8 +137,8 @@ func TestNew_DemoModeRequiresAllThree(t *testing.T) {
 
 func TestNew_ServeModeAllowsMissingTrio(t *testing.T) {
 	srv, err := New(Options{
-		Unlock: func(context.Context, string) (*identity.Identity, *memory.Store, *activity.Log, error) {
-			return nil, nil, nil, errors.New("never called")
+		Unlock: func(context.Context, string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
+			return nil, nil, nil, nil, nil, errors.New("never called")
 		},
 	})
 	if err != nil {

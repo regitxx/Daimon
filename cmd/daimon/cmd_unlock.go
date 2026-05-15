@@ -90,7 +90,8 @@ func cmdUnlock(args []string) error {
 	}
 
 	var result struct {
-		DID string `json:"did"`
+		DID      string   `json:"did"`
+		Mnemonic []string `json:"mnemonic"`
 	}
 	if len(resp.Result) > 0 {
 		_ = json.Unmarshal(resp.Result, &result)
@@ -100,5 +101,35 @@ func cmdUnlock(args []string) error {
 		fmt.Fprintf(os.Stderr, "  DID: %s\n", result.DID)
 	}
 	fmt.Fprintf(os.Stderr, "  Daemon: %s\n", socket)
+
+	// Mnemonic surfaces ONLY on the first unlock that auto-created the
+	// wallet keystore. The daemon never keeps a copy after this RPC
+	// returns — losing it now means losing the only way to recover the
+	// wallet's keys, so the framing here is deliberately attention-getting.
+	if len(result.Mnemonic) > 0 {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
+		fmt.Fprintln(os.Stderr, "Wallet keystore initialised — back up this recovery phrase NOW.")
+		fmt.Fprintln(os.Stderr, "───────────────────────────────────────────────────────────────────")
+		fmt.Fprintln(os.Stderr, "Write these 24 words down on paper, in order. This is the only")
+		fmt.Fprintln(os.Stderr, "copy. The daemon does NOT keep a separate backup. If you lose")
+		fmt.Fprintln(os.Stderr, "both this phrase AND the wallet.keystore file, every wallet you")
+		fmt.Fprintln(os.Stderr, "ever derive from it is permanently inaccessible — including any")
+		fmt.Fprintln(os.Stderr, "funds those wallets hold.")
+		fmt.Fprintln(os.Stderr, "───────────────────────────────────────────────────────────────────")
+		// Print 4 words per line, numbered, for legibility.
+		for i := 0; i < len(result.Mnemonic); i += 4 {
+			end := i + 4
+			if end > len(result.Mnemonic) {
+				end = len(result.Mnemonic)
+			}
+			line := ""
+			for j := i; j < end; j++ {
+				line += fmt.Sprintf("  %2d. %-9s", j+1, result.Mnemonic[j])
+			}
+			fmt.Fprintln(os.Stderr, line)
+		}
+		fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
+	}
 	return nil
 }

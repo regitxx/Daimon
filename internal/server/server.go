@@ -16,6 +16,7 @@ import (
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
+	"github.com/regitxx/Daimon/internal/wallet"
 )
 
 // Options bundles the dependencies a Server needs.
@@ -42,6 +43,7 @@ type Options struct {
 	Identity    *identity.Identity
 	Store       *memory.Store
 	Log         *activity.Log
+	Wallet      *wallet.Store
 	Providers   *provider.Registry
 	Credentials *provider.CredentialStore
 
@@ -61,7 +63,21 @@ type Options struct {
 // It is invoked exactly once per server lifetime: the first successful call
 // transitions the server from locked to unlocked. Subsequent unlock RPCs are
 // rejected (the daemon is already running, no need to re-derive the key).
-type UnlockFunc func(ctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, error)
+//
+// The callback is responsible for loading BOTH the identity keystore (which
+// MUST exist) AND the wallet keystore (which is auto-created on first
+// unlock if absent — see v0.2 design §3). When the wallet keystore is
+// freshly created, the freshly-generated mnemonic is returned alongside
+// the store so handleIdentityUnlock can surface it to the caller exactly
+// once. On subsequent unlocks the mnemonic return is nil.
+type UnlockFunc func(ctx context.Context, password string) (
+	id *identity.Identity,
+	mem *memory.Store,
+	alog *activity.Log,
+	wstore *wallet.Store,
+	freshMnemonic *wallet.Mnemonic,
+	err error,
+)
 
 // Server is a JSON-RPC 2.0 endpoint that exposes the Daimon Protocol surface
 // from SPEC §6.1.
@@ -81,6 +97,7 @@ type Server struct {
 	id        *identity.Identity
 	store     *memory.Store
 	alog      *activity.Log
+	wstore    *wallet.Store
 	providers *provider.Registry
 	creds     *provider.CredentialStore
 
@@ -136,11 +153,12 @@ func New(opts Options) (*Server, error) {
 		logger:    opts.Logger,
 	}
 	if opts.Unlock != nil {
-		// Serve mode: trio may be nil; unlock callback populates them.
+		// Serve mode: trio + wallet may be nil; unlock callback populates them.
 		s.unlockFn = opts.Unlock
 		s.id = opts.Identity
 		s.store = opts.Store
 		s.alog = opts.Log
+		s.wstore = opts.Wallet
 		// Stays locked until handleIdentityUnlock runs successfully.
 	} else {
 		if opts.Identity == nil {
@@ -155,6 +173,7 @@ func New(opts Options) (*Server, error) {
 		s.id = opts.Identity
 		s.store = opts.Store
 		s.alog = opts.Log
+		s.wstore = opts.Wallet // optional — may be nil in demo mode
 		s.unlocked.Store(true)
 	}
 	s.registerMethods()

@@ -15,6 +15,7 @@ import (
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
+	"github.com/regitxx/Daimon/internal/wallet"
 )
 
 // --- mock streamer ----------------------------------------------------------
@@ -574,9 +575,9 @@ func TestProviderStream_LogsActivityWithStreamedFlag(t *testing.T) {
 func TestProviderStream_LockedDaemonRejected(t *testing.T) {
 	// Build a server in serve-mode (locked) without ever unlocking, then try
 	// to stream. Should get CodeIdentityLocked.
-	srv, err := New(Options{Unlock: func(_ context.Context, _ string) (*identity.Identity, *memory.Store, *activity.Log, error) {
+	srv, err := New(Options{Unlock: func(_ context.Context, _ string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
 		t.Fatal("unlock should not be called")
-		return nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

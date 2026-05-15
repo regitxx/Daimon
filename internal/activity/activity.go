@@ -61,6 +61,15 @@ const (
 	KindActivityVerified Kind = "activity.verified"
 	KindContextPreviewed Kind = "context.previewed"
 	KindKeyRotated       Kind = "key.rotated"
+
+	// v0.2 — wallet + x402 payment kinds. KindWalletCreated is logged on
+	// daimon.wallet.create; the payment.* kinds will land in phase 40.3
+	// when the x402 client ships. Verifiers must continue to accept unknown
+	// kinds (see package doc).
+	KindWalletCreated  Kind = "wallet.created"
+	KindPaymentSigned  Kind = "payment.signed"
+	KindPaymentSettled Kind = "payment.settled"
+	KindPaymentFailed  Kind = "payment.failed"
 )
 
 // Common errors.

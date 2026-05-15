@@ -278,6 +278,8 @@ func summarizeEntry(e activityEntry) string {
 		return fmt.Sprintf("query=%q matched=%d", stringField(p, "query"), intField(p, "matched"))
 	case "daimon.created":
 		return "did=" + stringField(p, "did")
+	case "wallet.created":
+		return fmt.Sprintf("%s %s", stringField(p, "chain"), stringField(p, "address"))
 	default:
 		return ""
 	}

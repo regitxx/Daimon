@@ -39,6 +39,7 @@ import (
 	"github.com/regitxx/Daimon/internal/provider/openai"
 	ollamachat "github.com/regitxx/Daimon/internal/provider/ollama"
 	"github.com/regitxx/Daimon/internal/server"
+	"github.com/regitxx/Daimon/internal/wallet"
 )
 
 const version = "v0.1.0-dev"
@@ -131,23 +132,45 @@ func runServe() error {
 	// using the resolved home paths. The embedder gets picked here too — the
 	// memory store needs it at construction; rebuilding it on every unlock
 	// is moot since v0.1 only ever unlocks once per process lifetime.
-	unlock := func(uctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, error) {
+	walletPath := filepath.Join(home, "wallet.keystore")
+	fmt.Fprintf(os.Stderr, "               wallet=%s\n", walletPath)
+
+	unlock := func(uctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
 		id, err := identity.LoadFromKeystore(keystorePath, []byte(password))
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		emb := pickEmbedder(uctx)
 		store, err := memory.Open(filepath.Join(home, "memory.db"), id, emb)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("memory.Open: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("memory.Open: %w", err)
 		}
 		alog, err := activity.Open(filepath.Join(home, "activity.log"), id)
 		if err != nil {
 			_ = store.Close()
-			return nil, nil, nil, fmt.Errorf("activity.Open: %w", err)
+			return nil, nil, nil, nil, nil, fmt.Errorf("activity.Open: %w", err)
+		}
+		// Wallet keystore: opens existing file OR auto-creates with the same
+		// password. On creation the returned mnemonic is non-nil and MUST
+		// be surfaced back to the caller exactly once — the daemon doesn't
+		// keep a copy after this call returns. On subsequent unlocks the
+		// mnemonic is nil and the existing keystore is just decrypted.
+		wstore, freshMnemonic, werr := wallet.Open(walletPath, []byte(password))
+		if werr != nil {
+			// Wallet failure is non-fatal — the daemon stays unlocked
+			// for identity/memory/activity/provider verbs, and wallet
+			// RPCs surface "wallet keystore not loaded" until the user
+			// fixes whatever's wrong. Log to stderr so the operator
+			// can see it.
+			fmt.Fprintf(os.Stderr, "daimond serve: wallet.Open failed (wallet RPCs disabled): %v\n", werr)
+			wstore = nil
+			freshMnemonic = nil
 		}
 		fmt.Fprintf(os.Stderr, "daimond serve: unlocked, did=%s\n", id.DID())
-		return id, store, alog, nil
+		if freshMnemonic != nil {
+			fmt.Fprintf(os.Stderr, "daimond serve: wallet keystore initialised (mnemonic surfaced to caller exactly once)\n")
+		}
+		return id, store, alog, wstore, freshMnemonic, nil
 	}
 
 	srv, err := server.New(server.Options{

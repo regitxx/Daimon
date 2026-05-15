@@ -54,6 +54,8 @@ func main() {
 		exitOnErr(cmdDoctor(args))
 	case "activity":
 		exitOnErr(cmdActivity(args))
+	case "wallet":
+		exitOnErr(cmdWallet(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -142,6 +144,19 @@ Usage:
                             failure exits non-zero with the offending entry
                             named, suitable for 'daimon activity verify &&
                             deploy' pre-flight in scripts.
+
+  daimon wallet list        List the principal's HD-derived wallets.
+              [--json]
+  daimon wallet create      Derive a new wallet for the given chain.
+              --chain <c>   v0.2: EVM chains only (e.g. evm:base,
+              [--json]      evm:base-sepolia). Audit-logs wallet.created.
+  daimon wallet address     Print the address for the wallet on the
+              --chain <c>   given chain.
+              [--json]
+  daimon wallet sign        Low-level: sign a 32-byte digest. Most callers
+              --chain <c>   should use daimon.payment.pay (phase 40.3+)
+              --digest <h>  instead — this is for advanced/debug use.
+              [--json]
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
