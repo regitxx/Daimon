@@ -2878,3 +2878,126 @@ All green on every push. CI matrix unchanged (8 shards: Go + Python {3.10–3.13
 2. **Cross-language live smoke against a mock x402 server** running locally. Spin up the test server from `internal/payment/payment_test.go` outside the test process, dial it from Python + TS SDK clients against one daimon, verify the audit chain. Same structural property as session 38's streaming smoke; gives v0.2 its first published "this works end-to-end across the SDK boundary" evidence even before live Base Sepolia funds are available.
 
 **Next session begins with:** v0.2 is structurally feature-complete on everything that doesn't require live test funds. The daimon now owns its own keypair, signs EIP-3009 authorizations, pays x402-protected URLs, and surfaces all of it through both SDKs. v0.3 (federation / A2A) opens once 40.4 lands live OR once the cross-language local smoke gives the same confidence the protocol already has on streaming.
+
+## 2026-05-18 — Day Zero, session 41: cross-language x402 live smoke
+
+**v0.2 gets its first end-to-end live evidence.** Mirroring session 38's streaming smoke for v0.1, this session brings the wallet + payment surface from "structurally feature-complete" (post-40.6) to "live-verified across the language boundary" against a real-network mock x402 server.
+
+### Setup
+
+Two new in-tree artifacts:
+
+- **`cmd/x402-mock-server/`** — standalone Go binary, ~210 LoC. A real HTTP server (not an `httptest.Server` inside a Go test) that emits a valid `PAYMENT-REQUIRED` 402 envelope on first contact and **cryptographically verifies the retry's `PAYMENT-SIGNATURE`** by recovering the secp256k1 public key from the signature and asserting it matches `authorization.from` — the same property a production x402 facilitator (Coinbase CDP, self-hosted) checks before `/settle` submits the on-chain transaction. The pay-to address, USDC contract, and required amount are configurable via flags; defaults to evm:base + Circle's canonical USDC + 100 smallest units. Imports `internal/payment` so the chain registry + EIP-712 hashing match the daemon's exactly. Lives under `cmd/` (same module) so it can use internal packages.
+
+- **`examples/x402-smoke/`** — sibling-in-shape to `examples/streaming/`. README with prerequisites + run instructions; `python_smoke.py` and `typescript_smoke.mjs` that each pay the mock server through their respective SDK and report HTTP status + decoded body + parsed `PAYMENT-RESPONSE` + `activity.verify` count. URL + ceiling are overridable via env (`X402_URL`, `X402_CEILING_SMALLEST`) for ceiling-rejection sweeps.
+
+### Live run
+
+Fresh `DAIMON_HOME=/tmp/dt-x402-smoke-78843/`, password piped non-interactively, mock server on `127.0.0.1:18402`. Pre-run: `daimon init` → `daimon unlock` (auto-creates wallet keystore, surfaces 24-word mnemonic) → `daimon wallet create --chain evm:base` (derives at `m/44'/60'/0'/0/0`, gets address `0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c`).
+
+**Python half (timing + tear-down output):**
+
+```
+py: DID = did:key:z6MkgdZMc3y7LvsFHiqSKDFTmZgHaNZsdaSSuzWrFaj37s9V
+py: wallets in keystore = ['evm:base']
+py: paying from 0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c on evm:base
+py: HTTP 200 in 35.3ms
+py: body = 'paid resource served to 0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c (network=base, amount=100)'
+py: PAYMENT-RESPONSE success=True tx=0xabababab... payer=0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c
+py: activity.verify -> {'verified': 4, 'ok': True}
+```
+
+The mock server's "served paid resource to 0x24bE..." log line means **the signature verification succeeded** — the server recomputed the EIP-3009 digest, recovered the public key from the signature, derived the EIP-55 address, and matched it against `authorization.from`. If the Python SDK's EIP-3009 encoder had a single off-by-one in field padding, the recovered address would be wrong and the server would 400.
+
+**TypeScript half** (same daimon, same wallet, different SDK encoder):
+
+```
+ts: DID = did:key:z6MkgdZMc3y7LvsFHiqSKDFTmZgHaNZsdaSSuzWrFaj37s9V
+ts: wallets in keystore = ["evm:base"]
+ts: paying from 0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c on evm:base
+ts: HTTP 200 in 14.4ms
+ts: body = "paid resource served to 0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c (network=base, amount=100)"
+ts: PAYMENT-RESPONSE success=true tx=0xabababab... payer=0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c
+ts: activity.verify -> {"verified":7,"ok":true}
+```
+
+Faster (14.4ms vs 35.3ms) because Node's startup beat Python's on a warm cache, not anything structural about the SDKs. **Same DID, same address, same paid-resource body, same payer field on PAYMENT-RESPONSE** — both signatures recovered to the same wallet, which is the property that matters.
+
+**Three-way chain verify:**
+
+```
+$ daimon activity verify
+verified 8 entries — chain ok
+
+$ daimon activity query --limit 20
+2026-05-18T22:13:12  daimon.created     genesis
+2026-05-18T22:13:14  wallet.created     evm:base 0x24bE...62E0c
+2026-05-18T22:13:23  payment.signed     (py call)
+2026-05-18T22:13:23  payment.settled    (py call)
+2026-05-18T22:13:23  activity.verified  verified=4   ← py's verify
+2026-05-18T22:13:23  payment.signed     (ts call)
+2026-05-18T22:13:23  payment.settled    (ts call)
+2026-05-18T22:13:23  activity.verified  verified=7   ← ts's verify
+2026-05-18T22:13:23  activity.verified  verified=8   ← cli's verify
+```
+
+Three observers, monotonic counts: Python `verified=4`, TS `verified=7`, CLI `verified=8`. Audit payload inspection confirms the rows carry the full economic context — example `payment.signed` payload:
+
+```json
+{
+  "amount": "100",
+  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",   ← Base USDC contract
+  "from": "0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c",     ← daimon wallet
+  "network": "base",
+  "pay_to": "0xfFFf0000000000000000000000000000000000ff",
+  "scheme": "exact",
+  "url": "http://127.0.0.1:18402/r",
+  "valid_after": "0",
+  "valid_before": "1779135503"                              ← 5min validity window
+}
+```
+
+And the corresponding `payment.settled` payload from the TS run:
+
+```json
+{
+  "amount": "100",
+  "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "network": "base",
+  "pay_to": "0xfFFf0000000000000000000000000000000000ff",
+  "payer": "0x24bE0714d9C2bdBdAdaC7d53B843874298562E0c",
+  "scheme": "exact",
+  "status_code": 200,
+  "transaction": "0xabababababababababababababababababababababababababababababababab",
+  "url": "http://127.0.0.1:18402/r"
+}
+```
+
+The settlement row carries the synthetic transaction hash the mock server emitted (real facilitators would emit the actual Base tx hash here), the recovered `payer` address (matches `from` on the signed row above), and the `status_code` for resource-level success.
+
+### What this proves
+
+1. **Both SDK EIP-3009 encoders are bit-equivalent on the wire.** Python writes a `PaymentPayload`, the mock server recovers the wallet's public key from it. TypeScript writes a `PaymentPayload`, the mock server recovers the SAME public key. If either encoder padded a `uint256` differently, used the wrong EIP-712 domain separator, or got the `[r||s||v]` byte order wrong, signature recovery would yield a different address and the mock server would 400. Both passed.
+
+2. **The audit log is fully language-neutral on the payment surface.** Every `payment.signed` / `payment.settled` row carries identical structural fields (`amount`, `asset`, `network`, `pay_to`, `scheme`, `from`/`payer`, `url`) whether the caller was Python, TypeScript, or the CLI. A downstream auditor — say, a tax accountant — could reconstruct the principal's payment history without knowing or caring which SDK wrote any given row.
+
+3. **The wire contract holds over real HTTP, not just `httptest.Server`.** Real TCP connection, real Base64 envelopes on real headers, real Unix-socket JSON-RPC through the daemon, real x402 server in a separate process. The structural property the unit tests assert is now also true on the network.
+
+### Notable absences
+
+- **No actual blockchain settlement happens.** The mock server names a synthetic transaction hash (`0xababab...`) in PAYMENT-RESPONSE so daimon's audit log gets a `payment.settled` row, but no USDC moves. Live Base Sepolia settlement is phase 40.4, blocked on test funds + a real x402-protected endpoint with a real facilitator wired in.
+- **No facilitator round-trip.** The mock server skips `/verify` and `/settle` because it's the resource server's facilitator — daimon-as-payer doesn't talk to facilitators in v0.2 (that's a v0.2.x balance-probe addition).
+- **No multi-chain coverage.** Daimon was on `evm:base`; SVM (Solana) and Stellar paths would need their own ChainInfo registrations + scheme-`exact` variants for non-secp256k1 curves.
+
+### Punted
+
+- **A non-interactive runner script** (`run.sh`) that orchestrates daimon-init + unlock + wallet-create + mock-server-start + both smokes + CLI verify + tear-down. This session ran the dance by hand; codifying it would make CI integration possible.
+- **A negative test** that flips the ceiling below the demanded amount and surfaces `RPCError(-32006)` cleanly through both SDKs. The unit tests already cover the typed-code mapping; a live counterpart would be cheap evidence but isn't load-bearing.
+- **Adding the smoke binary + scripts to CI.** Right now CI runs unit tests only; the live smoke is a manual-run artifact. Promoting it to a CI step would catch any future divergence between SDK encoders the moment it lands. Punt-list item for next session.
+
+### State at end of session
+
+- v0.2 implementation arc closed: phases 40.0 / 40.1 / 40.2 / 40.3 / 40.5a / 40.6 all shipped, all unit-tested, **and now live-verified across both SDKs against a real HTTP network**.
+- 329 Go race+vet + 61 pytest + 61 vitest = 451 unit tests still green.
+- Two phases remain: 40.4 (blocked on Base Sepolia funds + real endpoint) and 40.5b (deferred, not load-bearing).
+- The protocol's v0.2 promise — "daimon holds keys, signs EIP-3009, pays HTTP 402 resources via either SDK" — is now factually demonstrated in tree.
