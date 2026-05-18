@@ -2765,3 +2765,116 @@ After 40.6, v0.2.0 ships and v0.3 (federation, A2A) opens.
 - Explicit open-question list so huckgod's next session can resolve the strategic shape before any 40.1 code is written.
 
 **Next session begins with:** read [`design/v0.2-wallet.md`](design/v0.2-wallet.md), resolve the seven open questions (or as many as huckgod is ready to lock in), and either start 40.1 (wallet primitive) or push back on the draft's architecture. If huckgod prefers a different first-chain or a custodial path, the draft's phases are independent of those decisions — the wallet primitive ships either way, the payment layer's shape changes.
+
+## 2026-05-12 → 2026-05-15 — Day Zero, session 40 (parts 2–7): v0.2 wallet + x402 arc shipped through phase 40.6
+
+**Six of seven planned v0.2 phases landed across seven commits, all CI-green.** The session-40 design draft put the open-question list down on paper; this addendum closes out the implementation arc that turned every "yes" the draft assumed into running code. Sessions 40.1 → 40.6 in chronological order:
+
+### 40.1 — `internal/wallet/` (commit [814dc77](https://github.com/regitxx/Daimon/commit/814dc77), ~700 LoC, 15 tests)
+
+The wallet primitive in isolation. BIP-39 24-word mnemonics, BIP-32 HD derivation walking m/44'/60'/0'/0/N, secp256k1 via `github.com/decred/dcrd/dcrec/secp256k1/v4`, Keccak256 + EIP-55 EVM address derivation. Keystore mirrors `internal/identity/keystore.go`'s shape exactly — Argon2id KEK + AES-256-GCM body, same JSON envelope, same wrong-password collapse to `ErrWrongPassword`. The plaintext stores the mnemonic + a JSON list of derived wallet metadata (chain, path, address, pubkey) so re-derivation is deterministic on reopen.
+
+**Cryptographic anchor:** the canonical 12-word "abandon … about" BIP-39 vector derives to `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` at m/44'/60'/0'/0/0 — the same address iancoleman.io/bip39 + MetaMask + every other reference tool returns. Locking that into `TestDerive_EVMAddressMatchesPublishedVector` means future refactors that drift the derivation pipeline by a single byte trip CI immediately. **Exit-rights insurance from day one**: a principal can import their daimon mnemonic into MetaMask and see the same wallet.
+
+**Signing surface:** `Store.SignDigest(chain, digest)` re-derives the private key from the mnemonic + path on each call, signs the 32-byte digest with ECDSA over secp256k1, returns the 65-byte `[r || s || v]` EVM signature with v ∈ {27, 28} — the exact shape EIP-3009 verifiers expect. Private key is zeroed (`zero(b)`) before the call returns.
+
+### 40.2 — wallet RPC + CLI + unlock integration (commit [fb024e7](https://github.com/regitxx/Daimon/commit/fb024e7))
+
+Wired the wallet primitive into the daemon's RPC surface, CLI, and unlock lifecycle. Four design surfaces:
+
+1. **`UnlockFunc` signature change** — added `*wallet.Store` and `*wallet.Mnemonic` return values. The unlock callback now opens BOTH `identity.keystore` (required) AND `wallet.keystore` (auto-created on first run, returning a fresh mnemonic that must be surfaced exactly once). Updated existing test fixtures (3 call sites) and `cmd/daimond/main.go` to match. Wallet failure is non-fatal — daemon stays unlocked for everything else; wallet RPCs surface "wallet keystore not loaded" until fixed.
+
+2. **`identity.unlock` response gains `mnemonic` field**. On first unlock the daemon returns the freshly-generated 24-word BIP-39 mnemonic; on subsequent unlocks the field is omitted. CLI side prints a deliberately-loud banner (double-line box around "back up this recovery phrase NOW") with 4 words per line, numbered, for legibility. Mirrors how MetaMask / Phantom present seed-phrase backups.
+
+3. **Four new RPC verbs** in `internal/server/wallet_handlers.go`:
+   - `daimon.wallet.list` → array of wallet entries
+   - `daimon.wallet.create {chain}` → new wallet record (audit-logged as `wallet.created`)
+   - `daimon.wallet.address {chain}` → just the EIP-55 address string
+   - `daimon.wallet.sign {chain, digest_hex}` → 65-byte hex signature (low-level surface for advanced/debug; the canonical surface is `daimon.payment.pay` once phase 40.3 lands)
+
+4. **`daimon wallet` CLI subcommand** with `list / create / address / sign` mirroring the RPC surface. Help text + main.go dispatch updated.
+
+11 handler tests cover the surface (empty-keystore list, EVM address shape, audit-row emission, unsupported-chain rejection, duplicate-chain rejection, address lookup, sign+recover round-trip, bad-digest rejection, wallet-not-loaded fallback paths).
+
+### 40.3 — `internal/payment/` x402 client (commit [1547b43](https://github.com/regitxx/Daimon/commit/1547b43), ~900 LoC, 13 tests)
+
+The x402 v2 wire client end-to-end. Five files:
+
+- **`types.go`** — wire-canonical structs: `PaymentRequirements`, `PaymentRequiredEnvelope`, `PaymentPayload`, `EVMExactPayload`, `EVMAuthorizationV2`, `PaymentResponse`. Field names match the upstream specs byte-for-byte; uint256 fields wire as decimal strings to avoid JSON's 2^53 precision cliff.
+
+- **`tokens.go`** — chain → USDC contract + EIP-712 domain registry. v0.2 ships Base mainnet (chainId 8453) + Base Sepolia (chainId 84532). USDC contract addresses hardcoded from Circle's published deployments, with comments. Multi-token / arbitrary-asset support (where the resource server names any ERC-20 and the daimon fetches the EIP-712 domain via chain RPC) reserved for v0.2.x.
+
+- **`eip712.go`** — EIP-712 + EIP-3009 hashing from first principles using `golang.org/x/crypto/sha3` legacy-Keccak. `DomainSeparator`, `TransferWithAuthorizationStructHash`, `EIP3009Digest` are all public for vector-anchored testing. ABI encoding helpers (`uint256Bytes`, `padLeft32`, `addressBytes`, `bytes32`) enforce the 32-byte-pad-and-big-endian invariants. The two EIP-712 type-string hashes are precomputed at package init time and **anchored against expected keccak256 values in tests** so a string refactor that changes the typehash trips CI before any signature would round-trip differently.
+
+- **`client.go`** — the `Client` struct wraps `(*wallet.Store, *activity.Log, Config)`. `Do(ctx, *http.Request)` transparently handles 402: parses `PAYMENT-REQUIRED` (Base64 + URL-Base64 fallback), picks first row matching `(scheme=exact, network in registry, wallet present, asset = registered USDC contract)`, enforces optional `CeilingSmallestUnit` BEFORE signing (over-ceiling 402s become `payment.failed` rows with no signature emitted), builds EIP-3009 authorization with 32-byte random nonce + 5-minute `validBefore`, signs via wallet, retries with `PAYMENT-SIGNATURE` set. `payment.signed` audit row writes before the retry; `payment.settled` or `payment.failed` writes after based on retry status + `PAYMENT-RESPONSE.success`.
+
+- **`payment_test.go`** (13 cases) — keccak typehash anchors; uint256 ABI encoding edge cases (zero, max_uint64, negative-rejected, non-decimal-rejected, 2^256-overflow); digest determinism + nonce-flip sensitivity; token registry round-trip; **end-to-end mock-server test that recovers the public key from the signature via `ecdsa.RecoverCompact` and asserts it matches `authorization.from`** — the same property a real x402 facilitator checks before settling on-chain. Ceiling-enforcement audit-row evidence; no-compatible-requirement + invalid-header error paths.
+
+**Worth naming**: phase 40.3 has zero facilitator-client code. Facilitators are a SERVER-side concern (the resource server calls `/verify` + `/settle` on its facilitator); the daimon-as-payer surface just needs to construct valid `PAYMENT-SIGNATURE` headers, which 40.3 does. Wallet-balance probes via facilitator land in v0.2.x.
+
+### 40.5a — `daimon.payment.pay` RPC + CLI (commit [401544a](https://github.com/regitxx/Daimon/commit/401544a))
+
+Surfaced the payment client from 40.3 as a first-class RPC verb and CLI subcommand.
+
+- **Handler** (`internal/server/payment_handlers.go`) constructs `payment.Client` inline per call. Maps the typed `payment.Err*` errors to two new RPC error codes: **`-32006 CodePaymentCeiling`** (ceiling exceeded — caller can retry with a higher value if intentional) and **`-32007 CodePaymentUnsupported`** (no wallet matches the resource's requirements — chain not in registry, wallet not yet created, etc.). Returns a typed result with `status_code` + base64-encoded body + allowlist of surfaced response headers (Content-Type, Content-Length, Payment-Response — full headers would leak server framing). Rejects callers that try to preset `PAYMENT-SIGNATURE`.
+
+- **CLI** (`cmd/daimon/cmd_payment.go`) — `daimon payment pay <url>` with `--method / --body / --body-file (- = stdin) / --header / --ceiling-usd / --validity-seconds / --json`. Default output is curl-like: HTTP-style status to stderr + decoded body to stdout. USD → smallest-units conversion via `big.Float` (USDC's 6-decimal scale forbids the float64 precision cliff at sub-cent amounts).
+
+- **7 handler tests** cover the round-trip path (audit log gets exactly one `payment.signed` + one `payment.settled`), wallet-keystore-missing rejection, missing-URL, mutually-exclusive bodies, caller-set-PAYMENT-SIGNATURE rejection, ceiling-exceeded → `CodePaymentCeiling`, no-wallet-for-chain → `CodePaymentUnsupported`.
+
+The auto-pay-on-`provider.invoke` half of 40.5 (40.5b) is deliberately split into its own future commit — it touches the provider adapter abstraction (needs to surface 402 from adapter layer up to the handler) and is strictly additive, not load-bearing for v0.2.0.
+
+### 40.6 — Python + TS SDK wrappers (commit [964ac75](https://github.com/regitxx/Daimon/commit/964ac75))
+
+Symmetric wrappers across both SDK languages for the v0.2 surface. Same shape: keyword args (Python) / named params object (TS), bytes-or-string body parameter, structured `PaymentPayResult` with decoded body, typed RPC error codes propagating through the existing `RPCError` family.
+
+- **Python** (`sdk/python/daimon/client.py`, +155 lines): `_WalletNamespace.{list,create,address,sign}` and `_PaymentNamespace.pay`. Body parameter accepts `bytes` (→ `body_base64` on the wire) or `str` (→ `body_text`). `ceiling_smallest_unit` accepts `int` or `str`. SDK decodes `response_body_base64` transparently so callers get `bytes` back. 15 pytest cases in `test_wallet_payment.py`.
+
+- **TypeScript** (`sdk/typescript/src/client.ts`, +145 lines): `WalletNamespace` + `PaymentNamespace` classes wired into `Client`. Body accepts `Uint8Array` (→ base64) or `string` (→ text). `ceilingSmallestUnit` accepts `bigint`/`number`/`string` — SDK stringifies on the wire. Base64 helpers (`uint8ToBase64` / `base64ToUint8`) use `Buffer` when available (Node) with a `btoa`/`atob` fallback for future browser-side use. 14 vitest cases in `wallet_payment.test.ts`. Seven new types exported via `index.ts`.
+
+- **Both CHANGELOGs** Unreleased sections document the new surfaces with reference to the daemon-side phase numbers and the typed RPC error codes.
+
+### Where v0.2 stands as of this docs pass
+
+| Phase | Status |
+|---|---|
+| 40.0 design | ✅ shipped (with §8 Recommendations) |
+| 40.1 wallet primitive | ✅ shipped |
+| 40.2 wallet RPC + CLI + unlock | ✅ shipped |
+| 40.3 x402 client | ✅ shipped |
+| 40.4 live integration | ⏳ blocked on test funds + real x402 endpoint |
+| 40.5a `daimon.payment.pay` | ✅ shipped |
+| 40.5b `provider.invoke` auto-pay | ⏳ deferred (strictly additive, not load-bearing) |
+| 40.6 SDK wrappers | ✅ shipped |
+
+**Test deltas across the arc:**
+
+| Suite | Pre-v0.2 | Post-40.6 | Delta |
+|---|---|---|---|
+| Go race+vet | 287 | 329 | +42 |
+| pytest | 46 | 61 | +15 |
+| vitest | 47 | 61 | +14 |
+| **Total** | **380** | **451** | **+71** |
+
+All green on every push. CI matrix unchanged (8 shards: Go + Python {3.10–3.13} + Node {18, 20, 22}).
+
+**Architectural threads that paid off across phases:**
+
+- **The `internal/secretbox` envelope** that v0.1 built for memory rows + activity payloads also encrypts the wallet keystore. No new cryptographic primitives in v0.2.
+- **The activity-log Kind enum** extended naturally — `wallet.created`, `payment.signed`, `payment.settled`, `payment.failed` are just new constants. Existing chain-walk + signature-verify machinery applies unchanged.
+- **The wallet's `Store.SignDigest` returning `[r || s || v]`** is exactly the shape EIP-3009 verifiers expect, so phase 40.3's payment client could call into it directly with no shape translation.
+- **The Python + TS SDK harness** built for v0.1 verbs in sessions 32–34 absorbed v0.2 verbs in phase 40.6 with no harness changes — just new namespace classes registered against the existing `Client._call` plumbing.
+
+**What we did NOT do in this arc (and why):**
+
+- **Phase 40.4 live integration.** Needs Base Sepolia USDC in a wallet derived from the daimon's mnemonic + a real x402-protected endpoint to call. Cryptographic surface is already self-tested end-to-end (the mock server in `internal/payment/payment_test.go` runs the same signature-recovery check a real facilitator would).
+- **Phase 40.5b auto-pay-on-provider-invoke.** Strictly additive; can land anytime. Touches the provider adapter abstraction (needs adapters to surface HTTP 402 as a typed error the handler can catch). Not load-bearing because no major LLM provider returns 402 today — Anthropic / OpenAI / Ollama / LM Studio all bill out-of-band on the API-key account.
+- **SVM (Solana) or Stellar chains.** v0.2 ships EVM only. SLIP-10 derivation + scheme-`exact` variants for non-EVM curves are well-defined; they're just out of scope for the first cut.
+- **Custodial wallet path** (one of the seven open questions). §8.1 of the design doc resolved this as non-custodial — sovereignty thesis breaks otherwise. Custodial integration could land in v0.2.x if there's a concrete user need.
+
+**Two unblocked next moves for the next session:**
+
+1. **Phase 40.5b — `provider.invoke` auto-pays 402.** Threads 402 detection through the provider adapter layer (Claude / OpenAI / Ollama / LM Studio adapters → handler → payment.Client). ~200 LoC, adds maybe 4–5 handler tests.
+2. **Cross-language live smoke against a mock x402 server** running locally. Spin up the test server from `internal/payment/payment_test.go` outside the test process, dial it from Python + TS SDK clients against one daimon, verify the audit chain. Same structural property as session 38's streaming smoke; gives v0.2 its first published "this works end-to-end across the SDK boundary" evidence even before live Base Sepolia funds are available.
+
+**Next session begins with:** v0.2 is structurally feature-complete on everything that doesn't require live test funds. The daimon now owns its own keypair, signs EIP-3009 authorizations, pays x402-protected URLs, and surfaces all of it through both SDKs. v0.3 (federation / A2A) opens once 40.4 lands live OR once the cross-language local smoke gives the same confidence the protocol already has on streaming.
