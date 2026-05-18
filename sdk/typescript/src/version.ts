@@ -3,4 +3,4 @@
 // each `npm run build` (and on `prepublishOnly` before `npm publish`).
 // Edit package.json to change the version; this file follows.
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0-dev.0";

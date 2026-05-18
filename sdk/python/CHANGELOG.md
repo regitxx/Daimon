@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_No unreleased changes yet._
+
+## [0.2.0.dev0] — 2026-05-18
+
+First pre-release of the v0.2 surface — wallet + x402 payments.
+Published under the PyPI `--pre` channel (`pip install --pre
+daimon-protocol`) so the default `pip install daimon-protocol`
+without `--pre` continues to resolve to `0.1.0`. v0.2.0 GA cuts
+once phase 40.4 lands (live Base Sepolia settlement against a real
+x402-protected endpoint with a real facilitator).
+
 ### Added
 
 - **`client.wallet` namespace** (v0.2 phase 40.6 — mirrors phases 40.1+40.2
@@ -27,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ("payment exceeds local ceiling") and `-32007` ("no compatible
   requirement") propagate through `RPCError.code` so callers can
   branch on them without string-matching the message.
+- **CI cross-language live smoke** (session 42, parallel to session 38's
+  streaming smoke for v0.1) — every push to main runs both SDKs against
+  a real-network mock x402 server that cryptographically verifies the
+  `PAYMENT-SIGNATURE` header. Any drift between the Python and
+  TypeScript EIP-3009 encoders trips a build immediately. Negative-
+  path coverage (ceiling rejection) included.
 
 ## [0.1.0] — 2026-05-12
 
