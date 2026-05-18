@@ -3040,3 +3040,79 @@ The settlement row carries the synthetic transaction hash the mock server emitte
 - **451 unit tests** continue to pass (329 Go race+vet + 61 pytest + 61 vitest), unchanged from session 41.
 - **The cross-language wire-shape contract is now continuously asserted by CI.** Every push to main re-proves Python and TypeScript SDKs produce wire-equivalent EIP-3009 payloads against a real-network mock server with cryptographic signature recovery.
 - v0.2 implementation arc is structurally + live + CI-protected complete on 6/8 phases. Only 40.4 (live Base Sepolia settlement) remains as a meaningful gap, blocked on test funds + real x402 endpoint.
+
+## 2026-05-18 — Day Zero, session 43: v0.2.0-dev.0 pre-release shipped to PyPI + npm
+
+**The v0.2 surface is now installable from both public registries** under conservative pre-release channels. Default install paths continue to resolve to 0.1.0 stable — anyone using `pip install daimon-protocol` or `npm install @daimon-protocol/sdk` against `latest` is unaffected. Anyone who wants to try the v0.2 wallet + x402 surface can opt in with `--pre` (Python) or `@dev` (npm).
+
+### What landed
+
+- **`sdk/python/pyproject.toml`**: `version = "0.1.0"` → `"0.2.0.dev0"`
+- **`sdk/typescript/package.json`**: `"version": "0.1.0"` → `"0.2.0-dev.0"` (lockfile + `src/version.ts` auto-regenerated via `scripts/gen-version.mjs`)
+- **`sdk/python/CHANGELOG.md`** + **`sdk/typescript/CHANGELOG.md`**: moved `Unreleased` entries into dated `[0.2.0-dev.0] — 2026-05-18` sections in both SDKs. Section headers explain the `--pre` / `@dev` channel discipline and point at phase 40.4 as the gate for v0.2.0 GA.
+
+### Publish pipeline
+
+1. CI green on the version-bump commit ([Run 26061805149](https://github.com/regitxx/Daimon/actions/runs/26061805149)) — all 9 shards including the x402 cross-language smoke shard passed before any publish.
+2. `python -m build` → `daimon_protocol-0.2.0.dev0-py3-none-any.whl` + `.tar.gz`; `twine check` passed both.
+3. `python -m twine upload dist/*` → <https://pypi.org/project/daimon-protocol/0.2.0.dev0/> live.
+4. `npm publish --tag dev` → `+ @daimon-protocol/sdk@0.2.0-dev.0` to the dev dist-tag.
+5. Git tag `v0.2.0.dev0` annotated + pushed, with a multi-paragraph message documenting the surface + the v0.2.0 GA blockers.
+
+### Post-publish verification
+
+Clean-shell installs from both registries:
+
+**PyPI** (`pip install --pre --no-cache-dir daimon-protocol` in a fresh venv):
+```
+Name: daimon-protocol
+Version: 0.2.0.dev0
+imports OK (Client + StreamHandle)
+```
+
+PyPI JSON API now reports:
+```json
+{
+  "info": {"version": "0.1.0"},          // latest stable still 0.1.0
+  "releases": ["0.1.0", "0.1.0.dev0", "0.2.0.dev0"]
+}
+```
+
+**npm** (`npm install @daimon-protocol/sdk@dev` in a fresh dir):
+```
+installed: @daimon-protocol/sdk 0.2.0-dev.0
+imports OK; VERSION= 0.2.0-dev.0 ; wallet? type only ; Client? function
+```
+
+npm dist-tags now show:
+```
+{ dev: '0.2.0-dev.0', latest: '0.1.0' }
+```
+
+Both dist-tags are doing what they should: `latest` stays at the v0.1.0 GA (so default installs are stable), `dev` points to the v0.2 pre-release (so opted-in callers get the new surface).
+
+### The build-time VERSION codegen is doing its job
+
+When 0.1.0 GA shipped (session 39), the TypeScript SDK's `VERSION` runtime constant was stale — hardcoded in `src/index.ts` as `"0.1.0-dev.0"` and forgotten during the version bump. That landed as a known caveat in the 0.1.0 CHANGELOG and the structural fix (codegen via `scripts/gen-version.mjs` chained ahead of build / typecheck / prepublishOnly) shipped in a follow-on commit. **0.2.0-dev.0 is the first publish to fully exercise the codegen path**: bumping `package.json#version` to `0.2.0-dev.0` triggered `gen-version` on `npm run build`, which wrote the corrected `export const VERSION = "0.2.0-dev.0";` into `src/version.ts`, which `tsc` compiled into the dist, which `npm publish` shipped. The clean-shell install's `m.VERSION` query confirmed the value end-to-end. The cosmetic-bug class is now closed structurally.
+
+### What's gated on v0.2.0 GA
+
+The dev0 pre-release is intentionally NOT v0.2.0 GA. Two things must land for that:
+
+1. **Phase 40.4 — live Base Sepolia settlement**. The cryptographic surface is already self-tested by the CI x402-smoke shard (mock server recovers the public key from the signature and asserts it matches the wallet — the same property a real facilitator checks). Live settlement adds the on-chain commit step. Needs Base Sepolia USDC funded into a wallet derived from a daimon mnemonic + a real x402-protected target URL with a wired-in facilitator.
+2. (optional) **Phase 40.5b — `provider.invoke` auto-pays on 402**. Strictly additive; speculative because no LLM provider returns 402 today. Could land at any time, including post-GA.
+
+Once 40.4 confirms live settlement works end-to-end, bumping `0.2.0.dev0` → `0.2.0` and re-running the same publish pipeline cuts the GA. Same template as `0.1.0.dev0` → `0.1.0` from session 39.
+
+### What we explicitly did NOT do
+
+- **Bump to 0.2.0 GA directly.** Premature: phase 40.4 hasn't landed, and the dev0 pre-release validates the publish ritual against the new version without burning the GA version number. Same caution that motivated `0.1.0.dev0` before `0.1.0` in session 39.
+- **Pull `latest` for users on 0.1.0.** They keep getting the stable release until v0.2.0 GA. No user on `latest` should be surprised by the wallet/payment surface appearing without their opt-in.
+- **Update top-level README** to mention the v0.2 install path. Top-level README is huckgod's voice + framing; the SDK READMEs already cover the new surface and the CHANGELOGs document the pre-release channels. Top-level update can come at v0.2.0 GA.
+
+### State at end of session
+
+- v0.2 surface installable from both registries under `--pre` / `@dev` (default installs unaffected, still 0.1.0).
+- Git tags now span `v0.1.0.dev0`, `v0.1.0`, `v0.2.0.dev0`. v0.2.0 GA tag will land alongside the 0.2.0 cut once 40.4 closes.
+- The protocol's promise — "daimon holds keys, signs EIP-3009, pays HTTP 402 resources via either SDK" — is now factually available to anyone who can `pip install --pre daimon-protocol` or `npm install @daimon-protocol/sdk@dev`. Wire-shape contract is continuously re-verified on every push via the x402-smoke CI shard.
+- Test counts unchanged: 329 Go race+vet + 61 pytest + 61 vitest + 9 CI shards green.
