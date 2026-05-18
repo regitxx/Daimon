@@ -121,7 +121,7 @@ log "wallet=$WALLET_ADDR"
 
 # --- step 7: start mock server ---------------------------------------------
 
-MOCK_LOG="$(mktemp "/tmp/x402-mock-XXXXXX.log")"
+MOCK_LOG="$(mktemp "/tmp/x402-mock-XXXXXXXX")"
 bin/x402-mock-server -addr "127.0.0.1:$PORT" >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 disown
@@ -187,3 +187,88 @@ for r in rows:
 print(f'both payment.settled rows have payer={\"$WALLET_ADDR\"}')
 "
 ok "all payment.settled rows attribute to wallet $WALLET_ADDR"
+
+# --- step 12: negative path — ceiling rejection ----------------------------
+# Spin up a second mock server demanding more than the daimon's ceiling
+# and confirm both SDKs surface CodePaymentCeiling (-32006) cleanly. This
+# guards the "refuse to sign over-budget payments" path — without it, a
+# misconfigured or malicious endpoint could drain the wallet by quoting
+# enormous prices.
+
+log "step 12: negative-path ceiling rejection"
+
+NEG_PORT="$((PORT + 1))"
+NEG_LOG="$(mktemp "/tmp/x402-mock-neg-XXXXXXXX")"
+# 999_999_999 USDC smallest-units = $999.99 — way above any sane ceiling.
+bin/x402-mock-server -addr "127.0.0.1:$NEG_PORT" -amount 999999999 >"$NEG_LOG" 2>&1 &
+NEG_MOCK_PID=$!
+disown
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -sS -o /dev/null "http://127.0.0.1:$NEG_PORT/" 2>/dev/null; then
+    break
+  fi
+  sleep 0.5
+done
+curl -sS -o /dev/null "http://127.0.0.1:$NEG_PORT/" || { err "negative mock server failed to start"; kill -KILL "$NEG_MOCK_PID" 2>/dev/null; exit 1; }
+log "negative mock server pid=$NEG_MOCK_PID port=$NEG_PORT amount=999999999"
+
+# We expect both smoke scripts to exit non-zero (rc=2 specifically per
+# their own conventions — payment-rejection paths). Capture the stderr
+# so we can grep for the typed -32006 code.
+
+PY_NEG_LOG="$(mktemp "/tmp/x402-neg-py-XXXXXXXX")"
+TS_NEG_LOG="$(mktemp "/tmp/x402-neg-ts-XXXXXXXX")"
+
+set +e
+X402_URL="http://127.0.0.1:$NEG_PORT/r" "$PYTHON" examples/x402-smoke/python_smoke.py >"$PY_NEG_LOG" 2>&1
+PY_NEG_RC=$?
+X402_URL="http://127.0.0.1:$NEG_PORT/r" node examples/x402-smoke/typescript_smoke.mjs >"$TS_NEG_LOG" 2>&1
+TS_NEG_RC=$?
+set -e
+
+kill -KILL "$NEG_MOCK_PID" 2>/dev/null || true
+
+if (( PY_NEG_RC == 0 )); then
+  err "Python smoke should have failed against over-ceiling endpoint, got rc=0"
+  cat "$PY_NEG_LOG" >&2
+  exit 1
+fi
+if (( TS_NEG_RC == 0 )); then
+  err "TypeScript smoke should have failed against over-ceiling endpoint, got rc=0"
+  cat "$TS_NEG_LOG" >&2
+  exit 1
+fi
+
+# Both smokes should have surfaced rpc code -32006 in their error output.
+# Python's RPCError stringifies as "rpc error -32006: ..."; TS's RPCError
+# carries the code field which the smoke prints as "rpc code -32006".
+if ! grep -q -- '-32006' "$PY_NEG_LOG"; then
+  err "Python rejection did not surface code -32006"
+  cat "$PY_NEG_LOG" >&2
+  exit 1
+fi
+if ! grep -q -- '-32006' "$TS_NEG_LOG"; then
+  err "TypeScript rejection did not surface code -32006"
+  cat "$TS_NEG_LOG" >&2
+  exit 1
+fi
+ok "both SDKs surfaced CodePaymentCeiling (-32006) on over-ceiling 402"
+
+# Confirm the audit log got one payment.failed row per SDK with reason
+# "ceiling …". Pre-existing payment.failed count was 0 before this step.
+FAILED_COUNT=$(bin/daimon activity query --kind payment.failed --json 2>/dev/null | "$PYTHON" -c 'import json,sys; print(len(json.load(sys.stdin)))')
+if [[ "$FAILED_COUNT" != "2" ]]; then
+  err "expected 2 payment.failed rows after ceiling tests, got $FAILED_COUNT"
+  exit 1
+fi
+ok "audit log gained 2 payment.failed rows from ceiling-rejection path"
+
+# And importantly: no NEW payment.signed rows were added. The daimon
+# refused to sign because the ceiling fires BEFORE signing — that's the
+# whole point of the ceiling.
+SIGNED_COUNT_AFTER=$(bin/daimon activity query --kind payment.signed --json 2>/dev/null | "$PYTHON" -c 'import json,sys; print(len(json.load(sys.stdin)))')
+if [[ "$SIGNED_COUNT_AFTER" != "$SIGNED_COUNT" ]]; then
+  err "payment.signed count changed during ceiling-rejection ($SIGNED_COUNT -> $SIGNED_COUNT_AFTER); ceiling should fire BEFORE signing"
+  exit 1
+fi
+ok "ceiling-rejection produced NO new payment.signed rows (correctly refused to sign)"

@@ -3001,3 +3001,42 @@ The settlement row carries the synthetic transaction hash the mock server emitte
 - 329 Go race+vet + 61 pytest + 61 vitest = 451 unit tests still green.
 - Two phases remain: 40.4 (blocked on Base Sepolia funds + real endpoint) and 40.5b (deferred, not load-bearing).
 - The protocol's v0.2 promise — "daimon holds keys, signs EIP-3009, pays HTTP 402 resources via either SDK" — is now factually demonstrated in tree.
+
+## 2026-05-18 — Day Zero, session 42: x402 smoke promoted from manual artifact to CI step
+
+**Session 41's cross-language live smoke was runnable only by hand. Session 42 codifies the orchestration and adds it to the CI pipeline**, so any future drift between the Python and TypeScript SDK EIP-3009 encoders trips a build the moment it lands rather than silently shipping into the next SDK release.
+
+### What landed
+
+- **`examples/x402-smoke/run.sh`** (~140 LoC) — orchestrator that runs the full session-41 dance end-to-end. Builds binaries, installs Python SDK in editable mode if missing, builds TS SDK dist if missing, allocates a temp `DAIMON_HOME`, init+unlocks daimon non-interactively (password piped), creates an `evm:base` wallet, spins the x402-mock-server on a configurable port, runs `python_smoke.py` + `typescript_smoke.mjs`, runs `daimon activity verify`, then **asserts** the audit log has exactly 2 `payment.signed` + 2 `payment.settled` rows whose `payer` field matches the freshly-created wallet address. Cleanup trap kills the mock server + daemon on exit including failure paths. Designed to be CI-runnable AND human-runnable; `PORT` + `PASSWORD` env vars parameterise.
+
+- **`.github/workflows/ci.yml`** gains an `x402-smoke` job parallel to the existing `go` / `python-sdk` × 4 / `typescript-sdk` × 3 matrices. Sets up Go + Python 3.12 + Node 22, then just runs `bash examples/x402-smoke/run.sh`. CI shard count: 8 → 9.
+
+- **`examples/x402-smoke/README.md`** gets a "Quick start: one-line runner" section at the top pointing at `run.sh`. The existing step-by-step walkthrough stays for cases where callers want to inspect or modify individual pieces.
+
+### Verification
+
+**Local end-to-end** (`PORT=18403`): 8 chain entries verified; 2 `payment.signed` + 2 `payment.settled`; both `payer` fields matched the wallet `0x716dF3…20987`. Python smoke HTTP 200 in 20.8ms; TS smoke HTTP 200 in 14.0ms; mock server logs showed `served paid resource to <wallet>` twice — once per SDK, proving both signature recoveries succeeded against the same wallet's public key.
+
+**CI** ([Run 26058321328](https://github.com/regitxx/Daimon/actions/runs/26058321328)): all 9 shards green on first push. The new x402-smoke job took ~30s end-to-end including binary builds + SDK installs.
+
+### What CI now catches automatically on every push
+
+1. **Drift between Python and TS SDK EIP-3009 encoders.** Signature recovery on the mock server would fail and the server would return 400, tripping the assertion that expects HTTP 200.
+2. **Drift in daimon's wallet derivation pipeline.** Wallet creation would not produce the expected secp256k1 key, leading to either signature-recovery mismatch or wallet-not-found errors during the smoke.
+3. **Audit-log Kind dispatch regressions.** `payment.signed` / `payment.settled` rows are counted explicitly; missing rows trip the runner's count assertions.
+4. **JSON-RPC dispatch regressions on the new wallet/payment verbs.** Any breakage in `daimon.wallet.create` / `daimon.payment.pay` propagates up to a CLI or SDK error rather than producing the expected payload.
+5. **Daimon CLI password-piping regressions.** Both `init` and `unlock` need to accept piped passwords cleanly; if the readPassword shim ever changes behaviour, the runner's first `init` step fails immediately.
+
+### Punted from this session
+
+- **Negative-path coverage.** The CI smoke proves the happy path. A second invocation with `-amount 999999999` would prove the ceiling-rejection path also fires correctly — currently only the unit tests in `internal/payment/payment_test.go` cover that. Landed in a follow-on commit this session.
+- **Cutting `0.2.0-dev.0` pre-releases on PyPI + npm.** Mirrors how `v0.1.0.dev0` worked — pre-tag the v0.2 surface so users can install + experiment under `--pre` / `@dev` channels before GA. Holding for huckgod's call on when to cut; the work to bump versions + move CHANGELOGs is small.
+- **Wiring up phase 40.5b** (provider.invoke auto-pay on 402). Still speculative — no LLM provider returns 402 today.
+
+### State at end of session
+
+- **9 CI shards green on every push:** Go + Python 3.10/3.11/3.12/3.13 + Node 18/20/22 + the new x402-smoke.
+- **451 unit tests** continue to pass (329 Go race+vet + 61 pytest + 61 vitest), unchanged from session 41.
+- **The cross-language wire-shape contract is now continuously asserted by CI.** Every push to main re-proves Python and TypeScript SDKs produce wire-equivalent EIP-3009 payloads against a real-network mock server with cryptographic signature recovery.
+- v0.2 implementation arc is structurally + live + CI-protected complete on 6/8 phases. Only 40.4 (live Base Sepolia settlement) remains as a meaningful gap, blocked on test funds + real x402 endpoint.
