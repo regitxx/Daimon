@@ -1,26 +1,37 @@
 # Daimon Protocol Specification
 
-**Version**: v0.1 (Draft)
-**Status**: Day Zero. Subject to substantial revision before v0.1 freeze.
-**Date**: 2026-05-03
+**Version**: v0.2 (Draft)
+**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.0 pre-release shipped 2026-05-18 (wallet + x402 surface). v0.2 GA cuts once live Base Sepolia settlement is verified.
+**Date**: 2026-05-18 (originally 2026-05-03 for v0.1)
 
 ---
 
-## 1. Scope of v0.1
+## 1. Scope
+
+### 1.1 v0.1 — local sovereign agent
 
 v0.1 specifies the **local sovereign agent**: a single daimon running on a user's machine, holding their identity and memory, routing requests to LLM providers.
 
 The intent of v0.1 is to deliver the smallest possible Daimon that provides *standalone value to a single user* without depending on any network effect. If v0.1 is useful when only one person uses it, the rest of the protocol can be built incrementally.
 
-### Out of scope for v0.1
+### 1.2 v0.2 — agent owns its own money
+
+v0.2 adds two primitives that complete the "your agent acts on your behalf" promise:
+
+- A **wallet** the daimon holds and signs with (one HD seed, N derived keypairs per chain — see §14)
+- **x402 payments** — the daimon parses HTTP 402 responses, signs EIP-3009 `transferWithAuthorization` messages against the matching wallet, retries with `PAYMENT-SIGNATURE`, audits every step (§15)
+
+The two compose: any client that uses `daimon.payment.pay` (or `daimon.provider.invoke` once 40.5b lands) can buy paid resources without ever handling private keys or signing logic itself.
+
+### Out of scope for v0.1 and v0.2
 
 - Federation (agent-to-agent communication across machines) → v0.3
-- Payments → v0.2
 - Reputation → v0.4
 - Sub-agent delegation → v0.5
 - Public DID resolution and verification by third parties → v0.3
+- The daimon as a payment RECIPIENT (accepts x402 payments from other agents) → v0.3 federation territory; v0.2 is payer-only
 
-These are deferred deliberately. They require network primitives that have no value until v0.1 is solid.
+These are deferred deliberately. They require network primitives that have no value until v0.1 + v0.2 are solid.
 
 ---
 
@@ -287,6 +298,52 @@ The response envelope's optional `injected_memory_ids` field surfaces the IDs of
 
 Provider credentials never leave daimon-core. Clients invoke providers *through* the daimon, not around it.
 
+#### Wallet (v0.2)
+
+```
+daimon.wallet.list() → Wallet[]
+
+daimon.wallet.create({
+  chain: string                  // e.g. "evm:base", "evm:base-sepolia"
+}) → Wallet
+
+daimon.wallet.address({
+  chain: string
+}) → { address: string }         // EIP-55 checksummed for EVM
+
+daimon.wallet.sign({
+  chain: string,
+  digest_hex: string             // 32-byte digest, 0x-prefix optional
+}) → { signature_hex: string }   // 65 bytes [r || s || v] for EVM
+```
+
+The wallet keystore is auto-created by the unlock callback the first time `daimon unlock` runs. On that first unlock, the `daimon.identity.unlock` response carries a `mnemonic` field with the 24 BIP-39 words the daimon will use to derive all wallets — clients MUST surface this exactly once to the principal for backup. On subsequent unlocks the field is omitted. See §14 for the full wallet primitive.
+
+#### Payment (v0.2)
+
+```
+daimon.payment.pay({
+  url: string,
+  method?: string,               // default "GET"
+  headers?: { string: string },
+  body_base64?: string,          // mutually exclusive
+  body_text?: string,            // with body_base64
+  ceiling_smallest_unit?: string,// decimal; refuse to sign over this
+  validity_seconds?: number      // EIP-3009 validBefore window; default 300
+}) → {
+  status_code: number,
+  response_headers: { string: string }, // allowlist: Content-Type,
+                                         // Content-Length, Payment-Response
+  response_body_base64: string,
+  payment_response?: PaymentResponse    // parsed PAYMENT-RESPONSE header
+}
+```
+
+`daimon.payment.pay` wraps the full x402 v2 retry handshake (§15). The daimon parses the 402's `PAYMENT-REQUIRED` header, picks a compatible `PaymentRequirements` row using its wallet keystore + chain registry, builds an EIP-3009 `transferWithAuthorization` against the matching wallet, enforces `ceiling_smallest_unit` BEFORE signing (an over-ceiling 402 NEVER produces a signature on the wire), retries the request with `PAYMENT-SIGNATURE`, and decodes the result. Two new typed RPC error codes surface for SDK consumers:
+
+- `CodePaymentCeiling = -32006` — resource demanded more than the local ceiling
+- `CodePaymentUnsupported = -32007` — no wallet matches the resource's payment requirements
+
 ### 6.2 Two integration modes
 
 A client can use Daimon in either mode:
@@ -351,19 +408,23 @@ The chain forms a verifiable audit trail. v0.1 stores locally only. v0.4+ may pu
 
 **Encryption key derivation.** The 32-byte AES key is derived from the principal's Ed25519 seed via HKDF-SHA256 with info label `"daimon-activity-encryption-v1"`. The label is distinct from the memory store's `"daimon-memory-encryption-v1"` so the two stores have independent subkeys despite sharing the same root identity. The key never crosses the daimon's process boundary in plaintext: it is rederived in memory at unlock and held in the same trust scope (§9.2) as the unlocked private key. The threat model matches the memory store's (§5.1): disk theft / backup exfiltration on top of OS-layer FDE.
 
-### 8.2 Logged kinds (v0.1)
+### 8.2 Logged kinds (v0.1 + v0.2)
 
-| Kind | When |
-|---|---|
-| `daimon.created` | Genesis row, written by `daimon init` immediately after keystore generation. Payload `{version, did}`. The chain root is always this kind; entry index 0 has `prev_hash = ZeroHash`. `daimon unlock` never mutates log shape — it just opens the existing log. |
-| `memory.write` | Each memory write |
-| `memory.export` | Each export |
-| `memory.import` | Each import |
-| `provider.invoke` | Each provider call (mediated mode) |
-| `activity.queried` | Each query against the log itself |
-| `activity.verified` | Each successful chain verification (count of entries verified) |
-| `context.previewed` | Each standalone `daimon.context.get` call (`{query, matched}`); the inject-context-on-invoke path is recorded under `provider.invoke` with `injected_memory_ids` instead, to avoid double-logging a single action |
-| `key.rotated` | did:ion key rotations |
+| Kind | When | Since |
+|---|---|---|
+| `daimon.created` | Genesis row, written by `daimon init` immediately after keystore generation. Payload `{version, did}`. The chain root is always this kind; entry index 0 has `prev_hash = ZeroHash`. `daimon unlock` never mutates log shape — it just opens the existing log. | v0.1 |
+| `memory.write` | Each memory write | v0.1 |
+| `memory.export` | Each export | v0.1 |
+| `memory.import` | Each import | v0.1 |
+| `provider.invoke` | Each provider call (mediated mode) | v0.1 |
+| `activity.queried` | Each query against the log itself | v0.1 |
+| `activity.verified` | Each successful chain verification (count of entries verified) | v0.1 |
+| `context.previewed` | Each standalone `daimon.context.get` call (`{query, matched}`); the inject-context-on-invoke path is recorded under `provider.invoke` with `injected_memory_ids` instead, to avoid double-logging a single action | v0.1 |
+| `key.rotated` | did:ion key rotations | v0.1 |
+| `wallet.created` | Each `daimon.wallet.create` call. Payload `{id, chain, address, pubkey}`. The path field is implementation detail of HD derivation and intentionally omitted from the audit row. | v0.2 |
+| `payment.signed` | The daimon signed an EIP-3009 authorisation for an outbound x402 payment. Payload `{url, scheme, network, amount, asset, pay_to, from, valid_after, valid_before}` — the structural shape of the signed authorisation, not the signature bytes themselves (those ride in the PAYMENT-SIGNATURE header on the retry). | v0.2 |
+| `payment.settled` | The retried request returned a 2xx response AND any PAYMENT-RESPONSE header indicated success. Payload includes the prior `payment.signed`'s structural fields plus `{status_code, transaction, payer}` from the settlement frame. | v0.2 |
+| `payment.failed` | A payment did NOT settle. Reasons include: ceiling exceeded BEFORE signing (no `payment.signed` row precedes this one), retry transport failure, server-side rejection (non-2xx on retry), or `PAYMENT-RESPONSE.success == false`. Payload carries `{url, reason}` plus the structural fields when available. | v0.2 |
 
 **Lifecycle invariant.** A daimon provisioned via `daimon init` produces a one-entry chain immediately: the genesis `daimon.created` row is appended before init returns. Every subsequent meaningful action (memory write/export/import, provider invocation, audit query/verify, context preview) extends the chain. `daimon activity verify` against a freshly-init'd daimon reports `verified 1 entries — chain ok`. The `--force` re-init flag removes the prior `activity.log` and `memory.db` (both are signed/encrypted under the discarded identity and unreadable by the new one), so the post-`--force` invariant matches the post-fresh-init invariant: exactly one entry, the new genesis. Adopters who use `daimon-core` programmatically without going through the `daimon init` CLI are responsible for writing the genesis row themselves; `daimon activity verify` does not require it (an empty-prefix chain still verifies), but the chain root carries no semantic meaning without it.
 
@@ -447,17 +508,19 @@ The following defaults are locked in for v0.1. Each was an open question; each n
 
 ---
 
-## 12. What v0.1 explicitly does NOT solve
+## 12. What v0.1 + v0.2 explicitly do NOT solve
 
 - Discovery of other agents
 - Agent-to-agent communication
-- Payments
+- ~~Payments~~ → **Outbound x402 payments shipped in v0.2 (§15).** The daimon as a payment recipient (accepts x402 from other agents) is still v0.3 federation territory.
 - Reputation
 - Capability delegation to sub-agents
 - Public verifiability of memory or activity by third parties
 - Cloud-hosted daimons (a daimon you don't run yourself)
+- Custodial wallet mode (third-party holds keys on the principal's behalf) — v0.2's wallet primitive is strictly non-custodial; custodial integration could land in v0.2.x if there's a concrete user need (see design/v0.2-wallet.md §8.1)
+- Non-EVM payment chains — v0.2 supports EVM (Base, Base Sepolia) only; SVM (Solana) and Stellar are reserved for v0.2.x once their facilitator ecosystems mature
 
-These are by design. v0.1 must stand on its own as useful for one user before any network effects are introduced.
+These are by design. v0.1 + v0.2 must stand on their own as useful for one user before any network effects are introduced.
 
 ---
 
@@ -494,4 +557,205 @@ daimon/
 
 ---
 
-**Next milestone**: working `daimond` binary that initializes a daimon-core, generates an identity, accepts RPC, and writes/reads memory. Provider adapters next.
+## 14. Wallet (v0.2)
+
+### 14.1 Scope
+
+A wallet is a chain-bound keypair the daimon holds and uses to sign messages on the principal's behalf. v0.2 introduces:
+
+- **One BIP-39 mnemonic per principal** (24 words, 256 bits of entropy)
+- **N HD-derived keypairs** off that mnemonic via BIP-32 / BIP-44 paths
+- **EVM chains only** (`evm:base`, `evm:base-sepolia`, etc.) — all use `m/44'/60'/0'/0/i` with secp256k1, so a single seed phrase imports cleanly into MetaMask / Phantom / Rabby / any standard EVM wallet
+
+SLIP-10 derivation for non-secp256k1 curves (Solana Ed25519, Stellar Ed25519) is reserved for v0.2.x.
+
+### 14.2 On-disk format
+
+`$DAIMON_HOME/wallet.keystore` — JSON envelope, file mode 0600, structurally identical to `identity.keystore`:
+
+```json
+{
+  "version": 1,
+  "kdf": "argon2id",
+  "kdf_params": {"memory_kib": 65536, "iterations": 3, "parallelism": 4, "salt": "<b64>"},
+  "cipher": "aes-256-gcm",
+  "nonce": "<b64>",
+  "ciphertext": "<b64>"
+}
+```
+
+The encrypted payload, after Argon2id KDF + AES-256-GCM decrypt, is a JSON object:
+
+```json
+{
+  "mnemonic": "abandon abandon ... about",
+  "wallets": [
+    {
+      "id": "01K...",
+      "chain": "evm:base",
+      "path": "m/44'/60'/0'/0/0",
+      "address": "0x...",            // EIP-55 checksummed
+      "pubkey": "02...",             // 33-byte compressed secp256k1, hex
+      "created_at": 1779100000000
+    },
+    ...
+  ]
+}
+```
+
+The mnemonic is the source of truth: every `Wallet` row can be re-derived deterministically from `mnemonic + path`. The `wallets[]` index exists to preserve the "which chains has this principal created a wallet for" state across daemon restarts; on Open the daimon decrypts the plaintext into memory and signs subsequent messages by re-deriving the private key from `mnemonic + path` on each sign call, zeroing the derived key immediately after use.
+
+### 14.3 Lifecycle
+
+- **Auto-create on first unlock.** When `daimon unlock` runs and finds no `wallet.keystore` at `$DAIMON_HOME/`, the unlock callback generates a fresh 24-word BIP-39 mnemonic, encrypts the empty `{mnemonic, wallets: []}` plaintext under the same Argon2id KEK as the identity keystore, and writes the file at mode 0600. The unlock RPC response carries a `mnemonic: string[]` field on that ONE call and never again. Clients MUST surface the mnemonic to the principal once for backup. The daemon does not retain a separate copy: losing the file AND the mnemonic is unrecoverable.
+
+- **Subsequent unlocks** decrypt the existing keystore using the same password as the identity keystore. Wallet failures (missing file, corrupted, future-version format) are non-fatal: the daimon stays unlocked for everything else and surfaces `CodeInvalidRequest` ("wallet keystore not loaded") on every `daimon.wallet.*` RPC until repaired.
+
+- **`daimon.wallet.create(chain)`** derives the next HD path for that chain's coin type (60 for EVM), persists the new wallet row, and writes a `wallet.created` audit row (§8.2). v0.2 enforces one wallet per chain label — `ErrChainAlreadyExists` for duplicates.
+
+- **Signing** is per-call: the daimon re-derives the private key from `mnemonic + path`, signs the digest with ECDSA over secp256k1, returns the 65-byte `[r || s || v]` EVM signature with `v ∈ {27, 28}`, and zeros the derived key. The mnemonic itself stays in process memory between unlock and process exit (or `daimon.identity.lock`, post-v0.2).
+
+### 14.4 EVM address derivation
+
+For an EVM wallet derived at path `m/44'/60'/0'/0/i`:
+
+1. Compute the secp256k1 private key from `BIP32(BIP39_seed(mnemonic, ""), path)`.
+2. Derive the uncompressed public key: 65 bytes, leading `0x04` plus 32-byte X plus 32-byte Y.
+3. `keccak256(uncompressed[1:])` — the 32-byte legacy-Keccak hash of the 64-byte XY body.
+4. The Ethereum address is `hash[12:]` — the last 20 bytes, hex-encoded with `0x` prefix.
+5. EIP-55 checksumming: re-hash the lowercase hex address; uppercase each character at position `i` where the `i`-th nibble of the recomputed hash is `≥ 8`.
+
+The same address is valid on every EVM chain (Base, Mainnet, Polygon, Arbitrum, ...) — the `chain` label in the wallet record is the principal's declaration of intent, not a cryptographic property.
+
+### 14.5 Test vector
+
+The canonical BIP-39 12-word `abandon ... about` vector at `m/44'/60'/0'/0/0` derives to:
+
+```
+0x9858EfFD232B4033E47d90003D41EC34EcaEda94
+```
+
+The daimon's reference implementation anchors this in a test (`internal/wallet/wallet_test.go::TestDerive_EVMAddressMatchesPublishedVector`) so any future refactor that drifts the derivation pipeline trips CI immediately. Third-party Daimon-compatible implementations SHOULD include the same test.
+
+---
+
+## 15. Payments / x402 (v0.2)
+
+### 15.1 Scope
+
+v0.2 ships **outbound x402 payments**: the daimon parses HTTP 402 responses, signs an EIP-3009 `transferWithAuthorization` against the matching wallet, retries the request with `PAYMENT-SIGNATURE`, and audits every step.
+
+What v0.2 does NOT do:
+- Accept x402 payments from other agents (the daimon as RECIPIENT) — v0.3 federation
+- Talk to facilitators (`/verify`, `/settle`) — facilitator interaction is the resource server's concern; the daimon-as-payer just constructs valid PAYMENT-SIGNATURE headers
+- Submit transactions on-chain itself — the resource server's facilitator does that
+
+### 15.2 Wire format (x402 v2)
+
+Reference: <https://docs.x402.org/core-concepts/http-402>. The daimon implements x402 v2 in full.
+
+```
+C ── GET /resource ────────────────────────────────────────────► S
+C ◄── 402 Payment Required ────────────────────────────────────  S
+       Header: Payment-Required: <base64(PaymentRequiredEnvelope)>
+
+C ── GET /resource ────────────────────────────────────────────► S
+       Header: Payment-Signature: <base64(PaymentPayload)>
+C ◄── 200 OK ──────────────────────────────────────────────────  S
+       Header: Payment-Response: <base64(PaymentResponse)>
+       Body: <resource content>
+```
+
+`PaymentRequiredEnvelope` enumerates the server's accepted `(scheme, network, asset, amount)` tuples. The daimon picks the first row matching `scheme="exact" AND network in registry AND wallet for that chain exists AND asset == registered USDC contract`.
+
+`PaymentPayload` for the EVM exact scheme:
+
+```json
+{
+  "x402Version": 1,
+  "scheme": "exact",
+  "network": "base",
+  "payload": {
+    "signature": "0x<130 hex chars: r || s || v>",
+    "authorization": {
+      "from": "0x...",         // payer wallet address
+      "to": "0x...",           // PaymentRequirements.PayTo
+      "value": "100",          // PaymentRequirements.MaxAmountRequired (decimal)
+      "validAfter": "0",
+      "validBefore": "1779135503",  // unix seconds; default = now + 5 min
+      "nonce": "0x<64 hex chars: 32 random bytes>"
+    }
+  }
+}
+```
+
+### 15.3 EIP-712 + EIP-3009 hashing
+
+The signature is over a 32-byte digest computed per EIP-712 §3:
+
+```
+digest = keccak256(0x1901 || domainSeparator || structHash)
+
+domainSeparator = keccak256(abi.encode(
+    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+    keccak256(name),
+    keccak256(version),
+    chainId,
+    verifyingContract
+))
+
+structHash = keccak256(abi.encode(
+    keccak256("TransferWithAuthorization(address from,address to,uint256 value,uint256 validAfter,uint256 validBefore,bytes32 nonce)"),
+    from, to, value, validAfter, validBefore, nonce
+))
+```
+
+All scalars are 32-byte right-padded big-endian per Solidity ABI; addresses are zero-padded on the left to 32 bytes; bytes32 is taken as-is.
+
+The two type-string hashes are precomputed in the reference implementation:
+
+```
+EIP712Domain typehash:               0x8b73c3c69bb8fe3d512ecc4cf759cc79239f7b179b0ffacaa9a75d522b39400f
+TransferWithAuthorization typehash:  0x7c7c6cdb67a18743f49ec6fa9b35f50d52ed05cbed4cc592e13b44501c1a2267
+```
+
+Third-party implementations SHOULD verify their hashing pipeline produces these byte values for the canonical type strings.
+
+### 15.4 Chain registry (v0.2)
+
+The reference implementation hardcodes:
+
+| x402 network | chain ID | USDC contract | EIP-712 name | EIP-712 version |
+|---|---|---|---|---|
+| `base` | 8453 | `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913` | `USD Coin` | `2` |
+| `base-sepolia` | 84532 | `0x036CbD53842c5426634e7929541eC2318f3dCF7e` | `USDC` | `2` |
+
+Adding chains (Polygon, Arbitrum, ...) or alternative tokens is a v0.2.x change; the wire format is unchanged, only the registry grows. Multi-token / arbitrary-asset support (where the resource server names any ERC-20 and the daimon fetches the EIP-712 domain via chain RPC) is reserved for v0.2.x.
+
+### 15.5 Ceiling enforcement
+
+The daimon-as-payer MUST refuse to sign authorisations whose value exceeds a per-payment ceiling. The ceiling is configured per-call via the `ceiling_smallest_unit` parameter (decimal string, smallest-unit of the asset — for USDC, `100000` ≡ $0.10). The check fires BEFORE signing — an over-ceiling 402 produces a `payment.failed` audit row with `reason="ceiling exceeded"` and ZERO `payment.signed` rows. A signed authorisation is a leak even if the SDK never transmits it (anyone holding the signature could replay it within `validBefore`); the ceiling is the principal's only defense against a malicious endpoint quoting enormous prices.
+
+The reference implementation's typed RPC error for ceiling rejection is `CodePaymentCeiling = -32006`; third-party implementations SHOULD propagate this code.
+
+### 15.6 Audit-row chain
+
+A successful payment writes two consecutive rows to the activity log:
+
+```
+payment.signed   { url, scheme, network, amount, asset, pay_to, from, valid_after, valid_before }
+                    ↓
+payment.settled  { url, scheme, network, amount, asset, pay_to, payer, status_code, transaction }
+```
+
+A rejected payment writes ONE row (no `payment.signed`):
+
+```
+payment.failed   { url, reason, ... }
+```
+
+Both rows are chained + Ed25519-signed under the principal's identity key, walkable by `daimon.activity.verify`. Downstream auditors can reconstruct payment history without any privileged access.
+
+---
+
+**Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.0 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.
