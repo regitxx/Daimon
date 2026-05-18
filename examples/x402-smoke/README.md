@@ -20,7 +20,33 @@ move stablecoins. The `PAYMENT-RESPONSE` it emits names a synthetic
 transaction hash so daimon's audit log gets a `payment.settled` row,
 but no blockchain settlement happens.
 
-## Prerequisites
+## Quick start: one-line runner
+
+If you just want to see the smoke green end-to-end, run the orchestrator
+from the repo root:
+
+```sh
+./examples/x402-smoke/run.sh
+```
+
+It does the whole dance: builds binaries, installs the Python SDK
+in editable mode if missing, builds the TS SDK dist if missing,
+allocates a temp `DAIMON_HOME`, init+unlocks the daimon (password
+piped non-interactively), creates an `evm:base` wallet, starts the
+mock x402 server, runs both SDK smokes, runs `daimon activity verify`,
+asserts the audit log has 2 `payment.signed` + 2 `payment.settled`
+rows both attributing to the wallet, and tears down the mock server.
+Leaves the `DAIMON_HOME` on disk for post-mortem; rm it when done.
+
+The runner is also wired into CI as the `x402-smoke` job in
+`.github/workflows/ci.yml` — so every push to `main` re-verifies that
+the Python and TS SDK EIP-3009 encoders are still wire-equivalent
+against a real-network mock server.
+
+The rest of this README walks through what the runner does step by
+step, for cases where you want to inspect or modify individual pieces.
+
+## Prerequisites (manual run)
 
 1. **Build the daimon binaries + the mock server.** From the repo root:
    ```sh
