@@ -114,6 +114,19 @@ const (
 	// not yet wired in this build. Surfaces specifically for forthcoming
 	// provider.* methods.
 	CodeNotImplemented = -32005
+
+	// CodePaymentCeiling — the resource demanded more value than the
+	// caller's configured per-payment ceiling allows. The daimon refuses
+	// to sign; callers can retry with a higher ceiling if intentional.
+	// v0.2 (phase 40.5).
+	CodePaymentCeiling = -32006
+
+	// CodePaymentUnsupported — none of the resource's PaymentRequirements
+	// rows match a (scheme, network, asset) tuple the daimon's wallet
+	// store can satisfy. Either the wallet for the requested chain has
+	// not been created, the chain is not in v0.2's allowlist, or the
+	// asset isn't the canonical USDC contract this build supports.
+	CodePaymentUnsupported = -32007
 )
 
 // nullID is the JSON-RPC null id, used in responses where no client id could

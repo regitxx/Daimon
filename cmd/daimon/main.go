@@ -56,6 +56,8 @@ func main() {
 		exitOnErr(cmdActivity(args))
 	case "wallet":
 		exitOnErr(cmdWallet(args))
+	case "payment":
+		exitOnErr(cmdPayment(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -154,9 +156,22 @@ Usage:
               --chain <c>   given chain.
               [--json]
   daimon wallet sign        Low-level: sign a 32-byte digest. Most callers
-              --chain <c>   should use daimon.payment.pay (phase 40.3+)
+              --chain <c>   should use daimon.payment.pay (phase 40.5+)
               --digest <h>  instead — this is for advanced/debug use.
               [--json]
+
+  daimon payment pay        Pay an x402-protected URL end-to-end. Buffers
+              <url>         the request body if any, dispatches the
+              [--method m]  outbound HTTP, parses 402 → builds + signs
+              [--body s]    EIP-3009 → retries with PAYMENT-SIGNATURE.
+              [--ceiling-usd 0.10]  Per-payment USD cap; 0 disables
+                            (not recommended). Default: $0.10.
+              [--validity-seconds 300]  Override EIP-3009 validBefore
+                            window. Default: 5 min.
+              [--header H]  Extra request headers, 'Name: value' form,
+                            comma-separated.
+              [--json]      Emit full RPC result envelope. Default:
+                            HTTP status to stderr, body to stdout.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
