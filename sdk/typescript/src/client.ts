@@ -69,6 +69,71 @@ export interface ActivityAppendParams {
   payload?: JsonObject;
 }
 
+// --- v0.2 surface: wallet + payment -----------------------------------------
+
+/** Single entry returned by `daimon.wallet.{list,create}`. */
+export interface Wallet {
+  id: string;
+  chain: string;
+  path: string;
+  /** EIP-55-checksummed EVM address. */
+  address: string;
+  /** hex-encoded 33-byte compressed secp256k1 public key. */
+  pubkey: string;
+  /** unix milliseconds */
+  created_at: number;
+}
+
+export interface WalletCreateParams {
+  chain: string;
+}
+
+export interface WalletAddressParams {
+  chain: string;
+}
+
+export interface WalletSignParams {
+  chain: string;
+  /** 32-byte digest, hex-encoded; `0x` prefix optional. */
+  digestHex: string;
+}
+
+export interface PaymentPayParams {
+  url: string;
+  /** Defaults to `GET`. */
+  method?: string;
+  /** Extra request headers — must not include `Payment-Signature`. */
+  headers?: Record<string, string>;
+  /** Request body. `Uint8Array` rides via base64; `string` rides as text. */
+  body?: Uint8Array | string;
+  /**
+   * Per-payment ceiling in the asset's smallest unit (USDC has 6
+   * decimals — 100000 ≡ $0.10). `undefined` disables the ceiling —
+   * STRONGLY DISCOURAGED in production. Accept as bigint / number /
+   * string for ergonomics; SDK stringifies on the wire.
+   */
+  ceilingSmallestUnit?: bigint | number | string;
+  /** EIP-3009 validBefore window override, in seconds. Default 300. */
+  validitySeconds?: number;
+}
+
+/** PAYMENT-RESPONSE structure parsed by the daemon. */
+export interface PaymentResponse {
+  success: boolean;
+  transaction?: string;
+  network?: string;
+  payer?: string;
+}
+
+export interface PaymentPayResult {
+  statusCode: number;
+  /** Small allowlist: Content-Type, Content-Length, Payment-Response. */
+  responseHeaders: Record<string, string>;
+  /** Decoded response body (SDK base64-decodes the wire form). */
+  body: Uint8Array;
+  paymentResponse: PaymentResponse | null;
+}
+
 class IdentityNamespace {
   constructor(private readonly c: Client) {}
 
@@ -208,11 +273,146 @@ class ActivityNamespace {
   }
 }
 
+class WalletNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * List all wallets in the keystore.
+   * `null` result is normalised to `[]` (mirrors memory.search,
+   * activity.query).
+   */
+  async list(): Promise<Wallet[]> {
+    const result = await this.c._call("daimon.wallet.list", undefined);
+    return (result as Wallet[] | null) ?? [];
+  }
+
+  /**
+   * Derive a new HD wallet for `chain` and persist it.
+   *
+   * v0.2 supports EVM chains only (`evm:base`, `evm:base-sepolia`,
+   * etc.). Throws `RPCError` for unsupported chains or duplicate-chain
+   * requests.
+   */
+  async create(params: WalletCreateParams): Promise<Wallet> {
+    return (await this.c._call("daimon.wallet.create", {
+      chain: params.chain,
+    })) as Wallet;
+  }
+
+  /**
+   * Convenience: return just the EIP-55-checksummed address for the
+   * wallet bound to `chain`. Throws `RPCError` with code `-32002`
+   * if no wallet exists for the chain.
+   */
+  async address(params: WalletAddressParams): Promise<string> {
+    const result = (await this.c._call("daimon.wallet.address", {
+      chain: params.chain,
+    })) as { address: string };
+    return result.address;
+  }
+
+  /**
+   * Low-level signing primitive. Returns the 65-byte
+   * `[r || s || v]` EVM signature as a `0x`-prefixed hex string.
+   * Most callers should use `payment.pay` instead — it builds the
+   * EIP-3009 digest internally.
+   */
+  async sign(params: WalletSignParams): Promise<string> {
+    const result = (await this.c._call("daimon.wallet.sign", {
+      chain: params.chain,
+      digest_hex: params.digestHex,
+    })) as { signature_hex: string };
+    return result.signature_hex;
+  }
+}
+
+class PaymentNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * Pay an x402-protected URL end-to-end. Returns the resource
+   * response decoded into a structured shape.
+   *
+   * Throws `RPCError`:
+   * - code `-32006` if the resource demanded more than
+   *   `ceilingSmallestUnit`
+   * - code `-32007` if no wallet matches the resource's payment
+   *   requirements
+   * - code `-32603` for transport / server errors
+   */
+  async pay(params: PaymentPayParams): Promise<PaymentPayResult> {
+    const wire: JsonObject = {
+      url: params.url,
+      method: params.method ?? "GET",
+    };
+    if (params.headers !== undefined) wire["headers"] = params.headers;
+
+    if (params.body !== undefined) {
+      if (params.body instanceof Uint8Array) {
+        wire["body_base64"] = uint8ToBase64(params.body);
+      } else if (typeof params.body === "string") {
+        wire["body_text"] = params.body;
+      } else {
+        throw new TypeError("body must be Uint8Array, string, or undefined");
+      }
+    }
+    if (params.ceilingSmallestUnit !== undefined) {
+      wire["ceiling_smallest_unit"] = String(params.ceilingSmallestUnit);
+    }
+    if (params.validitySeconds !== undefined) {
+      wire["validity_seconds"] = params.validitySeconds;
+    }
+
+    const result = (await this.c._call("daimon.payment.pay", wire)) as {
+      status_code?: number;
+      response_headers?: Record<string, string>;
+      response_body_base64?: string;
+      payment_response?: PaymentResponse | null;
+    };
+    return {
+      statusCode: result.status_code ?? 0,
+      responseHeaders: result.response_headers ?? {},
+      body: result.response_body_base64
+        ? base64ToUint8(result.response_body_base64)
+        : new Uint8Array(),
+      paymentResponse: result.payment_response ?? null,
+    };
+  }
+}
+
+// --- base64 helpers ---------------------------------------------------------
+// Node's Buffer is the canonical base64 path; using globalThis lookups so
+// the SDK doesn't import @types/node into its surface unconditionally.
+
+function uint8ToBase64(b: Uint8Array): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const B: any = (globalThis as any).Buffer;
+  if (B) return B.from(b).toString("base64");
+  // Browser fallback — works for arbitrary byte values.
+  let bin = "";
+  for (const x of b) bin += String.fromCharCode(x);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (globalThis as any).btoa(bin);
+}
+
+function base64ToUint8(s: string): Uint8Array {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const B: any = (globalThis as any).Buffer;
+  if (B) return new Uint8Array(B.from(s, "base64"));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const bin: string = (globalThis as any).atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
 export class Client {
   readonly identity: IdentityNamespace;
   readonly memory: MemoryNamespace;
   readonly provider: ProviderNamespace;
   readonly activity: ActivityNamespace;
+  readonly wallet: WalletNamespace;
+  readonly payment: PaymentNamespace;
 
   private readonly socket: string;
   private readonly timeoutMs?: number;
@@ -231,6 +431,8 @@ export class Client {
     this.memory = new MemoryNamespace(this);
     this.provider = new ProviderNamespace(this);
     this.activity = new ActivityNamespace(this);
+    this.wallet = new WalletNamespace(this);
+    this.payment = new PaymentNamespace(this);
   }
 
   /** Resolved Unix-socket path the client dials. */

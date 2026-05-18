@@ -21,6 +21,14 @@ export type {
   ProviderStreamParams,
   ActivityQueryParams,
   ActivityAppendParams,
+  // v0.2 surface
+  Wallet,
+  WalletCreateParams,
+  WalletAddressParams,
+  WalletSignParams,
+  PaymentPayParams,
+  PaymentPayResult,
+  PaymentResponse,
 } from "./client.js";
 export { StreamHandle, DEFAULT_STREAM_TIMEOUT_MS } from "./stream.js";
 export {

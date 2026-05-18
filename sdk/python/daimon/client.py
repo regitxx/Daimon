@@ -269,6 +269,163 @@ class _ActivityNamespace:
         return self._c._call("daimon.activity.verify", {})
 
 
+class _WalletNamespace:
+    """Verbs under ``daimon.wallet.*`` (v0.2, phase 40.2).
+
+    The wallet keystore is auto-created by the daemon on first
+    ``daimon unlock`` — at that moment the unlock response carries a
+    ``mnemonic`` field (24 BIP-39 words) that callers MUST surface to
+    the principal exactly once for backup. The daemon does NOT keep a
+    copy: lose both the mnemonic AND the on-disk keystore file and the
+    wallets it derives become permanently inaccessible.
+
+    All verbs require the daemon to be unlocked AND the wallet keystore
+    to be loaded (the normal post-unlock state). If the wallet keystore
+    fails to open for non-fatal reasons every verb returns an
+    :class:`RPCError` with code ``-32600`` ("wallet keystore not
+    loaded").
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def list(self) -> list[dict]:
+        """List all wallets in the keystore.
+
+        Returns a list of ``{id, chain, path, address, pubkey,
+        created_at}``. Empty keystore returns ``[]`` (mirrors
+        memory.list and activity.query's null-normalisation).
+        """
+        result = self._c._call("daimon.wallet.list", None)
+        return result or []
+
+    def create(self, *, chain: str) -> dict:
+        """Derive a new HD wallet for ``chain`` and persist it.
+
+        v0.2 supports EVM chains (``evm:base``, ``evm:base-sepolia``,
+        and any other ``evm:*`` label — they all use the same
+        secp256k1 derivation under m/44'/60'/0'/0/N). Raises
+        :class:`RPCError` for unsupported chains or duplicate-chain
+        requests (one wallet per chain in v0.2).
+
+        Returns ``{id, chain, path, address, pubkey, created_at}``.
+        """
+        return self._c._call("daimon.wallet.create", {"chain": chain})
+
+    def address(self, *, chain: str) -> str:
+        """Return just the EIP-55-checksummed address for ``chain``.
+
+        Convenience wrapper over the structured ``list`` / ``create``
+        results. Raises :class:`RPCError` with code ``-32002``
+        (CodeNotFound) if no wallet exists for the chain.
+        """
+        result = self._c._call("daimon.wallet.address", {"chain": chain})
+        return result["address"]
+
+    def sign(self, *, chain: str, digest_hex: str) -> str:
+        """Low-level: sign a 32-byte digest with the chain's wallet key.
+
+        Returns the 65-byte EVM ``[r || s || v]`` signature as a
+        ``0x``-prefixed hex string. Most callers should use
+        :meth:`_PaymentNamespace.pay` instead — it builds the
+        EIP-3009 digest internally.
+
+        ``digest_hex`` may be ``0x``-prefixed or bare hex; the daemon
+        accepts both.
+        """
+        result = self._c._call(
+            "daimon.wallet.sign",
+            {"chain": chain, "digest_hex": digest_hex},
+        )
+        return result["signature_hex"]
+
+
+class _PaymentNamespace:
+    """Verbs under ``daimon.payment.*`` (v0.2, phase 40.5).
+
+    Wraps the daimon's internal x402 client. Each call dispatches an
+    outbound HTTP request through the 402-retry handshake:
+    PAYMENT-REQUIRED → pick a compatible PaymentRequirement → build +
+    sign EIP-3009 authorisation → retry with PAYMENT-SIGNATURE → parse
+    PAYMENT-RESPONSE. The wallet keystore + activity log are both used
+    on the daemon side; the SDK just shuttles the request and result.
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def pay(
+        self,
+        *,
+        url: str,
+        method: str = "GET",
+        headers: dict[str, str] | None = None,
+        body: bytes | str | None = None,
+        ceiling_smallest_unit: int | str | None = None,
+        validity_seconds: int | None = None,
+    ) -> dict:
+        """Pay an x402-protected URL end-to-end.
+
+        ``body`` may be ``bytes`` (sent verbatim) or ``str`` (sent as
+        UTF-8 text — the daemon's wire surface accepts both shapes via
+        separate ``body_base64`` / ``body_text`` fields and the SDK
+        picks based on the Python type).
+
+        ``ceiling_smallest_unit`` caps the value the daimon will sign
+        in a single payment, in the asset's smallest unit (USDC has
+        6 decimals, so 100000 ≡ $0.10). ``None`` disables the ceiling
+        — STRONGLY DISCOURAGED in production code. The default
+        ceiling on the CLI is 100000; SDK callers should pass an
+        explicit value.
+
+        Returns ``{status_code, response_headers, body, payment_response}``:
+
+        - ``status_code`` — final HTTP status from the resource server
+        - ``response_headers`` — small allowlist (Content-Type,
+          Content-Length, Payment-Response)
+        - ``body`` — bytes (the SDK base64-decodes the wire form)
+        - ``payment_response`` — parsed PAYMENT-RESPONSE structure
+          (``None`` if absent or malformed)
+
+        Raises:
+        - :class:`RPCError` with code ``-32006`` if the resource
+          demanded more than ``ceiling_smallest_unit`` (audit-logged
+          as ``payment.failed`` with reason "ceiling exceeded")
+        - :class:`RPCError` with code ``-32007`` if no wallet matches
+          the resource's PaymentRequirements
+        - :class:`RPCError` with code ``-32603`` for transport or
+          server errors
+        """
+        import base64 as _base64  # local import keeps top-level light
+
+        params: dict[str, Any] = {"url": url, "method": method}
+        if headers is not None:
+            params["headers"] = headers
+        if isinstance(body, bytes):
+            params["body_base64"] = _base64.b64encode(body).decode("ascii")
+        elif isinstance(body, str):
+            params["body_text"] = body
+        elif body is not None:
+            raise TypeError(f"body must be bytes, str, or None (got {type(body).__name__})")
+        if ceiling_smallest_unit is not None:
+            params["ceiling_smallest_unit"] = str(ceiling_smallest_unit)
+        if validity_seconds is not None:
+            params["validity_seconds"] = validity_seconds
+
+        result = self._c._call("daimon.payment.pay", params)
+        # Decode the body once on the SDK side so callers don't have
+        # to know about the wire's base64 envelope.
+        decoded_body = b""
+        if result.get("response_body_base64"):
+            decoded_body = _base64.b64decode(result["response_body_base64"])
+        return {
+            "status_code": result.get("status_code", 0),
+            "response_headers": result.get("response_headers") or {},
+            "body": decoded_body,
+            "payment_response": result.get("payment_response"),
+        }
+
+
 class Client:
     """Synchronous Daimon client over the local Unix socket.
 
@@ -302,6 +459,8 @@ class Client:
         self.memory = _MemoryNamespace(self)
         self.provider = _ProviderNamespace(self)
         self.activity = _ActivityNamespace(self)
+        self.wallet = _WalletNamespace(self)
+        self.payment = _PaymentNamespace(self)
 
     @property
     def socket_path(self) -> Path:

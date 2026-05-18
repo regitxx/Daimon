@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **`client.wallet` namespace** (v0.2 phase 40.6 — mirrors phases 40.1+40.2
+  on the daemon side). Verbs: `list()`, `create(chain=)`,
+  `address(chain=)`, `sign(chain=, digest_hex=)`. Wraps the BIP-39/BIP-32
+  HD wallet keystore the daemon auto-creates on first unlock. v0.2 ships
+  EVM chains only (`evm:base`, `evm:base-sepolia`, etc.); unsupported
+  chains surface as `RPCError` with code `-32602`.
+- **`client.payment.pay` verb** (v0.2 phase 40.6 — mirrors phase 40.5a on
+  the daemon side). Pays an x402-protected URL end-to-end: parses the
+  resource's `PAYMENT-REQUIRED` header, signs an EIP-3009
+  `transferWithAuthorization` against the matching wallet, retries with
+  `PAYMENT-SIGNATURE`, decodes the response. Accepts `bytes` or `str`
+  for the request body (the SDK picks `body_base64` or `body_text`
+  internally) and returns a structured `{status_code, response_headers,
+  body, payment_response}` dict.
+- **Typed RPC error codes for the payment surface**: `-32006`
+  ("payment exceeds local ceiling") and `-32007` ("no compatible
+  requirement") propagate through `RPCError.code` so callers can
+  branch on them without string-matching the message.
 
 ## [0.1.0] — 2026-05-12
 
