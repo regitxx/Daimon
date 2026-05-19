@@ -4,15 +4,22 @@ Thin Python client over the Daimon daemon's Unix-socket JSON-RPC surface
 (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI's wire-level behaviour: one
 connection per RPC, no pipelining, JSON-RPC 2.0.
 
-> Status: v0.1.0 — first GA release. Identity, memory, provider (list /
-> invoke / stream), and activity verbs all surfaced.
+> Status: v0.1.0 GA on `latest` (identity / memory / provider /
+> activity verbs). v0.2.0-dev.0 pre-release on the `--pre` channel
+> adds wallet + x402 payment verbs.
 
 ## Install
 
-From PyPI:
+Default install — v0.1.0 GA:
 
 ```
 pip install daimon-protocol
+```
+
+Pre-release install — v0.2.0-dev.0 with wallet + x402 payments:
+
+```
+pip install --pre daimon-protocol
 ```
 
 From a checkout of the Daimon repo:
@@ -78,6 +85,61 @@ client.activity.append(kind="custom.event", payload={"n": 1})
 entries = client.activity.query(limit=20)
 result = client.activity.verify()                  # {"verified": N, "ok": True}
 ```
+
+## Wallet + payments (v0.2 pre-release)
+
+Available in `0.2.0.dev0` (`pip install --pre daimon-protocol`). The
+wallet keystore is auto-created by the daemon on first `daimon unlock`
+— the 24-word BIP-39 mnemonic is surfaced exactly once in that
+unlock's RPC response. Wallets are MetaMask-compatible: importing the
+mnemonic into MetaMask reproduces the same address the daimon derived.
+
+```python
+# Derive a fresh EVM wallet for Base mainnet
+w = client.wallet.create(chain="evm:base")
+print(w["address"])  # 0x... (EIP-55 checksummed)
+
+# List wallets in the keystore
+for w in client.wallet.list():
+    print(f"{w['chain']:20s} {w['address']}")
+
+# Quick lookup by chain
+addr = client.wallet.address(chain="evm:base")
+
+# Pay an x402-protected URL end-to-end. The daimon parses the
+# 402's PAYMENT-REQUIRED header, signs EIP-3009 transferWithAuthorization
+# with the matching wallet, and retries with PAYMENT-SIGNATURE.
+# ceiling_smallest_unit caps the payment in USDC smallest-unit (6 dec):
+# 100000 == $0.10.
+resp = client.payment.pay(
+    url="https://protected.example.com/api/data",
+    method="POST",
+    body=b'{"prompt": "hi"}',
+    ceiling_smallest_unit=100_000,
+)
+print(resp["status_code"], resp["body"])
+if resp["payment_response"]:
+    pr = resp["payment_response"]
+    print(f"settled: tx={pr['transaction']} payer={pr['payer']}")
+```
+
+The audit log gains `wallet.created`, `payment.signed`, and
+`payment.settled` rows automatically — every wallet generation and
+every payment chains into the same Ed25519-signed log that carries
+the v0.1 memory and provider rows. Walk the whole chain with
+`client.activity.verify()`.
+
+Typed RPC error codes for the payment surface propagate via
+`RPCError.code`:
+
+- `-32006` — payment exceeds local ceiling. The daimon refused to
+  sign; no on-the-wire signature was emitted.
+- `-32007` — no wallet in the keystore matches the resource's
+  PaymentRequirements (chain not in registry, or wallet for that
+  chain not yet created).
+
+See [`examples/x402-smoke`](../../examples/x402-smoke) for an
+end-to-end runnable example against a local mock x402 server.
 
 ## Errors
 

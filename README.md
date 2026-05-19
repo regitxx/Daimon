@@ -22,15 +22,15 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — v0.1 in tree, being polished toward release.
+**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.0 pre-release shipping on `--pre` / `@dev` channels.
 
-The v0.1 surface is implemented end-to-end: a Go daemon (`daimond`) and CLI (`daimon`) plus first-party SDKs in Python and TypeScript at full RPC parity. Identity, encrypted persistent memory, signed activity log, four provider adapters (Claude / OpenAI / Ollama / LM Studio — all streaming), and a conversational chat REPL all ship. 287 Go test pass-lines + 46 pytest cases + 47 vitest cases run on every commit (see CI badge above).
+The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release. 329 Go test pass-lines + 61 pytest cases + 61 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server.
 
-- [`SPEC.md`](./SPEC.md) — the protocol document
+- [`SPEC.md`](./SPEC.md) — the protocol document (v0.1 + v0.2)
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
 - [`JOURNAL.md`](./JOURNAL.md) — chronological build log
 
-## Try it
+## Try v0.1 — memory + provider routing
 
 ```sh
 git clone https://github.com/regitxx/Daimon.git && cd Daimon
@@ -46,6 +46,25 @@ Or use one of the SDKs:
 - [`sdk/python`](./sdk/python) — `pip install daimon-protocol`, then `from daimon import Client`
 - [`sdk/typescript`](./sdk/typescript) — `npm install @daimon-protocol/sdk`, then `import { Client } from "@daimon-protocol/sdk"`
 - [`examples/streaming`](./examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through the same daemon, audit chain verified three ways
+
+## Try v0.2 — wallet + x402 payments (pre-release)
+
+The v0.2 surface adds a wallet the daimon holds + signs with, and end-to-end x402 payment handling. Default `pip install daimon-protocol` and `npm install @daimon-protocol/sdk` still resolve to v0.1.0 stable; opt into the v0.2 surface via the pre-release channels:
+
+```sh
+# Pin the SDK pre-release
+pip install --pre daimon-protocol         # or @dev on npm:
+npm install @daimon-protocol/sdk@dev
+
+# From a repo checkout (covers both daemon binaries):
+./bin/daimon unlock                       # auto-creates wallet keystore + surfaces 24-word mnemonic ONCE
+./bin/daimon wallet create --chain evm:base
+./bin/daimon payment pay https://example.com/paid --ceiling-usd 0.10
+```
+
+[`examples/x402-smoke`](./examples/x402-smoke) — cross-language x402 reference: both SDKs pay a mock x402 server through one daimon; mock server cryptographically verifies the EIP-3009 signature recovers to the wallet's address (same property a real facilitator checks before settling on-chain). Run end-to-end in 30 seconds with `./examples/x402-smoke/run.sh`.
+
+v0.2.0 GA cuts once live Base Sepolia settlement against a real x402-protected endpoint is verified (phase 40.4). Cryptographic surface is already self-tested by the CI smoke shard.
 
 ## What composes with what
 
@@ -75,8 +94,8 @@ A single daimon running on your machine. Holds your identity and memory. Routes 
 
 | Phase | Months | Ships |
 |---|---|---|
-| v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 4 provider adapters (in tree; polish toward release) |
-| v0.2 | 2–4 | x402 payment integration, agent wallet |
+| v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 4 provider adapters ✅ **shipped GA 2026-05-12** |
+| v0.2 | 2–4 | x402 payment integration, agent wallet ✅ **pre-release on PyPI `--pre` / npm `@dev` 2026-05-18**; GA blocked on live Base Sepolia settlement |
 | v0.3 | 4–6 | A2A discovery, federation, encrypted channels |
 | v0.4 | 6–9 | Biscuit-token capability delegation, reputation primitive |
 | v0.5 | 9–12 | First labor-market wedge: post-task / agent-bid / escrow |
