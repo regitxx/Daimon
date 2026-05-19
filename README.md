@@ -22,9 +22,9 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.0 pre-release shipping on `--pre` / `@dev` channels.
+**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.1 pre-release shipping on `--pre` / `@dev` channels.
 
-The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release. 329 Go test pass-lines + 61 pytest cases + 61 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server.
+The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release — including the export-and-import seed lifecycle (`daimon wallet show-mnemonic` to re-display the seed, `daimon wallet recover` to import one from an existing backup or external wallet). 343 Go test pass-lines + 63 pytest cases + 63 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server.
 
 - [`SPEC.md`](./SPEC.md) — the protocol document (v0.1 + v0.2)
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
@@ -60,7 +60,14 @@ npm install @daimon-protocol/sdk@dev
 ./bin/daimon unlock                       # auto-creates wallet keystore + surfaces 24-word mnemonic ONCE
 ./bin/daimon wallet create --chain evm:base
 ./bin/daimon payment pay https://example.com/paid --ceiling-usd 0.10
+
+# Forgot to write the mnemonic down? Re-display it (password-gated):
+./bin/daimon wallet show-mnemonic
+# Already have a 24-word backup elsewhere? Use THAT seed instead (offline, before first unlock):
+./bin/daimon wallet recover
 ```
+
+The seed lifecycle is fully under user control. `show-mnemonic` re-runs the full Argon2id KDF + AES-GCM-decrypt against the on-disk keystore (NOT the in-memory unlocked state), so the operation is a genuine "prove you know the password right now" attestation — wrong password surfaces a typed `-32008 CodeWrongPassword` distinct from "daemon is locked." `recover` is offline-only and refuses to overwrite a non-empty keystore, so an existing wallet can never be silently orphaned. The same canonical 12-word BIP-39 test vector (`abandon ... about` → `0x9858EfFD…EcaEda94`) that every external derivation tool (iancoleman.io/bip39, MetaMask, Phantom) produces is pinned in `internal/wallet`'s tests as an interop fixture.
 
 [`examples/x402-smoke`](./examples/x402-smoke) — cross-language x402 reference: both SDKs pay a mock x402 server through one daimon; mock server cryptographically verifies the EIP-3009 signature recovers to the wallet's address (same property a real facilitator checks before settling on-chain). Run end-to-end in 30 seconds with `./examples/x402-smoke/run.sh`.
 

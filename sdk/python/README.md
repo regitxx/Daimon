@@ -5,7 +5,7 @@ Thin Python client over the Daimon daemon's Unix-socket JSON-RPC surface
 connection per RPC, no pipelining, JSON-RPC 2.0.
 
 > Status: v0.1.0 GA on `latest` (identity / memory / provider /
-> activity verbs). v0.2.0-dev.0 pre-release on the `--pre` channel
+> activity verbs). v0.2.0-dev.1 pre-release on the `--pre` channel
 > adds wallet + x402 payment verbs.
 
 ## Install
@@ -16,7 +16,7 @@ Default install — v0.1.0 GA:
 pip install daimon-protocol
 ```
 
-Pre-release install — v0.2.0-dev.0 with wallet + x402 payments:
+Pre-release install — v0.2.0-dev.1 with wallet + x402 payments:
 
 ```
 pip install --pre daimon-protocol
@@ -88,7 +88,7 @@ result = client.activity.verify()                  # {"verified": N, "ok": True}
 
 ## Wallet + payments (v0.2 pre-release)
 
-Available in `0.2.0.dev0` (`pip install --pre daimon-protocol`). The
+Available in `0.2.0.dev1` (`pip install --pre daimon-protocol`). The
 wallet keystore is auto-created by the daemon on first `daimon unlock`
 — the 24-word BIP-39 mnemonic is surfaced exactly once in that
 unlock's RPC response. Wallets are MetaMask-compatible: importing the
@@ -105,6 +105,15 @@ for w in client.wallet.list():
 
 # Quick lookup by chain
 addr = client.wallet.address(chain="evm:base")
+
+# Re-display the BIP-39 mnemonic, password-gated. Returns the
+# 24-word list. Useful for verifying the backup was written down
+# correctly, or exporting the seed to MetaMask / Phantom / Rabby.
+# Wrong password raises RPCError with code -32008 (CodeWrongPassword),
+# distinct from -32001 (CodeIdentityLocked) — the daemon IS unlocked,
+# the password check is a separate attestation.
+words = client.wallet.show_mnemonic(password="my-unlock-password")
+assert len(words) == 24
 
 # Pay an x402-protected URL end-to-end. The daimon parses the
 # 402's PAYMENT-REQUIRED header, signs EIP-3009 transferWithAuthorization
@@ -129,17 +138,51 @@ every payment chains into the same Ed25519-signed log that carries
 the v0.1 memory and provider rows. Walk the whole chain with
 `client.activity.verify()`.
 
-Typed RPC error codes for the payment surface propagate via
-`RPCError.code`:
+Typed RPC error codes for the wallet + payment surface propagate
+via `RPCError.code`:
 
 - `-32006` — payment exceeds local ceiling. The daimon refused to
   sign; no on-the-wire signature was emitted.
 - `-32007` — no wallet in the keystore matches the resource's
   PaymentRequirements (chain not in registry, or wallet for that
   chain not yet created).
+- `-32008` — `show_mnemonic` was called with the wrong password.
+  Distinct from `-32001` (CodeIdentityLocked) so callers can
+  branch on it without their "daemon is locked, run `daimon
+  unlock`" rewrite kicking in when really the user just mistyped
+  the password.
 
 See [`examples/x402-smoke`](../../examples/x402-smoke) for an
 end-to-end runnable example against a local mock x402 server.
+
+### Recovering a daimon from an existing seed
+
+If you have a 24- (or 12-) word BIP-39 phrase already — a backup
+you wrote down, or a seed you'd like to import from MetaMask /
+Phantom / Rabby — the CLI `daimon wallet recover` writes a fresh
+wallet keystore from that phrase. It's an offline-only operation,
+so there's no SDK wrapper: the daimon daemon must be stopped (or
+have never run against this `$DAIMON_HOME`) when you run it,
+because a live seed swap on a running daemon would orphan every
+wallet derived from the previous seed.
+
+```sh
+daimon wallet recover
+# Recovery phrase: (hidden input, paste your 12 or 24 words)
+# Choose a password: (must match your daimon unlock password)
+# Confirm password:
+# Wallet keystore written.
+# Next: `daimon unlock` to bring up the daemon against this seed.
+```
+
+After recover, the daemon's next unlock loads the imported
+keystore instead of generating a fresh mnemonic, and every wallet
+you create with `client.wallet.create(...)` derives from the
+imported seed. The canonical `abandon ... about` 12-word vector
+produces `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` at
+`m/44'/60'/0'/0/0` — the same address every BIP-39 derivation
+tool produces for that seed, so cross-wallet recovery is trivially
+verifiable.
 
 ## Errors
 

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0.dev1] — 2026-05-19
+
+Second pre-release on the v0.2 track. Adds the password-gated
+mnemonic re-display verb on the SDK surface (the underlying daemon
+RPC + CLI shipped in the Daimon binary on 2026-05-19; this release
+makes it a first-class method of `client.wallet` in the SDK as
+well, so installers on the `--pre` channel get parity with the
+Daimon CLI without falling back to the `client._call(...)` escape
+hatch).
+
 ### Added
 
 - **`client.wallet.show_mnemonic(password=)`** — re-display the
@@ -20,6 +30,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fix when really it's "type the password again."
   Use cases: verify the backup was written down correctly; export
   the seed for import into MetaMask / Phantom / Rabby.
+
+### Related (Daimon CLI binary, not SDK)
+
+- **`daimon wallet recover`** — offline counterpart to
+  `show_mnemonic`. Writes a fresh wallet keystore from a
+  user-supplied 12- or 24-word BIP-39 phrase, so an external
+  backup can be imported into a fresh daimon. CLI-only by design
+  (no SDK wrapper): a live seed swap on a running daimon would
+  orphan every wallet derived from the previous mnemonic, so
+  recovery operates on the keystore file BEFORE the daemon ever
+  opens it.
 
 ## [0.2.0.dev0] — 2026-05-18
 

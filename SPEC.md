@@ -1,8 +1,8 @@
 # Daimon Protocol Specification
 
 **Version**: v0.2 (Draft)
-**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.0 pre-release shipped 2026-05-18 (wallet + x402 surface). v0.2 GA cuts once live Base Sepolia settlement is verified.
-**Date**: 2026-05-18 (originally 2026-05-03 for v0.1)
+**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.1 pre-release shipped 2026-05-19 (wallet + x402 surface, with `show_mnemonic` re-display + `wallet recover` import on the seed-lifecycle side). v0.2 GA cuts once live Base Sepolia settlement is verified.
+**Date**: 2026-05-19 (originally 2026-05-03 for v0.1)
 
 ---
 
@@ -315,9 +315,17 @@ daimon.wallet.sign({
   chain: string,
   digest_hex: string             // 32-byte digest, 0x-prefix optional
 }) → { signature_hex: string }   // 65 bytes [r || s || v] for EVM
+
+daimon.wallet.show_mnemonic({
+  password: string               // keystore password, re-verified against on-disk file
+}) → { mnemonic: string[] }      // the 12- or 24-word BIP-39 phrase
 ```
 
 The wallet keystore is auto-created by the unlock callback the first time `daimon unlock` runs. On that first unlock, the `daimon.identity.unlock` response carries a `mnemonic` field with the 24 BIP-39 words the daimon will use to derive all wallets — clients MUST surface this exactly once to the principal for backup. On subsequent unlocks the field is omitted. See §14 for the full wallet primitive.
+
+`daimon.wallet.show_mnemonic` is the password-gated re-display: callers supply the keystore password and the daemon re-runs the full Argon2id + AES-GCM-decrypt against the on-disk keystore (NOT against the in-memory unlocked state). Wrong password surfaces as `CodeWrongPassword = -32008`, distinct from `CodeIdentityLocked = -32001` — the daemon IS unlocked, the password attestation is a separate check, and SDKs / CLIs MUST NOT rewrite the error as "run daimon unlock first" when they see `-32008`.
+
+The symmetric import path — bringing an external 12- or 24-word BIP-39 phrase INTO a fresh daimon — is an offline operation that writes the keystore directly on disk, not an RPC verb. See §14.6.
 
 #### Payment (v0.2)
 
@@ -637,6 +645,25 @@ The canonical BIP-39 12-word `abandon ... about` vector at `m/44'/60'/0'/0/0` de
 
 The daimon's reference implementation anchors this in a test (`internal/wallet/wallet_test.go::TestDerive_EVMAddressMatchesPublishedVector`) so any future refactor that drifts the derivation pipeline trips CI immediately. Third-party Daimon-compatible implementations SHOULD include the same test.
 
+### 14.6 Backup re-display and seed import
+
+A non-custodial wallet is only as portable as the principal's ability to (a) re-verify the seed they're supposed to have written down and (b) bring an existing seed into a new daimon. Both operations are deliberately mediated through the principal's keystore password — neither the export nor the import shortcut around the cryptographic gate.
+
+**Re-display (`daimon.wallet.show_mnemonic`).** Specified in §6.1. The reference implementation MUST re-run the full Argon2id KDF + AES-256-GCM authenticated-decrypt against the on-disk keystore on every call; it MUST NOT short-circuit by returning the in-memory mnemonic to anyone with socket access. The result is that "the daemon is unlocked" is not by itself sufficient to expose the seed — every re-display requires the password again. This matches the seed-reveal posture of MetaMask, Phantom, Trezor, Ledger Live, and every other reputable non-custodial wallet. Wrong password MUST surface as `CodeWrongPassword = -32008`, distinct from `CodeIdentityLocked = -32001`.
+
+**Seed import (offline, no RPC).** The symmetric "I have a BIP-39 phrase from elsewhere, write a wallet keystore using THAT phrase" operation is performed offline by the CLI subcommand `daimon wallet recover`, not via an RPC verb. Rationale:
+
+- A live seed swap on a running daimon would orphan every wallet derived from the previous mnemonic and leave the daemon's in-memory state desynchronised from the on-disk keystore — a half-state the cryptographic layer is not designed for.
+- Anyone with the keystore file and the keystore password already has full control of the wallet; the offline tool requires both, so the security boundary is unchanged from the unlock path.
+
+The reference implementation's `daimon wallet recover`:
+
+1. MUST refuse if `$DAIMON_HOME/wallet.keystore` already exists. Overwriting an existing keystore would silently destroy any wallets derived from the previous seed; the principal must move the existing file out of the way explicitly first.
+2. MUST validate the supplied phrase against BIP-39 (word count ∈ {12, 24}, all words in the BIP-39 English wordlist, checksum valid) BEFORE writing anything to disk.
+3. MUST encrypt the keystore plaintext (`{mnemonic, wallets: []}`) under the same Argon2id + AES-256-GCM envelope a fresh keystore would use. The next `daimon unlock` then loads the file through the normal lifecycle path, opaque to the fact that the seed was imported rather than generated.
+
+Third-party Daimon-compatible implementations SHOULD provide an equivalent offline import path. The on-disk format documented in §14.2 is canonical: any tool that writes a valid encrypted-keystore-file from a BIP-39 phrase + password is interoperable with the daimon daemon, regardless of which language or CLI surface it ships behind.
+
 ---
 
 ## 15. Payments / x402 (v0.2)
@@ -758,4 +785,4 @@ Both rows are chained + Ed25519-signed under the principal's identity key, walka
 
 ---
 
-**Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.0 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.
+**Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.1 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.
