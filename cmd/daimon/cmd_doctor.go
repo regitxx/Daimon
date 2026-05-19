@@ -63,6 +63,7 @@ type doctorReport struct {
 	Build    doctorBuild    `json:"build"`
 	Home     doctorHome     `json:"home"`
 	Daemon   doctorDaemon   `json:"daemon"`
+	Wallet   doctorWallet   `json:"wallet"`
 	Env      doctorEnv      `json:"env"`
 	Runtimes doctorRuntimes `json:"runtimes"`
 }
@@ -81,6 +82,7 @@ type doctorHome struct {
 	Socket         string       `json:"socket,omitempty"`
 	SocketFallback bool         `json:"socket_fallback,omitempty"`
 	Keystore       fileStat     `json:"keystore"`
+	WalletKeystore fileStat     `json:"wallet_keystore"`
 	MemoryDB       fileStat     `json:"memory_db"`
 	ActivityLog    activityStat `json:"activity_log"`
 }
@@ -103,6 +105,24 @@ type doctorDaemon struct {
 	State    string `json:"state"` // not_running | locked | unlocked | error
 	DID      string `json:"did,omitempty"`
 	DialError string `json:"dial_error,omitempty"`
+}
+
+// doctorWallet describes the RPC-level state of the wallet surface
+// (separate from the on-disk wallet.keystore presence captured in
+// doctorHome.WalletKeystore). Populated only when the daemon is unlocked;
+// otherwise State == "not_probed".
+//
+// The state we care about catching is "wallet.keystore exists on disk but
+// daimon.wallet.list returns wallet-not-loaded" — this is the silent
+// password-mismatch failure mode that bit us before the recover
+// cross-check landed. Surfacing it from `daimon doctor` lets a user
+// notice immediately, with actionable advice (init --force or restore
+// from backup), instead of debugging mysterious -32603 errors.
+type doctorWallet struct {
+	State       string   `json:"state"` // not_probed | ok | not_loaded | rpc_error
+	WalletCount int      `json:"wallet_count,omitempty"`
+	Chains      []string `json:"chains,omitempty"`
+	RPCError    string   `json:"rpc_error,omitempty"`
 }
 
 type doctorEnv struct {
@@ -193,6 +213,18 @@ func gatherDoctorReport(ctx context.Context, cfg doctorConfig) doctorReport {
 		rep.Daemon = doctorDaemon{State: "error", DialError: "no socket path resolved"}
 	}
 
+	// Wallet RPC probe: only meaningful when the daemon is unlocked.
+	// Distinct from doctorHome.WalletKeystore (which is the on-disk
+	// stat). The probe answers "is the wallet keystore ALSO loaded into
+	// the running daemon, or did wallet.Open fail non-fatally at unlock
+	// time?" — the silent password-mismatch failure mode that motivated
+	// adding this section.
+	if rep.Daemon.State == "unlocked" {
+		rep.Wallet = probeWallet(rep.Home.Socket, cfg.Timeout)
+	} else {
+		rep.Wallet = doctorWallet{State: "not_probed"}
+	}
+
 	// Runtime probes — independent of the daemon, run regardless.
 	rep.Runtimes.Ollama = probeOllama(ctx, cfg)
 	rep.Runtimes.LMStudio = probeLMStudio(ctx, cfg)
@@ -229,6 +261,7 @@ func gatherHomeReport(cfg doctorConfig) doctorHome {
 	out.Socket = socket
 
 	out.Keystore = statFile(daimonhome.KeystorePath(home))
+	out.WalletKeystore = statFile(filepath.Join(home, "wallet.keystore"))
 	out.MemoryDB = statFile(filepath.Join(home, "memory.db"))
 
 	logPath := filepath.Join(home, "activity.log")
@@ -315,6 +348,75 @@ func probeDaemon(socket string, timeout time.Duration) doctorDaemon {
 		_ = json.Unmarshal(resp.Result, &got)
 	}
 	return doctorDaemon{State: "unlocked", DID: got.DID}
+}
+
+// --- wallet RPC probe -------------------------------------------------------
+
+// probeWallet calls daimon.wallet.list against an unlocked daemon. Three
+// outcomes feed into the report:
+//
+//   - "ok" + WalletCount + Chains: list returned a (possibly empty)
+//     array of wallet entries. The daemon has the wallet keystore loaded
+//     and the RPC surface is alive.
+//   - "not_loaded": the daemon returned the standard "wallet keystore not
+//     loaded" CodeInvalidRequest. This is THE failure mode the recover
+//     cross-check protects against — wallet.Open failed at unlock time
+//     (typically a password mismatch between identity.keystore and
+//     wallet.keystore) and the daemon's wstore is nil. Doctor surfaces
+//     the actionable advice rather than just the error string.
+//   - "rpc_error": anything else (transport failure, malformed response).
+//     Surfaced as RPCError for diagnostic depth.
+//
+// Doctor remains read-only — no audit row is written, no daemon state
+// is mutated. daimon.wallet.list itself is a pure read against the
+// in-memory wallet store.
+func probeWallet(socket string, timeout time.Duration) doctorWallet {
+	conn, err := net.DialTimeout("unix", socket, timeout)
+	if err != nil {
+		return doctorWallet{State: "rpc_error", RPCError: "dial: " + err.Error()}
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+
+	if err := json.NewEncoder(conn).Encode(jsonrpcRequest{
+		JSONRPC: "2.0",
+		Method:  "daimon.wallet.list",
+		ID:      1,
+	}); err != nil {
+		return doctorWallet{State: "rpc_error", RPCError: "encode: " + err.Error()}
+	}
+	var resp jsonrpcResponse
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return doctorWallet{State: "rpc_error", RPCError: "decode: " + err.Error()}
+	}
+	if resp.Error != nil {
+		// CodeInvalidRequest with "wallet keystore not loaded" is the
+		// canonical signal from server/wallet_handlers.go's
+		// walletNotReady(). Match on the message rather than the code
+		// alone because CodeInvalidRequest covers many things; the
+		// message is stable (it's a constant in the wallet handlers
+		// file) and any drift would surface as a doctor-test
+		// regression here.
+		if strings.Contains(resp.Error.Message, "wallet keystore not loaded") {
+			return doctorWallet{State: "not_loaded"}
+		}
+		return doctorWallet{State: "rpc_error", RPCError: resp.Error.Error()}
+	}
+
+	// Decode the wallets[] envelope. We just need count + chain labels;
+	// pubkeys / addresses are too verbose for the doctor summary and the
+	// user can run `daimon wallet list` for the full picture.
+	var entries []struct {
+		Chain string `json:"chain"`
+	}
+	if len(resp.Result) > 0 {
+		_ = json.Unmarshal(resp.Result, &entries)
+	}
+	out := doctorWallet{State: "ok", WalletCount: len(entries)}
+	for _, e := range entries {
+		out.Chains = append(out.Chains, e.Chain)
+	}
+	return out
 }
 
 // --- runtime probes ---------------------------------------------------------
@@ -430,6 +532,7 @@ func renderDoctorText(w io.Writer, r doctorReport) error {
 		fmt.Fprintf(tw, "  socket\t%s%s\n", r.Home.Socket, extra)
 	}
 	fmt.Fprintf(tw, "  keystore\t%s\n", renderFileStat(r.Home.Keystore, "absent — run `daimon init`"))
+	fmt.Fprintf(tw, "  wallet.keystore\t%s\n", renderFileStat(r.Home.WalletKeystore, "absent (will be auto-created on first unlock, or run `daimon wallet recover` to import a seed)"))
 	fmt.Fprintf(tw, "  memory.db\t%s\n", renderFileStat(r.Home.MemoryDB, "absent (will be created on first unlock)"))
 	fmt.Fprintf(tw, "  activity.log\t%s\n", renderActivityStat(r.Home.ActivityLog))
 	fmt.Fprintln(tw)
@@ -450,6 +553,37 @@ func renderDoctorText(w io.Writer, r doctorReport) error {
 		fmt.Fprintf(tw, "  state\terror: %s\n", r.Daemon.DialError)
 	}
 	fmt.Fprintln(tw)
+
+	// Wallet — only meaningful when the daemon is unlocked. The on-disk
+	// presence is already covered under DAIMON_HOME above; this section
+	// reports whether the RUNNING daemon also has the wallet keystore
+	// loaded into memory. The "not loaded" state is the silent
+	// password-mismatch failure mode the recover cross-check protects
+	// against on the input side; here it's surfaced after the fact.
+	switch r.Wallet.State {
+	case "ok":
+		chains := truncate(joinModels(r.Wallet.Chains), 50)
+		if r.Wallet.WalletCount == 0 {
+			fmt.Fprintf(tw, "Wallet\n  rpc surface\tok — no wallets yet (run `daimon wallet create --chain evm:base`)\n")
+		} else {
+			fmt.Fprintf(tw, "Wallet\n  rpc surface\tok — %d wallets (%s)\n", r.Wallet.WalletCount, chains)
+		}
+		fmt.Fprintln(tw)
+	case "not_loaded":
+		fmt.Fprintf(tw, "Wallet\n  rpc surface\t")
+		fmt.Fprintln(tw, "DISABLED — wallet keystore not loaded into the running daemon")
+		fmt.Fprintln(tw, "             (likely cause: password mismatch between identity.keystore and wallet.keystore)")
+		fmt.Fprintln(tw, "             Fix: stop the daemon, `daimon init --force` (DESTROYS identity + memory + activity + wallet)")
+		fmt.Fprintln(tw, "             OR restore wallet.keystore from a backup encrypted under the identity password.")
+		fmt.Fprintln(tw)
+	case "rpc_error":
+		fmt.Fprintf(tw, "Wallet\n  rpc surface\tprobe failed — %s\n", r.Wallet.RPCError)
+		fmt.Fprintln(tw)
+	case "not_probed":
+		// Skip the section entirely when the daemon isn't unlocked —
+		// "wallet status: unknown because daemon isn't running" is
+		// already implied by the Daemon section above.
+	}
 
 	// Provider env (presence only — never the value, so doctor is safe to
 	// share screenshots from)

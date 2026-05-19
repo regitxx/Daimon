@@ -210,6 +210,129 @@ func TestDoctor_DaemonStates(t *testing.T) {
 	}
 }
 
+func TestDoctor_WalletProbeStates(t *testing.T) {
+	// Each case is a mock daemon that answers BOTH identity.get (to land
+	// the daemon at state=unlocked, the precondition for wallet probing)
+	// AND wallet.list (the verb under test). Captures the three states
+	// the wallet probe distinguishes: ok with wallets, ok without
+	// wallets, and the "not_loaded" silent-failure mode that motivated
+	// adding this whole section.
+	cases := []struct {
+		name          string
+		walletResp    func(req jsonrpcRequest) jsonrpcResponse
+		wantState     string
+		wantCount     int
+		wantHasChains bool
+	}{
+		{
+			name: "ok_with_wallets",
+			walletResp: func(req jsonrpcRequest) jsonrpcResponse {
+				result, _ := json.Marshal([]map[string]any{
+					{"id": "01K", "chain": "evm:base", "address": "0xABC"},
+					{"id": "02K", "chain": "evm:base-sepolia", "address": "0xDEF"},
+				})
+				return jsonrpcResponse{JSONRPC: "2.0", Result: result, ID: json.RawMessage("1")}
+			},
+			wantState:     "ok",
+			wantCount:     2,
+			wantHasChains: true,
+		},
+		{
+			name: "ok_no_wallets",
+			walletResp: func(req jsonrpcRequest) jsonrpcResponse {
+				result, _ := json.Marshal([]map[string]any{})
+				return jsonrpcResponse{JSONRPC: "2.0", Result: result, ID: json.RawMessage("1")}
+			},
+			wantState: "ok",
+			wantCount: 0,
+		},
+		{
+			name: "not_loaded_silently_disabled",
+			walletResp: func(req jsonrpcRequest) jsonrpcResponse {
+				// Mirror the canonical walletNotReady() error shape from
+				// internal/server/wallet_handlers.go — CodeInvalidRequest
+				// with the "wallet keystore not loaded" message. The doctor
+				// matches on the message because CodeInvalidRequest covers
+				// many things.
+				return jsonrpcResponse{
+					JSONRPC: "2.0",
+					Error: &jsonrpcError{
+						Code:    codeInvalidRequest,
+						Message: "wallet keystore not loaded; check daemon logs for keystore open failures",
+					},
+					ID: json.RawMessage("1"),
+				}
+			},
+			wantState: "not_loaded",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shieldEnv(t)
+			socket := startMockDaemon(t, func(req jsonrpcRequest) jsonrpcResponse {
+				switch req.Method {
+				case "daimon.identity.get":
+					result, _ := json.Marshal(map[string]string{"did": "did:key:zTest"})
+					return jsonrpcResponse{JSONRPC: "2.0", Result: result, ID: json.RawMessage("1")}
+				case "daimon.wallet.list":
+					return tc.walletResp(req)
+				}
+				return jsonrpcResponse{
+					JSONRPC: "2.0",
+					// JSON-RPC standard "method not found" code; the CLI
+					// doesn't import this constant since it doesn't need
+					// to branch on it, but the mock daemon does need to
+					// emit something realistic for unmatched methods.
+					Error: &jsonrpcError{Code: -32601, Message: "method not found"},
+					ID:    json.RawMessage("1"),
+				}
+			})
+			cfg := newTestDoctorConfig(t, t.TempDir(),
+				"http://127.0.0.1:1", "http://127.0.0.1:1", socket)
+			rep := gatherDoctorReport(context.Background(), cfg)
+
+			if rep.Daemon.State != "unlocked" {
+				t.Fatalf("precondition: Daemon.State = %q, want unlocked (dial_error=%q)",
+					rep.Daemon.State, rep.Daemon.DialError)
+			}
+			if rep.Wallet.State != tc.wantState {
+				t.Errorf("Wallet.State: got %q want %q (rpc_error=%q)",
+					rep.Wallet.State, tc.wantState, rep.Wallet.RPCError)
+			}
+			if rep.Wallet.WalletCount != tc.wantCount {
+				t.Errorf("Wallet.WalletCount: got %d want %d", rep.Wallet.WalletCount, tc.wantCount)
+			}
+			if tc.wantHasChains && len(rep.Wallet.Chains) == 0 {
+				t.Errorf("expected Chains populated; got empty")
+			}
+		})
+	}
+}
+
+func TestDoctor_WalletNotProbedWhenDaemonLocked(t *testing.T) {
+	// When the daemon is locked, the wallet probe is skipped — locked
+	// means no wallet RPCs could possibly succeed anyway, and probing
+	// would just produce noise.
+	shieldEnv(t)
+	socket := startMockDaemon(t, func(req jsonrpcRequest) jsonrpcResponse {
+		return jsonrpcResponse{
+			JSONRPC: "2.0",
+			Error:   &jsonrpcError{Code: codeIdentityLocked, Message: "locked"},
+			ID:      json.RawMessage("1"),
+		}
+	})
+	cfg := newTestDoctorConfig(t, t.TempDir(),
+		"http://127.0.0.1:1", "http://127.0.0.1:1", socket)
+	rep := gatherDoctorReport(context.Background(), cfg)
+
+	if rep.Daemon.State != "locked" {
+		t.Fatalf("precondition: Daemon.State = %q, want locked", rep.Daemon.State)
+	}
+	if rep.Wallet.State != "not_probed" {
+		t.Errorf("Wallet.State: got %q want %q", rep.Wallet.State, "not_probed")
+	}
+}
+
 func TestDoctor_RuntimesProbeParsesModels(t *testing.T) {
 	shieldEnv(t)
 	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
