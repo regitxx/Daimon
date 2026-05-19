@@ -3273,3 +3273,62 @@ All four actions have stable v6 releases targeting Node 24. Bumped in one shot r
 - CI is on Node 24-compatible action versions; no more deprecation noise on every push.
 - Test counts: 343 Go race+vet + 63 pytest + 63 vitest + 9 CI shards. Same as end of session 48 — sessions 49-51 were docs / publish / build hygiene with no test surface changes.
 - Still-pending (unchanged through this whole burst): phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay).
+
+## 2026-05-19 — Day Zero, sessions 52–54: wallet UX hardening pass
+
+Three contiguous commits that together turn the seed-lifecycle surface from "works if you do it right" into "tells you when you're doing it wrong, and at every step has a way to verify you're on the right path." All three closed real failure modes that had been latent since the wallet primitive shipped in session 40.
+
+### Session 52 — `daimon.wallet.derive` ([20a8d50](https://github.com/regitxx/Daimon/commit/20a8d50))
+
+Read-only "what address would I get?" verb. Symmetric counterpart to `wallet.create`: same chain → same path → same address, but no persistence, no audit row, no wallet-list mutation. The canonical use case is verification right after `daimon wallet recover` — derive at index 0, compare against an externally-known address (the user's MetaMask for the same seed), confirm before any state change.
+
+Implementation across all layers:
+
+- **`internal/wallet.DeriveAddress(mnemonic, chain, index)`** — pure package-level function. Same inputs always produce same output regardless of Store state. New `DerivedAddress` type so the wire shape is honest (doesn't fake the ID + CreatedAt fields that Wallet has but a transient derivation doesn't).
+- **`internal/wallet.(*Store).Derive(chain, index)`** — Store-bound wrapper that uses `s.mnemonic` under `s.mu`.
+- **`daimon.wallet.derive` RPC + `daimon wallet derive --chain X [--index N]` CLI** with matching SDK wrappers in both languages (`client.wallet.derive(chain=, index=0)` / `client.wallet.derive({chain, index?})`). New exported types `WalletDeriveParams` + `WalletDeriveResult` in TypeScript.
+- **Killer UX touch: `daimon wallet recover` now displays the index-0 EVM address** as part of its success block — uses `wallet.DeriveAddress` directly (offline, no daemon round-trip needed). A user who typo'd their phrase sees the wrong address right there, before any daemon state changes, when fixing it is a simple `rm` + re-run.
+
+**Test count delta**: 343 → 353 Go (+5 wallet pkg, +5 server handler) + 63 → 65 pytest + 63 → 65 vitest. Total 469 → 483 across all surfaces.
+
+SPEC §6.1 + §14.6 extended with the new verb and the verify-before-persist semantic, so third-party Daimon-compatible implementations have a normative reference.
+
+### Session 53 — Wallet/identity password parity ([3655ecb](https://github.com/regitxx/Daimon/commit/3655ecb))
+
+Closes the silent failure mode that had been latent since wallet shipped: `daimon wallet recover` and `daimon unlock` both prompt for passwords, and nothing in the system enforced that they matched. A user could recover with password A and unlock with password B, and the next unlock would silently disable wallet RPCs (wallet.Open fails non-fatally, logging "wallet keystore not loaded" to daemon stderr — nothing else surfaces).
+
+Two coordinated changes that restore the invariant "identity.keystore and wallet.keystore are always encrypted under the same password":
+
+1. **`daimon wallet recover` cross-checks against identity**: if `identity.keystore` exists, the supplied password MUST decrypt it (via `identity.LoadFromKeystore` — same Argon2id pipeline). Mismatch → refuses BEFORE writing the wallet keystore, with an error pointing at the path and explaining the remediation options. If `identity.keystore` doesn't exist (recover-before-init, unusual but legal), the cross-check is skipped with an informational stderr note. ~100ms Argon2id cost — acceptable for one-shot pre-flight.
+
+2. **`daimon init --force` now wipes `wallet.keystore`** alongside the existing activity.log + memory.db cleanup. All three are signed/encrypted under the discarded identity's password; leaving wallet.keystore on disk after --force produces exactly the failure mode change (1) prevents on the recovery path. The three-file removal loop refactored to a tiny table so adding a fourth removal path (if v0.3 ever adds another identity-bound file) is one line. Help text + doc comment both updated to reflect the expanded scope.
+
+End-to-end smoke verified four scenarios against tmp `$DAIMON_HOME`s: recover-before-init (skip + note), match (cross-check passes), mismatch (refuses before touching wallet.keystore), init --force (wallet keystore correctly wiped).
+
+**Test count delta**: 353 → 354 Go (+1 in cmd/daimon for the init --force wipe assertion). SDK suites unchanged — both fixes are CLI-layer concerns about coordinating two on-disk files under one human-typed password; SDK callers talk to a running unlocked daemon and never see this seam.
+
+### Session 54 — `daimon doctor` wallet diagnostic ([2b5a74e](https://github.com/regitxx/Daimon/commit/2b5a74e))
+
+The recover cross-check (session 53) catches the password-mismatch failure mode at the input boundary, but it doesn't help anyone who has already landed in that broken state (e.g. recovered before the cross-check shipped, or recovered with a different SDK that bypasses the CLI). `daimon doctor` is the right place to surface "you're in this broken state right now" with actionable remediation — the same way it already does for "API key not set" or "Ollama unreachable."
+
+New Wallet section + extended Home section:
+
+- **DAIMON_HOME block** gains a `wallet.keystore` file stat (size + mode), symmetric with the existing keystore / memory.db / activity.log entries.
+- **New Wallet block** populates only when the daemon is unlocked (otherwise omitted — "wallet status unknown because daemon isn't running" is implied by the Daemon block above and there's no value in repeating it). Three states the wallet probe distinguishes:
+  - `ok` with wallets: "ok — N wallets (chains)"
+  - `ok` without wallets: "ok — no wallets yet (run `daimon wallet create --chain evm:base`)"
+  - `not_loaded`: the silent failure mode. Multi-line block with diagnosis (password mismatch likely) and remediation (init --force OR restore from backup).
+  - `rpc_error`: dial / encode / decode failure surfaced with underlying message.
+
+The probe matches `walletNotReady()`'s canonical message string rather than the bare code, because `CodeInvalidRequest` is a broad category and we want to catch THIS specific failure cleanly. Any drift in the daemon's wallet-not-ready message would surface as a doctor-test regression.
+
+**Test count delta**: 354 → 356 Go (+2 doctor tests: a table-driven case covering all three RPC states + a "skipped when locked" guard). Mock daemon helper extended to dispatch per-method so a single test can exercise `identity.get → unlocked` precondition AND `wallet.list → probe`.
+
+End-to-end smoke against a temp `$DAIMON_HOME`: `daimon doctor` correctly transitions the wallet rpc-surface line from "ok — no wallets yet" → "ok — 1 wallets (evm:base)" after a `daimon wallet create`. The wallet.keystore on-disk stat grows from 503B → 823B over the same step, also visible in the Home block.
+
+### State at end of session burst (sessions 52–54)
+
+- The seed lifecycle now has **at-every-step verification**: derive lets you check the address before persisting, recover refuses on password mismatch, and doctor surfaces the silent-disabled state if you somehow end up there anyway. The user can't accidentally land in a broken-wallet state without getting a clear signal at the moment that decision is made.
+- Test counts: **356 Go race+vet + 65 pytest + 65 vitest + 9 CI shards** (delta: +13 / +2 / +2 from end of session 51). All green on every push.
+- v0.2.0-dev.1 still current on PyPI + npm; sessions 52–54 added new RPC surface (derive) that will land in the next pre-release cut OR v0.2.0 GA. Both SDK CHANGELOG `[Unreleased]` blocks track the additions.
+- Still-pending (same as session 51): phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay) — neither moved this burst, both blocked on externals (test funds + a real x402-protected endpoint; an LLM provider that actually returns 402).
