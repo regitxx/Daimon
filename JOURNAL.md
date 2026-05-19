@@ -3116,3 +3116,66 @@ Once 40.4 confirms live settlement works end-to-end, bumping `0.2.0.dev0` → `0
 - Git tags now span `v0.1.0.dev0`, `v0.1.0`, `v0.2.0.dev0`. v0.2.0 GA tag will land alongside the 0.2.0 cut once 40.4 closes.
 - The protocol's promise — "daimon holds keys, signs EIP-3009, pays HTTP 402 resources via either SDK" — is now factually available to anyone who can `pip install --pre daimon-protocol` or `npm install @daimon-protocol/sdk@dev`. Wire-shape contract is continuously re-verified on every push via the x402-smoke CI shard.
 - Test counts unchanged: 329 Go race+vet + 61 pytest + 61 vitest + 9 CI shards green.
+
+## 2026-05-18 / 2026-05-19 — Day Zero, sessions 44–46: SPEC.md formalisation + README v0.2 pass + show-mnemonic
+
+Three small-to-medium sessions that lifted the v0.2 surface from "implemented + published" to "documented at every level a user or implementer would land on."
+
+### Session 44 — SPEC.md v0.2 update ([186641d](https://github.com/regitxx/Daimon/commit/186641d))
+
+Net +287 / -23 lines to the canonical protocol document. Anyone wanting to write a third-party Daimon-compatible client (alternative SDKs in Rust / Swift / Kotlin / etc., or an alternative daemon implementation) now has a formal wire-format reference instead of needing to reverse-engineer the reference impl. Specific edits:
+
+- **Header**: version `v0.1 (Draft)` → `v0.2 (Draft)`, status records v0.1.0 GA + v0.2.0-dev.0 dates.
+- **§1 Scope** split into §1.1 (v0.1 local agent) + §1.2 (v0.2 wallet + x402); deferral list refreshed (payments removed since shipped; receive-side payments named explicitly as v0.3 federation territory).
+- **§6.1 Methods** gains two new subsections after Provider routing: "Wallet (v0.2)" with the four `daimon.wallet.*` verbs; "Payment (v0.2)" with `daimon.payment.pay`'s full param surface plus the typed error codes `CodePaymentCeiling (-32006)` and `CodePaymentUnsupported (-32007)`.
+- **§8.2 Logged kinds** table gains a "Since" column + four new rows (`wallet.created`, `payment.signed`, `payment.settled`, `payment.failed`) with payload schemas.
+- **§12 Deferred** relabeled "v0.1 + v0.2 explicitly do NOT solve"; payments line struck-through with pointer to §15.
+- **§14 Wallet (NEW, ~80 lines)**: on-disk format, lifecycle (auto-create on first unlock, mnemonic surfaces once in unlock response), EVM address derivation pipeline (5-step), **canonical BIP-39 test vector pinned in the spec** (`abandon ... about` at m/44'/60'/0'/0/0 → `0x9858EfFD...EcaEda94`) so third-party impls have an external fixture to verify against.
+- **§15 Payments / x402 (NEW, ~120 lines)**: wire format diagram, EIP-712 + EIP-3009 hashing pseudocode, **two type-string hashes pinned in the spec** (`0x8b73c3c69bb8...400f` for the domain typehash, `0x7c7c6cdb67a1...2267` for `transferWithAuthorization`), v0.2 chain registry (Base + Base Sepolia), ceiling enforcement semantics ("a signed authorisation is a leak even if never transmitted"), audit-row chain layout.
+
+**Cryptographic anchoring**: the reference impl's existing tests in `internal/payment/payment_test.go` already anchor both type-string hashes against the same values published in §15.3. Any future drift in either the SPEC or the impl trips a test. Cross-impl interop tests can use the same hashes as wire fixtures.
+
+### Session 45 — README docs pass ([fb6fd9c](https://github.com/regitxx/Daimon/commit/fb6fd9c))
+
+The v0.2 surface had been in tree, CI-protected, and pre-released for two days, but every user-facing README still framed everything as v0.1-only. Anyone landing on GitHub or running `pip install daimon-protocol` had no idea the wallet + payment verbs existed. Closed with a coordinated pass across three READMEs:
+
+- **Top-level README.md**: Status block bumped to reflect both v0.1.0 GA AND v0.2.0-dev.0; test counts refreshed to 329 + 61 + 61 + 9 CI shards. "Try it" section renamed to "Try v0.1 — memory + provider routing" and joined by a new "Try v0.2 — wallet + x402 payments (pre-release)" section showing the `pip install --pre` / `npm install @dev` paths and a four-line CLI walkthrough (init → unlock → wallet create → payment pay). Roadmap rows for v0.1 and v0.2 marked with ✅ + ship dates.
+- **sdk/python/README.md** and **sdk/typescript/README.md**: each gained dual-install paths (default v0.1.0 + `--pre` / `@dev` for v0.2.0-dev.0) and a new "Wallet + payments (v0.2 pre-release)" section between the existing provider verbs and Errors. Wallet creation, ceiling-bound payment, MetaMask-compatibility note (mnemonic is industry-standard BIP-39), typed RPC error codes (-32006 / -32007), pointer to `examples/x402-smoke` for runnable end-to-end.
+
+No code changes, no test deltas. Pure docs.
+
+### Session 46 — `daimon wallet show-mnemonic` ([994d744](https://github.com/regitxx/Daimon/commit/994d744))
+
+Closes a real UX gap: principals could only see their mnemonic ONCE (at first unlock). If they want to re-verify the backup later — common need; happens any time someone reaches for their hardware-wallet card and wonders "did I write that down correctly?" — there was no recourse. This session adds the missing surface end-to-end (wallet package + RPC handler + CLI subcommand + new typed RPC error code), tested at every layer.
+
+**Implementation architecture:**
+
+- **`internal/wallet.Store.ShowMnemonic(password)`** runs the FULL Argon2id KDF + AES-GCM-decrypt pipeline against the on-disk keystore. Does NOT short-circuit on the in-memory `s.mnemonic` — that would let anyone with socket access pull the seed without proving they know the password. Industry-standard for non-custodial seed reveal (MetaMask, Phantom, Trezor all require password re-confirmation).
+
+- **`daimon.wallet.show_mnemonic {password} → {mnemonic[]}`** RPC verb. Rejects empty password as `CodeInvalidParams`. Wrong password surfaces as a NEW typed code `CodeWrongPassword (-32008)` — distinct from `CodeIdentityLocked (-32001)` so CLI clients don't misleadingly suggest "run daimon unlock first" when the daemon IS unlocked, the user just typed the wrong password.
+
+- **`daimon wallet show-mnemonic` CLI subcommand** prompts for password no-echo via the existing `readPassword` shim. Renders the mnemonic in the same double-line safe-backup banner the auto-create path uses on first unlock — consistent presentation across both surfaces. `--json` flag for tooling. Password buffer zeroed via defer.
+
+- **`cmd/daimon/client.go`'s `humaniseDaemonErr`** extended to rewrite `codeWrongPassword (-32008)` into "wrong password" (NOT "daemon is locked — run daimon unlock first"). The `-32001` path is unchanged.
+
+**Test coverage:**
+
+- 3 wallet-package tests: right-password round-trip, wrong-password → `ErrWrongPassword`, structural property (re-verifies against disk even when in-memory state is well-populated).
+- 3 handler tests: RPC round-trip surfaces the same mnemonic as the underlying wallet store; wrong-password → `-32008`; empty-password → `CodeInvalidParams`. The existing `TestWalletRPCs_RejectWhenWalletNotLoaded` was extended with `show_mnemonic` so the wstore-nil safety net stays consistent.
+
+**Live smoke verified end-to-end:**
+- Right password → identical 24 words to the unlock-time banner.
+- Wrong password → `daimon: wrong password` (NOT the misleading "daemon is locked — run `daimon unlock` first").
+
+**Test count delta**: 329 → 335 Go race+vet (+6 across wallet + server). Python/TS SDK suites unchanged at 61 + 61.
+
+### What's left unblocked
+
+The same two items from sessions 41-43:
+
+1. **Phase 40.4 — live Base Sepolia settlement**. Still blocked on test funds + a real x402-protected endpoint with a wired-in facilitator. Cryptographic surface continues to be self-tested by the CI x402-smoke shard (Python + TS + mock server signature recovery).
+2. **Phase 40.5b — `provider.invoke` auto-pay on 402**. Still speculative; no LLM provider returns 402 today.
+
+Plus a small symmetric follow-on from session 46:
+
+3. **SDK wrappers for `show_mnemonic`** in Python + TypeScript. The RPC verb is callable from either SDK today via the low-level `client._call("daimon.wallet.show_mnemonic", {...})` escape hatch, but the namespace classes don't expose it formally. Mechanical follow-on, ~30 LoC per language plus tests. Landing in the next commit.

@@ -96,6 +96,40 @@ describe("Client.wallet", () => {
     expect(sig.length).toBe(2 + 130);
   });
 
+  it("show-mnemonic returns the 24-word seed list", async () => {
+    const received: Record<string, unknown> = {};
+    const seed = [
+      "abandon", "abandon", "abandon", "abandon",
+      "abandon", "abandon", "abandon", "abandon",
+      "abandon", "abandon", "abandon", "abandon",
+      "abandon", "abandon", "abandon", "abandon",
+      "abandon", "abandon", "abandon", "abandon",
+      "abandon", "abandon", "abandon", "art",
+    ];
+    daemon.handle("daimon.wallet.show_mnemonic", (params) => {
+      Object.assign(received, params as Record<string, unknown>);
+      return { mnemonic: seed };
+    });
+    const out = await client.wallet.showMnemonic({ password: "hunter2" });
+    expect(received).toEqual({ password: "hunter2" });
+    expect(out).toEqual(seed);
+  });
+
+  it("show-mnemonic wrong-password surfaces typed code -32008", async () => {
+    daemon.handle("daimon.wallet.show_mnemonic", () => {
+      // CodeWrongPassword — distinct from CodeIdentityLocked so the
+      // SDK doesn't trigger the "daemon is locked" rewrite.
+      throw new StubRPCError(-32008, "wrong password");
+    });
+    try {
+      await client.wallet.showMnemonic({ password: "WRONG" });
+      throw new Error("expected RPCError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(RPCError);
+      expect((e as RPCError).code).toBe(-32008);
+    }
+  });
+
   it("unsupported-chain rejection surfaces RPCError", async () => {
     daemon.handle("daimon.wallet.create", () => {
       throw new StubRPCError(-32602, "unsupported chain", "stellar");

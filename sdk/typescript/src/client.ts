@@ -98,6 +98,17 @@ export interface WalletSignParams {
   digestHex: string;
 }
 
+export interface WalletShowMnemonicParams {
+  /**
+   * The keystore password. Re-verified via the daemon's full Argon2id +
+   * AES-GCM-decrypt pipeline against the on-disk keystore — wrong
+   * password throws `RPCError` with code `-32008`. Industry-standard
+   * "prove you know the password right now" attestation for seed reveal
+   * (MetaMask, Phantom, Trezor all require this).
+   */
+  password: string;
+}
+
 export interface PaymentPayParams {
   url: string;
   /** Defaults to `GET`. */
@@ -323,6 +334,32 @@ class WalletNamespace {
       digest_hex: params.digestHex,
     })) as { signature_hex: string };
     return result.signature_hex;
+  }
+
+  /**
+   * Re-display the 24-word BIP-39 mnemonic stored in the keystore.
+   *
+   * Requires password re-confirmation: the supplied password is run
+   * through the daemon's full Argon2id + AES-GCM-decrypt pipeline
+   * against the on-disk keystore — NOT compared against the daemon's
+   * in-memory unlocked state. A wrong password throws `RPCError` with
+   * code `-32008` (CodeWrongPassword), distinct from `-32001`
+   * (CodeIdentityLocked) so callers can branch on the code without
+   * string-matching.
+   *
+   * Industry standard for non-custodial seed reveal (MetaMask,
+   * Phantom, Trezor all require password re-confirmation). Typical
+   * use cases: verify the backup was written down correctly after
+   * the unlock-time display; export the mnemonic for import into
+   * another wallet to inspect or move funds outside the daimon.
+   *
+   * Performance: Argon2id KDF costs ~100ms by design.
+   */
+  async showMnemonic(params: WalletShowMnemonicParams): Promise<string[]> {
+    const result = (await this.c._call("daimon.wallet.show_mnemonic", {
+      password: params.password,
+    })) as { mnemonic: string[] };
+    return result.mnemonic;
   }
 }
 

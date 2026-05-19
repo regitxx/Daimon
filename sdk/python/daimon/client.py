@@ -339,6 +339,34 @@ class _WalletNamespace:
         )
         return result["signature_hex"]
 
+    def show_mnemonic(self, *, password: str) -> list[str]:
+        """Re-display the 24-word BIP-39 mnemonic stored in the keystore.
+
+        Requires password re-confirmation: the supplied password is fed
+        through the daemon's full Argon2id + AES-GCM-decrypt pipeline
+        against the on-disk keystore, NOT compared against the in-memory
+        unlocked state. A wrong password raises :class:`RPCError` with
+        code ``-32008`` (CodeWrongPassword), distinct from the
+        ``-32001`` (CodeIdentityLocked) returned for "daemon needs
+        unlocking" — callers can branch on the code without string-
+        matching.
+
+        Industry standard for non-custodial seed reveal (MetaMask,
+        Phantom, Trezor all require password re-confirmation). Typical
+        use cases: principal wants to verify they wrote down the backup
+        correctly after the unlock-time display; principal wants to
+        import the daimon mnemonic into MetaMask / Phantom / Rabby to
+        inspect or move funds outside the daimon.
+
+        Performance: Argon2id KDF costs ~100ms by design. Don't invoke
+        this in a tight loop.
+        """
+        result = self._c._call(
+            "daimon.wallet.show_mnemonic",
+            {"password": password},
+        )
+        return list(result["mnemonic"])
+
 
 class _PaymentNamespace:
     """Verbs under ``daimon.payment.*`` (v0.2, phase 40.5).

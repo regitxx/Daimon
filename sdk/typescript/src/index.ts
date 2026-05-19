@@ -26,6 +26,7 @@ export type {
   WalletCreateParams,
   WalletAddressParams,
   WalletSignParams,
+  WalletShowMnemonicParams,
   PaymentPayParams,
   PaymentPayResult,
   PaymentResponse,

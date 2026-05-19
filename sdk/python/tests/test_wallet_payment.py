@@ -87,6 +87,45 @@ def test_wallet_sign_returns_signature_hex(stub_daemon: StubDaemon):
     assert sig.startswith("0x") and len(sig) == 2 + 130
 
 
+def test_wallet_show_mnemonic_returns_word_list(stub_daemon: StubDaemon):
+    received: dict = {}
+
+    def show(params):
+        received.update(params)
+        return {
+            "mnemonic": [
+                "abandon", "abandon", "abandon", "abandon",
+                "abandon", "abandon", "abandon", "abandon",
+                "abandon", "abandon", "abandon", "abandon",
+                "abandon", "abandon", "abandon", "abandon",
+                "abandon", "abandon", "abandon", "abandon",
+                "abandon", "abandon", "abandon", "art",
+            ],
+        }
+
+    stub_daemon.handle("daimon.wallet.show_mnemonic", show)
+    client = Client(socket_path=stub_daemon.socket_path)
+    out = client.wallet.show_mnemonic(password="hunter2")
+    assert received == {"password": "hunter2"}
+    assert isinstance(out, list)
+    assert len(out) == 24
+    assert out[-1] == "art"
+
+
+def test_wallet_show_mnemonic_wrong_password_surfaces_typed_code(stub_daemon: StubDaemon):
+    def reject(_p):
+        # -32008 == CodeWrongPassword in the daemon. Distinct from
+        # CodeIdentityLocked (-32001) so callers can distinguish
+        # "type your password again" from "run daimon unlock".
+        raise StubRPCError(-32008, "wrong password")
+
+    stub_daemon.handle("daimon.wallet.show_mnemonic", reject)
+    client = Client(socket_path=stub_daemon.socket_path)
+    with pytest.raises(RPCError) as exc:
+        client.wallet.show_mnemonic(password="WRONG")
+    assert exc.value.code == -32008
+
+
 def test_wallet_create_unsupported_chain_propagates_rpc_error(stub_daemon: StubDaemon):
     def reject(_p):
         raise StubRPCError(-32602, "unsupported chain", "stellar")

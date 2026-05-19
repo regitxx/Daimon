@@ -7,7 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No unreleased changes yet._
+### Added
+
+- **`client.wallet.showMnemonic({password})`** — re-display the
+  daimon's BIP-39 mnemonic. Requires the keystore password as
+  re-confirmation (the daemon re-runs the full Argon2id + AES-GCM-
+  decrypt against the on-disk file, NOT against in-memory state).
+  Wrong password throws `RPCError` with the NEW typed code `-32008`
+  (CodeWrongPassword), distinct from `-32001` (CodeIdentityLocked)
+  so callers can branch on the code without the "daemon is locked"
+  message implying `daimon unlock` is the fix when really it's
+  "type the password again."
+  Use cases: verify the backup was written down correctly; export
+  the seed for import into MetaMask / Phantom / Rabby.
 
 ## [0.2.0-dev.0] — 2026-05-18
 
