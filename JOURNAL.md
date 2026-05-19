@@ -3179,3 +3179,53 @@ The same two items from sessions 41-43:
 Plus a small symmetric follow-on from session 46:
 
 3. **SDK wrappers for `show_mnemonic`** in Python + TypeScript. The RPC verb is callable from either SDK today via the low-level `client._call("daimon.wallet.show_mnemonic", {...})` escape hatch, but the namespace classes don't expose it formally. Mechanical follow-on, ~30 LoC per language plus tests. Landing in the next commit.
+
+## 2026-05-19 — Day Zero, sessions 47–48: backup re-display ↔ seed recovery round-trip
+
+Two contiguous sessions completing the "I have a mnemonic outside my daimon" lifecycle: session 47 finished the SDK wrappers for `show_mnemonic` (the export side), session 48 added `daimon wallet recover` (the import side). Together they close the loop a non-custodial wallet needs to be portable — a daimon can now hand its seed out to MetaMask/Phantom/Rabby for inspection, and a fresh daimon can be hydrated from a backup or from a seed an external wallet already holds.
+
+### Session 47 — SDK wrappers for `show_mnemonic` ([2518884](https://github.com/regitxx/Daimon/commit/2518884))
+
+Mechanical follow-on to session 46. The Go RPC verb + CLI surface shipped in 994d744; this commit makes the same verb a first-class member of `client.wallet` in both SDKs.
+
+- **Python**: `_WalletNamespace.show_mnemonic(*, password: str) -> list[str]`. Same kwargs-only convention as the rest of `client.wallet.*`. Returns the words as a list rather than a single joined string so callers can render them in numbered grids without re-splitting (which is what the CLI itself does).
+- **TypeScript**: `WalletNamespace.showMnemonic({ password }): Promise<string[]>`. New exported type `WalletShowMnemonicParams` for the parameter object. `index.ts` re-export updated.
+- **CHANGELOGs**: both `sdk/python/CHANGELOG.md` and `sdk/typescript/CHANGELOG.md` gained `[Unreleased]` blocks for the new method, with the typed `-32008 CodeWrongPassword` semantics called out explicitly so the docs warn callers about the distinct-from-`-32001`-CodeIdentityLocked decision before they have to debug it.
+- **Tests**: 2 new pytest cases + 2 new vitest cases per SDK — happy-path round-trip (wire shape: `{password}` in, `{mnemonic: [...]}` out) and wrong-password → `RPCError.code == -32008`. Test counts 61 → 63 in both languages.
+
+No daemon-side changes. The wire contract was already pinned in session 46.
+
+### Session 48 — `daimon wallet recover`
+
+Symmetric counterpart to `show-mnemonic`: where show-mnemonic exports the seed, `recover` imports one. Closes the "I already have a 24-word backup elsewhere — I want my daimon to use THAT seed" workflow. Offline-only CLI operation by design.
+
+**Architecture:**
+
+- **`internal/wallet.RecoverInto(path, mnemonic, password)`** writes a fresh keystore at `path` from a caller-supplied `*Mnemonic`. Refuses with new `ErrKeystoreExists` if a file already exists at the target path. Defensive re-validation: even though the caller is expected to have come through `ParseMnemonic`, RecoverInto re-runs BIP-39 checksum validation before writing — a bad-checksum mnemonic landing on disk would produce an un-openable keystore that no Open call could ever decrypt (it'd fail at the mnemonic-parse step with the right password, looking exactly like a corrupted file).
+- **`daimon wallet recover` CLI subcommand**, no flags, fully interactive. Reads both the phrase and the password no-echo via `readPassword` (the same shim `daimon unlock` and `daimon init` use). Validates the phrase via `ParseMnemonic` BEFORE prompting for the password — wasted-typing avoidance. Accepts 12- or 24-word phrases so users coming from MetaMask defaults (12 words) aren't forced to pad. Surface includes a banner explaining the irreversibility, an actionable error message with `mv` hint when the keystore already exists, and a next-step pointer to `daimon unlock`.
+- **Refuse if keystore exists** is enforced TWICE: once in the CLI as a pre-flight (so the user isn't asked to type a 24-word phrase only to learn the operation was impossible from the start) and once atomically inside `RecoverInto` itself (so the package-level contract holds even if a future caller bypasses the pre-flight). The CLI maps the second-check `ErrKeystoreExists` to a TOCTOU-aware "appeared during recovery" error so the failure mode is legible.
+
+**Offline-only on purpose:** the daimon, if running and unlocked, is already holding a different keystore in memory. A live seed-swap would orphan every wallet derived from the previous mnemonic AND leave the daemon's in-memory cache desynchronised from the on-disk file — exactly the half-state our crypto layer is not designed for. So recover talks to disk only, never the daemon socket; the user restarts the daemon after recovery to pick up the new keystore through the normal `daimon unlock` pipeline. The next unlock takes the `loadKeystore` branch instead of the `createKeystore` branch and the imported seed lives.
+
+**Why no SDK wrapper:** the SDKs talk to a running daemon. Recovery operates on the daemon's static state (the keystore file) BEFORE the daemon ever opens it. Exposing it through the SDK would either (a) require a daemon-running-but-wallet-keystore-absent precondition that's already covered cleanly by the CLI's offline path, or (b) implement a destructive "wipe and recover" verb on a running daemon, which is the half-state we deliberately rejected above. The CLI surface is the right place for this operation, and the user is the right party to be standing at the keyboard while it happens.
+
+**Test coverage** (4 new wallet-package tests; test count 19 → 23 in `internal/wallet`):
+
+- `TestRecoverInto_WritesKeystoreFromSuppliedSeed` — round-trip: hand RecoverInto the canonical 12-word `abandon ... about` BIP-39 vector, prove that Open against the resulting file with the recovery password yields a Store whose index-0 EVM wallet derives to `0x9858EfFD232B4033E47d90003D41EC34EcaEda94`, the same well-known address every BIP-39 derivation tool (iancoleman.io/bip39, MetaMask, Phantom) returns. Anchors the recover path against an externally-verifiable fixture, not just against ourselves.
+- `TestRecoverInto_RefusesIfKeystoreAlreadyExists` — drives the refusal path against a normally-created keystore.
+- `TestRecoverInto_RejectsInvalidMnemonic` — constructs a Mnemonic struct directly (bypassing ParseMnemonic) with a bad-checksum phrase and confirms RecoverInto catches it AND doesn't leave a partial file on disk.
+- `TestRecoverInto_RejectsEmptyMnemonic` — `nil`, `{Words: nil}`, `{Words: []}` all rejected.
+
+**Live smoke verified end-to-end** against a temp `$DAIMON_HOME`:
+- Happy path: `printf 'abandon ... about\npw\npw\n' | daimon wallet recover` → keystore at mode 0600, banner displays correctly, password buffers zeroed via defer.
+- Duplicate refusal: second `recover` run against the same `$DAIMON_HOME` aborts BEFORE touching the file, error message includes the actual path and an actionable `mv ... .backup` hint.
+- Bad-checksum refusal: phrase with one wrong word → "invalid mnemonic — check the word list, spelling, and order"; no partial file written.
+
+**Test count delta**: 339 → 343 Go race+vet (+4 in wallet). Python/TS SDK suites unchanged (no SDK wrapper, as explained above).
+
+### State at end of sessions 47–48
+
+- The "export seed for inspection in another wallet" + "import seed from another wallet into a fresh daimon" loop is now closed. Together with the auto-create-on-first-unlock path, the daimon's seed lifecycle covers the three real-world entry points: generate fresh, see what you generated, or bring your own.
+- v0.1 stable + v0.2 pre-release surfaces remain unchanged on PyPI / npm. Recover is a Go binary change — users on the pre-release tracks get it automatically when they next pull the daimon CLI.
+- Test counts: 343 Go race+vet + 63 pytest + 63 vitest + 9 CI shards.
+- Still-pending: phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay) — same as session 46's exit state.

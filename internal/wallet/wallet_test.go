@@ -3,6 +3,7 @@ package wallet
 import (
 	"crypto/sha256"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -390,6 +391,97 @@ func TestStore_ShowMnemonic_ReVerifiesAgainstDiskNotMemory(t *testing.T) {
 	}
 	if got.String() != want {
 		t.Fatalf("mnemonic drift after wallet creates")
+	}
+}
+
+// --- RecoverInto: offline seed import ---------------------------------------
+
+func TestRecoverInto_WritesKeystoreFromSuppliedSeed(t *testing.T) {
+	// Drives the round-trip the CLI flow promises: hand RecoverInto a
+	// known mnemonic, then prove that Open against the resulting file
+	// (with the same password) yields a Store that derives addresses
+	// from THAT mnemonic, not from a freshly generated one.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	m, err := ParseMnemonic(canonicalTwelveWordMnemonic)
+	if err != nil {
+		t.Fatalf("ParseMnemonic: %v", err)
+	}
+
+	if err := RecoverInto(path, m, []byte("recovery-password")); err != nil {
+		t.Fatalf("RecoverInto: %v", err)
+	}
+
+	// Reopen — should see this is a load, NOT a create (m2 == nil).
+	s, m2, err := Open(path, []byte("recovery-password"))
+	if err != nil {
+		t.Fatalf("Open(post-recover): %v", err)
+	}
+	defer s.Close()
+	if m2 != nil {
+		t.Fatalf("expected Open to take the load branch (nil mnemonic), got %v", m2)
+	}
+
+	// Derive index-0 EVM wallet — must match the canonical 12-word vector
+	// address. Proves the keystore really holds the supplied seed.
+	w, err := s.CreateWallet("evm:base")
+	if err != nil {
+		t.Fatalf("CreateWallet: %v", err)
+	}
+	if w.Address != canonicalTwelveWordEVMAddrIndex0 {
+		t.Fatalf("recovered seed produced wrong address:\n  got  %s\n  want %s",
+			w.Address, canonicalTwelveWordEVMAddrIndex0)
+	}
+}
+
+func TestRecoverInto_RefusesIfKeystoreAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+
+	// Set up an existing keystore via the normal create path.
+	s, _, err := Open(path, []byte("existing-pw"))
+	if err != nil {
+		t.Fatalf("Open(create): %v", err)
+	}
+	s.Close()
+
+	// Attempt to recover into the same path — must refuse.
+	m, _ := ParseMnemonic(canonicalTwelveWordMnemonic)
+	err = RecoverInto(path, m, []byte("any-password"))
+	if !errors.Is(err, ErrKeystoreExists) {
+		t.Fatalf("expected ErrKeystoreExists, got %v", err)
+	}
+}
+
+func TestRecoverInto_RejectsInvalidMnemonic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+
+	// Construct a Mnemonic struct directly (bypassing ParseMnemonic) with
+	// a bad-checksum word list. RecoverInto must catch this — otherwise
+	// a typo-during-recovery could land an un-openable keystore on disk
+	// that no Open call could ever decrypt (loadKeystore would fail at
+	// ParseMnemonic, leaving the user with a "wrong password" error for
+	// the right password).
+	bad := &Mnemonic{Words: strings.Fields(
+		strings.Replace(trezorAllZerosMnemonic, "art", "able", 1),
+	)}
+	if err := RecoverInto(path, bad, []byte("pw")); !errors.Is(err, ErrInvalidMnemonic) {
+		t.Fatalf("expected ErrInvalidMnemonic, got %v", err)
+	}
+	// And the file must not have been written.
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("RecoverInto left a partial keystore on disk after rejecting a bad mnemonic")
+	}
+}
+
+func TestRecoverInto_RejectsEmptyMnemonic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	for _, m := range []*Mnemonic{nil, {Words: nil}, {Words: []string{}}} {
+		if err := RecoverInto(path, m, []byte("pw")); !errors.Is(err, ErrInvalidMnemonic) {
+			t.Fatalf("expected ErrInvalidMnemonic for %+v, got %v", m, err)
+		}
 	}
 }
 

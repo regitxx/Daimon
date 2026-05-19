@@ -44,6 +44,14 @@ var (
 	// chain is already present in the keystore. v0.2 holds one wallet per
 	// chain label; multi-wallet-per-chain can be added later if needed.
 	ErrChainAlreadyExists = errors.New("wallet: chain already exists in keystore")
+	// ErrKeystoreExists is returned by RecoverInto when a wallet keystore
+	// already exists at the target path. Recovery refuses to overwrite a
+	// non-empty file by design: replacing the seed of an existing keystore
+	// would orphan every wallet derived from the previous mnemonic, and
+	// silently destroying that data is exactly the kind of footgun a
+	// password-protected wallet flow must not have. Callers should move
+	// the existing keystore out of the way manually first.
+	ErrKeystoreExists = errors.New("wallet: keystore already exists at target path")
 )
 
 // keystoreFile is the on-disk envelope. Identical shape to identity's
@@ -184,6 +192,48 @@ func loadKeystore(path string, password []byte) (*Store, error) {
 		mnemonic: m,
 		wallets:  pt.Wallets,
 	}, nil
+}
+
+// RecoverInto writes a fresh wallet keystore at path from a caller-supplied
+// BIP-39 mnemonic, encrypted under password. The symmetric counterpart to
+// ShowMnemonic — ShowMnemonic exports the seed for portability, RecoverInto
+// imports a seed from elsewhere (a written backup, MetaMask, Phantom, …) so
+// the daimon derives every wallet from that pre-existing seed instead of a
+// freshly generated one.
+//
+// Returns ErrKeystoreExists if a file already exists at path. By design,
+// RecoverInto refuses to overwrite — replacing the seed of an existing
+// keystore would orphan every wallet derived from the previous mnemonic and
+// silently destroying that data is exactly the kind of footgun that a
+// password-protected wallet flow must not have. Callers wanting to start
+// fresh on the canonical path must move the existing keystore out of the way
+// manually first; that physical act forces them to acknowledge the data loss.
+//
+// This function does NOT open the resulting keystore — it just lays down the
+// encrypted file. The next `daimon unlock` will load it through the normal
+// loadKeystore path. Keeping recovery offline-only (no live *Store handle
+// returned) means the daemon never has to coordinate a seed swap on a running
+// system, which is the source of most "I lost my funds in the recovery step"
+// stories in this space.
+func RecoverInto(path string, mnemonic *Mnemonic, password []byte) error {
+	if mnemonic == nil || len(mnemonic.Words) == 0 {
+		return ErrInvalidMnemonic
+	}
+	// Defensive re-validation: the parser is authoritative, but RecoverInto
+	// is reachable from CLI code that's typing-in a phrase by hand and a
+	// late checksum failure here saves an unrecoverable keystore from
+	// landing on disk if the mnemonic was constructed bypassing
+	// ParseMnemonic.
+	if _, err := ParseMnemonic(mnemonic.String()); err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
+		return ErrKeystoreExists
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat keystore: %w", err)
+	}
+	pt := plaintext{Mnemonic: mnemonic.String(), Wallets: nil}
+	return writeKeystore(path, password, pt)
 }
 
 // writeKeystore seals the plaintext under a fresh Argon2id KEK + AES-GCM

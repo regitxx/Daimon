@@ -1,9 +1,14 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
+
+	"github.com/regitxx/Daimon/internal/daimonhome"
+	"github.com/regitxx/Daimon/internal/wallet"
 )
 
 // cmdWallet routes the `wallet` subcommand surface. Every subcommand is a
@@ -16,7 +21,7 @@ import (
 // is tied to the unlock lifecycle, not to a user-initiated init step.
 func cmdWallet(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: daimon wallet <list|create|address|sign> [args]")
+		return fmt.Errorf("usage: daimon wallet <list|create|address|sign|show-mnemonic|recover> [args]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -31,6 +36,8 @@ func cmdWallet(args []string) error {
 		return cmdWalletSign(rest)
 	case "show-mnemonic":
 		return cmdWalletShowMnemonic(rest)
+	case "recover":
+		return cmdWalletRecover(rest)
 	default:
 		return fmt.Errorf("daimon wallet: unknown subcommand %q", sub)
 	}
@@ -235,6 +242,146 @@ func cmdWalletSign(args []string) error {
 		return printJSON(out)
 	}
 	fmt.Println(out.SignatureHex)
+	return nil
+}
+
+// --- daimon wallet recover ---------------------------------------------------
+
+// cmdWalletRecover is the offline counterpart to `daimon wallet
+// show-mnemonic`: it writes a fresh wallet keystore at
+// $DAIMON_HOME/wallet.keystore from a user-supplied BIP-39 phrase, so the
+// daimon derives every wallet from that pre-existing seed instead of a
+// freshly generated one. Typical use: "I already have a 24-word backup from
+// MetaMask / Phantom / Rabby / my own paper backup, I want my daimon to use
+// THAT seed."
+//
+// Hard refusal if a keystore already exists at the target path. Recovery on
+// top of a populated keystore would orphan every wallet derived from the
+// previous mnemonic; making the user physically move the old file first
+// keeps the irreversible part of the workflow under their conscious
+// control, not the CLI's.
+//
+// Talks to the disk directly — never the daemon socket — because the daemon,
+// if running and unlocked, is already holding a different keystore in memory
+// and a live seed swap is exactly the kind of half-state our crypto layer is
+// not designed for. The user must restart the daemon after recovery so the
+// new keystore is loaded through the normal unlock pipeline.
+//
+// Both the mnemonic and the password are read no-echo. The mnemonic is the
+// most sensitive secret a daimon holds (the password gates one keystore;
+// the mnemonic regenerates EVERY key the daimon will ever derive), so
+// putting it on the command line — where it would land in shell history,
+// process tables, and `ps -ef` — is not offered as an option.
+func cmdWalletRecover(args []string) error {
+	fs := flag.NewFlagSet("daimon wallet recover", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: daimon wallet recover")
+	}
+
+	home, err := daimonhome.Resolve()
+	if err != nil {
+		return err
+	}
+	walletPath := filepath.Join(home, "wallet.keystore")
+
+	// Pre-flight: refuse before any prompting if a keystore already
+	// exists. RecoverInto re-checks atomically; the early stat saves the
+	// user from typing out a 24-word phrase only to learn the operation
+	// was impossible from the start.
+	if _, err := os.Stat(walletPath); err == nil {
+		return fmt.Errorf("a wallet keystore already exists at %s\n\n"+
+			"Recovery cannot proceed without overwriting it, which would orphan\n"+
+			"every wallet derived from the current seed. If you really want to\n"+
+			"start fresh from a different mnemonic, move the existing file out\n"+
+			"of the way first (e.g. `mv %s %s.backup`) and re-run this command.",
+			walletPath, walletPath, walletPath)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat keystore: %w", err)
+	}
+
+	// Pre-flight banner. The mnemonic the user is about to type is THE
+	// most sensitive secret the daimon will ever hold — surface that
+	// before they paste/type it in, not after.
+	fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
+	fmt.Fprintln(os.Stderr, "Wallet recovery — import an existing BIP-39 seed.")
+	fmt.Fprintln(os.Stderr, "───────────────────────────────────────────────────────────────────")
+	fmt.Fprintln(os.Stderr, "This writes a new wallet keystore at:")
+	fmt.Fprintf(os.Stderr, "  %s\n", walletPath)
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "The password you choose here MUST be the same as your daimon")
+	fmt.Fprintln(os.Stderr, "unlock password — daimond loads the wallet keystore using that")
+	fmt.Fprintln(os.Stderr, "password on every unlock. If they differ, wallet RPCs will")
+	fmt.Fprintln(os.Stderr, "silently disable themselves at next unlock (you'll see a stderr")
+	fmt.Fprintln(os.Stderr, "log line on daimond startup).")
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Your input is hidden. Paste or type the 12- or 24-word phrase as")
+	fmt.Fprintln(os.Stderr, "a single line, words separated by spaces.")
+	fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
+
+	phrase, err := readPassword("Recovery phrase: ")
+	if err != nil {
+		return err
+	}
+	defer zero(phrase)
+	if len(phrase) == 0 {
+		return errors.New("recovery phrase must not be empty")
+	}
+
+	m, err := wallet.ParseMnemonic(string(phrase))
+	if err != nil {
+		// Don't echo back what they typed — even partial leakage of a
+		// near-valid mnemonic is more information than a thief should
+		// get from a CLI error message. Tell them the word count we
+		// expected and that the BIP-39 checksum failed; that's enough
+		// to debug a real typo.
+		return fmt.Errorf("invalid mnemonic — check the word list, spelling, and order " +
+			"(must be a valid 12- or 24-word BIP-39 phrase)")
+	}
+	// Feedback so the user knows their input was accepted, without ever
+	// echoing the phrase itself.
+	fmt.Fprintf(os.Stderr, "Accepted %d-word phrase (BIP-39 checksum valid).\n", len(m.Words))
+
+	pw1, err := readPassword("Choose a password: ")
+	if err != nil {
+		return err
+	}
+	defer zero(pw1)
+	if len(pw1) == 0 {
+		return errors.New("password must not be empty")
+	}
+	pw2, err := readPassword("Confirm password:  ")
+	if err != nil {
+		return err
+	}
+	defer zero(pw2)
+	if string(pw1) != string(pw2) {
+		return errors.New("passwords did not match")
+	}
+
+	if err := wallet.RecoverInto(walletPath, m, pw1); err != nil {
+		// ErrKeystoreExists can race in here only if the file appeared
+		// between the pre-flight stat and the RecoverInto write — vanishingly
+		// unlikely outside intentionally hostile concurrent use, but surface
+		// it cleanly anyway.
+		if errors.Is(err, wallet.ErrKeystoreExists) {
+			return fmt.Errorf("a wallet keystore appeared at %s during recovery — aborted", walletPath)
+		}
+		return fmt.Errorf("recover: %w", err)
+	}
+
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Wallet keystore written.")
+	fmt.Fprintf(os.Stderr, "  Path:  %s (mode 0600)\n", walletPath)
+	fmt.Fprintf(os.Stderr, "  Seed:  %d words, encrypted under your chosen password\n", len(m.Words))
+	fmt.Fprintln(os.Stderr)
+	fmt.Fprintln(os.Stderr, "Next: `daimon unlock` to bring up the daemon against this seed,")
+	fmt.Fprintln(os.Stderr, "then `daimon wallet create --chain evm:base` to derive your first")
+	fmt.Fprintln(os.Stderr, "wallet from it. The derived address should match what your other")
+	fmt.Fprintln(os.Stderr, "wallet shows for the same seed at path m/44'/60'/0'/0/0.")
 	return nil
 }
 
