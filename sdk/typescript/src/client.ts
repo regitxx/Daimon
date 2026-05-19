@@ -98,6 +98,22 @@ export interface WalletSignParams {
   digestHex: string;
 }
 
+export interface WalletDeriveParams {
+  /** Chain label (e.g. `"evm:base"`). */
+  chain: string;
+  /**
+   * BIP-44 HD index. Defaults to `0` (the typical "main address" position).
+   */
+  index?: number;
+}
+
+export interface WalletDeriveResult {
+  chain: string;
+  path: string;
+  address: string;
+  pubkey: string;
+}
+
 export interface WalletShowMnemonicParams {
   /**
    * The keystore password. Re-verified via the daemon's full Argon2id +
@@ -355,6 +371,33 @@ class WalletNamespace {
    *
    * Performance: Argon2id KDF costs ~100ms by design.
    */
+  /**
+   * Compute the address that would be derived at (chain, index)
+   * WITHOUT persisting anything. Read-only counterpart to `create`.
+   * Useful for "did my `daimon wallet recover` import the right
+   * seed?" — derive at index 0 and compare against an externally-
+   * known address (e.g. what MetaMask shows for the same seed).
+   *
+   * Returns the address along with the BIP-44 derivation path and
+   * compressed pubkey hex — same shape as `create` minus the
+   * persistence fields (`id`, `createdAt`).
+   *
+   * Throws `RPCError` with code `-32602` if the chain is not in
+   * v0.2's supported registry.
+   */
+  async derive(params: WalletDeriveParams): Promise<WalletDeriveResult> {
+    const result = (await this.c._call("daimon.wallet.derive", {
+      chain: params.chain,
+      index: params.index ?? 0,
+    })) as WalletDeriveResult;
+    return {
+      chain: result.chain,
+      path: result.path,
+      address: result.address,
+      pubkey: result.pubkey,
+    };
+  }
+
   async showMnemonic(params: WalletShowMnemonicParams): Promise<string[]> {
     const result = (await this.c._call("daimon.wallet.show_mnemonic", {
       password: params.password,

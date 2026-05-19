@@ -21,7 +21,7 @@ import (
 // is tied to the unlock lifecycle, not to a user-initiated init step.
 func cmdWallet(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf("usage: daimon wallet <list|create|address|sign|show-mnemonic|recover> [args]")
+		return fmt.Errorf("usage: daimon wallet <list|create|address|derive|sign|show-mnemonic|recover> [args]")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -32,6 +32,8 @@ func cmdWallet(args []string) error {
 		return cmdWalletCreate(rest)
 	case "address":
 		return cmdWalletAddress(rest)
+	case "derive":
+		return cmdWalletDerive(rest)
 	case "sign":
 		return cmdWalletSign(rest)
 	case "show-mnemonic":
@@ -213,6 +215,44 @@ func cmdWalletShowMnemonic(args []string) error {
 	return nil
 }
 
+// --- daimon wallet derive ----------------------------------------------------
+
+// cmdWalletDerive computes the address that WOULD be derived for
+// (chain, index) without persisting anything. Read-only counterpart to
+// `daimon wallet create`. Useful for "did my `wallet recover` import the
+// right seed?" — derive index 0 and compare against an externally-known
+// address (e.g. what MetaMask shows for the same seed). Doesn't touch
+// the wallet list or the audit log.
+func cmdWalletDerive(args []string) error {
+	fs := flag.NewFlagSet("daimon wallet derive", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	chain := fs.String("chain", "", "chain label, e.g. evm:base (required)")
+	index := fs.Uint("index", 0, "BIP-44 HD index (default 0, the typical 'main address')")
+	asJSON := fs.Bool("json", false, "emit the full result envelope as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *chain == "" {
+		return fmt.Errorf("--chain is required (e.g. evm:base)")
+	}
+
+	params := map[string]any{"chain": *chain, "index": *index}
+	var out struct {
+		Chain   string `json:"chain"`
+		Path    string `json:"path"`
+		Address string `json:"address"`
+		PubKey  string `json:"pubkey"`
+	}
+	if err := daemonCall("daimon.wallet.derive", params, &out); err != nil {
+		return err
+	}
+	if *asJSON {
+		return printJSON(out)
+	}
+	fmt.Println(out.Address)
+	return nil
+}
+
 // --- daimon wallet sign ------------------------------------------------------
 
 // cmdWalletSign exposes the low-level signing primitive for advanced/debug
@@ -373,15 +413,39 @@ func cmdWalletRecover(args []string) error {
 		return fmt.Errorf("recover: %w", err)
 	}
 
+	// Derive the index-0 EVM address from the imported seed so the user
+	// can verify against an externally-known address (e.g. MetaMask /
+	// Phantom for the same seed) right now, without having to start the
+	// daemon. This is THE moment to catch "I typed the wrong seed" —
+	// if the displayed address doesn't match what they expected, they
+	// can `rm` the keystore and re-run with the corrected phrase. After
+	// the daemon unlocks against this keystore and they create wallets,
+	// undoing the wrong seed is much more disruptive.
+	derived, derr := wallet.DeriveAddress(m, "evm:base", 0)
+
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Wallet keystore written.")
 	fmt.Fprintf(os.Stderr, "  Path:  %s (mode 0600)\n", walletPath)
 	fmt.Fprintf(os.Stderr, "  Seed:  %d words, encrypted under your chosen password\n", len(m.Words))
+	if derr == nil {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  Verify this is the correct seed:")
+		fmt.Fprintf(os.Stderr, "    evm:base address at %s\n", derived.Path)
+		fmt.Fprintf(os.Stderr, "      %s\n", derived.Address)
+		fmt.Fprintln(os.Stderr, "  This should match what your external wallet shows for the same")
+		fmt.Fprintln(os.Stderr, "  seed at the same path. If it doesn't, delete the keystore now")
+		fmt.Fprintln(os.Stderr, "  and re-run recovery with the correct phrase — once you unlock")
+		fmt.Fprintln(os.Stderr, "  the daemon and start creating wallets, fixing a typo gets harder.")
+	} else {
+		// Defensive: DeriveAddress is a pure function over the validated
+		// mnemonic we just wrote to disk, so a failure here is implausible.
+		// Surface to stderr without aborting the success message.
+		fmt.Fprintf(os.Stderr, "  (verification address could not be derived: %v)\n", derr)
+	}
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Next: `daimon unlock` to bring up the daemon against this seed,")
 	fmt.Fprintln(os.Stderr, "then `daimon wallet create --chain evm:base` to derive your first")
-	fmt.Fprintln(os.Stderr, "wallet from it. The derived address should match what your other")
-	fmt.Fprintln(os.Stderr, "wallet shows for the same seed at path m/44'/60'/0'/0/0.")
+	fmt.Fprintln(os.Stderr, "wallet from it.")
 	return nil
 }
 

@@ -339,6 +339,38 @@ class _WalletNamespace:
         )
         return result["signature_hex"]
 
+    def derive(self, *, chain: str, index: int = 0) -> dict:
+        """Compute the address that would be derived at (chain, index)
+        WITHOUT persisting anything.
+
+        Read-only counterpart to :meth:`create`. Useful for "did my
+        ``daimon wallet recover`` import the right seed?" verification:
+        derive at index 0 and compare against an externally-known
+        address (e.g. what MetaMask shows for the same seed). Also
+        useful for pre-computing what address index N would produce
+        before actually creating a wallet at that index.
+
+        Returns a dict with ``chain``, ``path``, ``address``, and
+        ``pubkey`` keys — same shape ``create`` returns minus the
+        persistence fields (``id``, ``created_at``).
+
+        :param chain: Chain label (e.g. ``"evm:base"``). Required.
+        :param index: BIP-44 HD index. Defaults to 0 (the typical
+            "main address" position).
+        :raises RPCError: code ``-32602`` if the chain is not in v0.2's
+            supported registry.
+        """
+        result = self._c._call(
+            "daimon.wallet.derive",
+            {"chain": chain, "index": index},
+        )
+        return {
+            "chain": result["chain"],
+            "path": result["path"],
+            "address": result["address"],
+            "pubkey": result["pubkey"],
+        }
+
     def show_mnemonic(self, *, password: str) -> list[str]:
         """Re-display the 24-word BIP-39 mnemonic stored in the keystore.
 

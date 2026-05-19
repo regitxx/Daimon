@@ -135,6 +135,59 @@ func (s *Server) handleWalletAddress(_ context.Context, params json.RawMessage) 
 	return walletAddressResult{Address: w.Address}, nil
 }
 
+// --- daimon.wallet.derive ---------------------------------------------------
+
+// Compute the address that WOULD be derived for (chain, index) without
+// persisting anything. Read-only counterpart to daimon.wallet.create —
+// useful for "did my recovery produce the right seed?" verification
+// (derive index 0, compare to externally-known address) and for
+// pre-computing what address index N will produce before actually
+// creating a wallet.
+//
+// The verb intentionally allows index to be any uint32, including
+// indices already occupied by existing wallets — `derive` doesn't check
+// uniqueness because no persistence happens. The activity log is NOT
+// written to: deriving an address is a pure computation that doesn't
+// merit an audit row.
+
+type walletDeriveParams struct {
+	Chain string `json:"chain"`
+	Index uint32 `json:"index"` // omitting → 0 (the typical "main address" position)
+}
+
+type walletDeriveResult struct {
+	Chain   string `json:"chain"`
+	Path    string `json:"path"`
+	Address string `json:"address"`
+	PubKey  string `json:"pubkey"`
+}
+
+func (s *Server) handleWalletDerive(_ context.Context, params json.RawMessage) (any, *RPCError) {
+	if s.wstore == nil {
+		return nil, walletNotReady()
+	}
+	var p walletDeriveParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Chain == "" {
+		return nil, newError(CodeInvalidParams, "chain is required")
+	}
+	d, err := s.wstore.Derive(p.Chain, p.Index)
+	switch {
+	case errors.Is(err, wallet.ErrUnsupportedChain):
+		return nil, newError(CodeInvalidParams, "unsupported chain", p.Chain)
+	case err != nil:
+		return nil, newError(CodeInternalError, "derive address", err.Error())
+	}
+	return walletDeriveResult{
+		Chain:   d.Chain,
+		Path:    d.Path,
+		Address: d.Address,
+		PubKey:  d.PubKey,
+	}, nil
+}
+
 // --- daimon.wallet.show_mnemonic --------------------------------------------
 
 // Re-surface the BIP-39 mnemonic stored in the keystore. Requires

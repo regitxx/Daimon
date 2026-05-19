@@ -62,6 +62,7 @@ func (s *Server) registerMethods() {
 		"daimon.wallet.create":        s.handleWalletCreate,
 		"daimon.wallet.address":       s.handleWalletAddress,
 		"daimon.wallet.sign":          s.handleWalletSign,
+		"daimon.wallet.derive":        s.handleWalletDerive,
 		"daimon.wallet.show_mnemonic": s.handleWalletShowMnemonic,
 		"daimon.payment.pay":          s.handlePaymentPay,
 	}

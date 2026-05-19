@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`client.wallet.derive(chain=, index=0)`** — compute the address
+  that WOULD be derived for `(chain, index)` without persisting
+  anything. Read-only counterpart to `wallet.create`. Returns a
+  dict with `chain`, `path`, `address`, `pubkey` keys — same shape
+  `create` returns minus the persistence fields. Useful for
+  verifying a recovered seed produces the expected address before
+  calling `create`, or for pre-computing what address index N
+  would produce.
+
 ## [0.2.0.dev1] — 2026-05-19
 
 Second pre-release on the v0.2 track. Adds the password-gated

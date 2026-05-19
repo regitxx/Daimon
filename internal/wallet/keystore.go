@@ -407,6 +407,28 @@ func (s *Store) SignDigest(chain string, digest []byte) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
+// Derive is the Store-bound convenience wrapper over DeriveAddress: takes
+// the in-memory mnemonic, computes the address that would be derived at
+// (chain, index), and returns it without persisting. Useful for verifying
+// a recovered seed produces the expected address before calling
+// CreateWallet, or for pre-computing what address index N would produce.
+//
+// Locked under s.mu so a concurrent CreateWallet can't race against
+// derivation. Doesn't touch the audit log — derivation is a read-only
+// computation.
+func (s *Store) Derive(chain string, index uint32) (*DerivedAddress, error) {
+	s.mu.Lock()
+	m := s.mnemonic
+	s.mu.Unlock()
+	if m == nil {
+		// Should not happen in practice — Store is only valid between Open
+		// and Close. Defensive in case a future code path zeros the
+		// mnemonic before Close is called.
+		return nil, errors.New("wallet: store mnemonic is empty")
+	}
+	return DeriveAddress(m, chain, index)
+}
+
 // ShowMnemonic re-verifies the caller knows the keystore password and
 // returns the stored mnemonic. The supplied password is run through the
 // full Argon2id + AES-GCM-decrypt pipeline against the on-disk keystore

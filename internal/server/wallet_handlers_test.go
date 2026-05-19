@@ -199,6 +199,95 @@ func TestHandleWalletSign_RejectsBadDigest(t *testing.T) {
 	}
 }
 
+// --- derive (read-only address derivation) ----------------------------------
+
+func TestHandleWalletDerive_MatchesCreate(t *testing.T) {
+	// Both verbs feed the same mnemonic + same path through the same
+	// derivation pipeline, so derive(chain, 0) should produce identical
+	// (address, path, pubkey) to whatever create(chain) yields. Any
+	// divergence here is a regression in the wallet pipeline.
+	f, _ := newWalletFixture(t)
+
+	resp := f.call(t, "daimon.wallet.derive", map[string]any{
+		"chain": "evm:base",
+		"index": 0,
+	})
+	var pre walletDeriveResult
+	resultAs(t, resp, &pre)
+	if pre.Path != "m/44'/60'/0'/0/0" {
+		t.Fatalf("derive path = %q, want m/44'/60'/0'/0/0", pre.Path)
+	}
+
+	resp = f.call(t, "daimon.wallet.create", map[string]any{"chain": "evm:base"})
+	var created walletEntry
+	resultAs(t, resp, &created)
+	if pre.Address != created.Address {
+		t.Fatalf("derive predicted %s but create produced %s", pre.Address, created.Address)
+	}
+	if pre.PubKey != created.PubKey {
+		t.Fatalf("derive pubkey != create pubkey")
+	}
+}
+
+func TestHandleWalletDerive_DoesNotPersist(t *testing.T) {
+	f, _ := newWalletFixture(t)
+	// Derive should NOT touch the wallet list — list before, derive,
+	// list after, expect same length.
+	respBefore := f.call(t, "daimon.wallet.list", nil)
+	var before []walletEntry
+	resultAs(t, respBefore, &before)
+
+	_ = f.call(t, "daimon.wallet.derive", map[string]any{
+		"chain": "evm:base",
+		"index": 0,
+	})
+
+	respAfter := f.call(t, "daimon.wallet.list", nil)
+	var after []walletEntry
+	resultAs(t, respAfter, &after)
+	if len(before) != len(after) {
+		t.Fatalf("derive mutated wallet list: %d → %d", len(before), len(after))
+	}
+}
+
+func TestHandleWalletDerive_IndexZeroDefault(t *testing.T) {
+	// Omitting the index param should derive at index 0 (the typical
+	// "main address" position). Tests that the JSON-RPC param schema
+	// treats missing-uint32 as zero, matching the Go zero-value
+	// convention rather than requiring callers to send `"index": 0`.
+	f, _ := newWalletFixture(t)
+	resp := f.call(t, "daimon.wallet.derive", map[string]any{"chain": "evm:base"})
+	var out walletDeriveResult
+	resultAs(t, resp, &out)
+	if out.Path != "m/44'/60'/0'/0/0" {
+		t.Fatalf("index-zero default path = %q, want m/44'/60'/0'/0/0", out.Path)
+	}
+}
+
+func TestHandleWalletDerive_DistinctIndicesYieldDistinctAddresses(t *testing.T) {
+	f, _ := newWalletFixture(t)
+	respA := f.call(t, "daimon.wallet.derive", map[string]any{"chain": "evm:base", "index": 0})
+	var a walletDeriveResult
+	resultAs(t, respA, &a)
+	respB := f.call(t, "daimon.wallet.derive", map[string]any{"chain": "evm:base", "index": 1})
+	var b walletDeriveResult
+	resultAs(t, respB, &b)
+	if a.Address == b.Address {
+		t.Fatalf("indices 0 and 1 collapsed to same address: %s", a.Address)
+	}
+}
+
+func TestHandleWalletDerive_RejectsUnsupportedChain(t *testing.T) {
+	f, _ := newWalletFixture(t)
+	resp := f.call(t, "daimon.wallet.derive", map[string]any{"chain": "svm:solana", "index": 0})
+	if resp.Error == nil {
+		t.Fatal("expected error for unsupported chain")
+	}
+	if resp.Error.Code != CodeInvalidParams {
+		t.Fatalf("error code = %d, want CodeInvalidParams (%d)", resp.Error.Code, CodeInvalidParams)
+	}
+}
+
 // --- show_mnemonic ----------------------------------------------------------
 
 func TestHandleWalletShowMnemonic_ReturnsSeedOnRightPassword(t *testing.T) {
@@ -270,6 +359,7 @@ func TestWalletRPCs_RejectWhenWalletNotLoaded(t *testing.T) {
 		{"daimon.wallet.create", map[string]any{"chain": "evm:base"}},
 		{"daimon.wallet.address", map[string]any{"chain": "evm:base"}},
 		{"daimon.wallet.sign", map[string]any{"chain": "evm:base", "digest_hex": "00"}},
+		{"daimon.wallet.derive", map[string]any{"chain": "evm:base", "index": 0}},
 		{"daimon.wallet.show_mnemonic", map[string]any{"password": "x"}},
 	} {
 		t.Run(c.method, func(t *testing.T) {

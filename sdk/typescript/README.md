@@ -105,6 +105,14 @@ for (const w of await client.wallet.list()) {
 // Quick lookup by chain
 const addr = await client.wallet.address({ chain: "evm:base" });
 
+// Compute the address that WOULD be derived at a given HD index
+// WITHOUT persisting anything. Handy for verifying a recovered seed:
+// `(await client.wallet.derive({chain: "evm:base", index: 0})).address`
+// should match what MetaMask / Phantom shows for the same seed at
+// the same path. No audit row, no wallet-list mutation.
+const predicted = await client.wallet.derive({ chain: "evm:base", index: 0 });
+console.log(predicted.address, "at", predicted.path);
+
 // Re-display the BIP-39 mnemonic, password-gated. Returns the
 // 24-word list. Useful for verifying the backup was written down
 // correctly, or exporting the seed to MetaMask / Phantom / Rabby.

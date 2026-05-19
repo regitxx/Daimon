@@ -106,6 +106,14 @@ for w in client.wallet.list():
 # Quick lookup by chain
 addr = client.wallet.address(chain="evm:base")
 
+# Compute the address that WOULD be derived at a given HD index
+# WITHOUT persisting anything. Handy for verifying a recovered seed:
+# `client.wallet.derive(chain="evm:base", index=0)["address"]`
+# should match what MetaMask / Phantom shows for the same seed at
+# the same path. No audit row, no wallet-list mutation.
+predicted = client.wallet.derive(chain="evm:base", index=0)
+print(predicted["address"], "at", predicted["path"])
+
 # Re-display the BIP-39 mnemonic, password-gated. Returns the
 # 24-word list. Useful for verifying the backup was written down
 # correctly, or exporting the seed to MetaMask / Phantom / Rabby.

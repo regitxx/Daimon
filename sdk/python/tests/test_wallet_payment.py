@@ -87,6 +87,47 @@ def test_wallet_sign_returns_signature_hex(stub_daemon: StubDaemon):
     assert sig.startswith("0x") and len(sig) == 2 + 130
 
 
+def test_wallet_derive_threads_chain_and_index(stub_daemon: StubDaemon):
+    received: dict = {}
+
+    def derive(params):
+        received.update(params)
+        return {
+            "chain": params["chain"],
+            "path": f"m/44'/60'/0'/0/{params['index']}",
+            "address": "0xDEADBEEF000000000000000000000000DEADBEEF",
+            "pubkey": "03" + "ab" * 32,
+        }
+
+    stub_daemon.handle("daimon.wallet.derive", derive)
+    client = Client(socket_path=stub_daemon.socket_path)
+    out = client.wallet.derive(chain="evm:base", index=5)
+    # Wire-shape: SDK sends explicit chain + index, even when index is the
+    # default 0, so the daemon's handler doesn't have to encode "missing
+    # field" semantics as a JSON-RPC special case.
+    assert received == {"chain": "evm:base", "index": 5}
+    assert out["path"] == "m/44'/60'/0'/0/5"
+    assert out["address"].startswith("0x")
+
+
+def test_wallet_derive_defaults_index_to_zero(stub_daemon: StubDaemon):
+    received: dict = {}
+
+    def derive(params):
+        received.update(params)
+        return {
+            "chain": params["chain"],
+            "path": "m/44'/60'/0'/0/0",
+            "address": "0x0000000000000000000000000000000000000000",
+            "pubkey": "02" + "00" * 32,
+        }
+
+    stub_daemon.handle("daimon.wallet.derive", derive)
+    client = Client(socket_path=stub_daemon.socket_path)
+    client.wallet.derive(chain="evm:base")  # index omitted
+    assert received == {"chain": "evm:base", "index": 0}
+
+
 def test_wallet_show_mnemonic_returns_word_list(stub_daemon: StubDaemon):
     received: dict = {}
 

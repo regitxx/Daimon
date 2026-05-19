@@ -316,6 +316,13 @@ daimon.wallet.sign({
   digest_hex: string             // 32-byte digest, 0x-prefix optional
 }) → { signature_hex: string }   // 65 bytes [r || s || v] for EVM
 
+daimon.wallet.derive({
+  chain: string,
+  index?: number                 // BIP-44 HD index; default 0
+}) → { chain, path, address, pubkey }
+                                 // read-only: derives without persisting
+                                 // (no audit row, no wallet-list mutation)
+
 daimon.wallet.show_mnemonic({
   password: string               // keystore password, re-verified against on-disk file
 }) → { mnemonic: string[] }      // the 12- or 24-word BIP-39 phrase
@@ -326,6 +333,8 @@ The wallet keystore is auto-created by the unlock callback the first time `daimo
 `daimon.wallet.show_mnemonic` is the password-gated re-display: callers supply the keystore password and the daemon re-runs the full Argon2id + AES-GCM-decrypt against the on-disk keystore (NOT against the in-memory unlocked state). Wrong password surfaces as `CodeWrongPassword = -32008`, distinct from `CodeIdentityLocked = -32001` — the daemon IS unlocked, the password attestation is a separate check, and SDKs / CLIs MUST NOT rewrite the error as "run daimon unlock first" when they see `-32008`.
 
 The symmetric import path — bringing an external 12- or 24-word BIP-39 phrase INTO a fresh daimon — is an offline operation that writes the keystore directly on disk, not an RPC verb. See §14.6.
+
+`daimon.wallet.derive` is the read-only "what address would I get?" verb: it computes the address that would be produced for `(chain, index)` without persisting anything or writing an audit row. Useful for verifying a recovered seed produces the expected address before calling `create` (compare derive's output at index 0 against an externally-known address like the user's MetaMask) and for pre-computing what address a future `create` at index N will yield.
 
 #### Payment (v0.2)
 

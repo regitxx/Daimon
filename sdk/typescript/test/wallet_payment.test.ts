@@ -96,6 +96,39 @@ describe("Client.wallet", () => {
     expect(sig.length).toBe(2 + 130);
   });
 
+  it("derive threads chain + index", async () => {
+    const received: Record<string, unknown> = {};
+    daemon.handle("daimon.wallet.derive", (params) => {
+      Object.assign(received, params as Record<string, unknown>);
+      const p = params as { chain: string; index: number };
+      return {
+        chain: p.chain,
+        path: `m/44'/60'/0'/0/${p.index}`,
+        address: "0xDEADBEEF000000000000000000000000DEADBEEF",
+        pubkey: "03" + "ab".repeat(32),
+      };
+    });
+    const out = await client.wallet.derive({ chain: "evm:base", index: 5 });
+    expect(received).toEqual({ chain: "evm:base", index: 5 });
+    expect(out.path).toBe("m/44'/60'/0'/0/5");
+    expect(out.address.startsWith("0x")).toBe(true);
+  });
+
+  it("derive defaults index to 0", async () => {
+    const received: Record<string, unknown> = {};
+    daemon.handle("daimon.wallet.derive", (params) => {
+      Object.assign(received, params as Record<string, unknown>);
+      return {
+        chain: (params as { chain: string }).chain,
+        path: "m/44'/60'/0'/0/0",
+        address: "0x0000000000000000000000000000000000000000",
+        pubkey: "02" + "00".repeat(32),
+      };
+    });
+    await client.wallet.derive({ chain: "evm:base" });
+    expect(received).toEqual({ chain: "evm:base", index: 0 });
+  });
+
   it("show-mnemonic returns the 24-word seed list", async () => {
     const received: Record<string, unknown> = {};
     const seed = [

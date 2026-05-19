@@ -86,6 +86,19 @@ func parseChain(chain string) chainKind {
 	return chainUnsupported
 }
 
+// DerivedAddress is the read-only "what address would I get?" return type
+// for the derive-without-persist path. Distinct from Wallet because Wallet
+// carries persistence concerns (ID, CreatedAt) that don't apply to a
+// transient derivation: emitting a "Wallet" with zero ID/CreatedAt out of
+// a non-persisting verb would invite consumers to silently treat it as a
+// real keystore entry. The split keeps the wire shape honest.
+type DerivedAddress struct {
+	Chain   string `json:"chain"`   // chain label as passed in
+	Path    string `json:"path"`    // BIP-44 derivation that produced this address
+	Address string `json:"address"` // EIP-55 checksummed for EVM
+	PubKey  string `json:"pubkey"`  // hex-encoded 33-byte compressed secp256k1
+}
+
 // Wallet is a single derived keypair as surfaced via RPC + persisted on disk.
 // The private key is NOT a field here — it lives in the mnemonic + path and
 // is re-derived per signing operation, then zeroed.
@@ -136,6 +149,48 @@ func ParseMnemonic(s string) (*Mnemonic, error) {
 		return nil, ErrInvalidMnemonic
 	}
 	return &Mnemonic{Words: strings.Fields(s)}, nil
+}
+
+// DeriveAddress computes the address that would be derived for `chain` at
+// HD index `index`, WITHOUT persisting anything. Pure function of
+// (mnemonic, chain, index) — same inputs always produce the same output,
+// regardless of what wallets already exist in any Store.
+//
+// This is the read-only counterpart to (*Store).CreateWallet: identical
+// derivation pipeline, but no Store mutation, no audit-log row, no
+// uniqueness check. Use cases:
+//
+//   - "Did my `wallet recover` import the right seed?" — derive index 0
+//     and compare against an externally-known address (e.g. what
+//     MetaMask shows for the same seed).
+//   - "What address would index 5 have?" — predictable derivation across
+//     all standard BIP-44 EVM tooling, so a daimon can pre-compute
+//     addresses that another wallet will produce from the same seed.
+//
+// Returns ErrUnsupportedChain for non-EVM chains.
+func DeriveAddress(mnemonic *Mnemonic, chain string, index uint32) (*DerivedAddress, error) {
+	if mnemonic == nil || len(mnemonic.Words) == 0 {
+		return nil, ErrInvalidMnemonic
+	}
+	if parseChain(chain) != chainEVM {
+		return nil, ErrUnsupportedChain
+	}
+	path := fmt.Sprintf("m/44'/60'/0'/0/%d", index)
+	priv, err := deriveEVMKey(mnemonic, path)
+	if err != nil {
+		return nil, err
+	}
+	defer zero(priv)
+	address, pubKey, err := publicKeyAddress(priv)
+	if err != nil {
+		return nil, err
+	}
+	return &DerivedAddress{
+		Chain:   chain,
+		Path:    path,
+		Address: address,
+		PubKey:  hex.EncodeToString(pubKey),
+	}, nil
 }
 
 // deriveEVMKey walks the BIP-32 derivation path on the seed derived from

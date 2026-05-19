@@ -394,6 +394,87 @@ func TestStore_ShowMnemonic_ReVerifiesAgainstDiskNotMemory(t *testing.T) {
 	}
 }
 
+// --- DeriveAddress: read-only derivation ------------------------------------
+
+func TestDeriveAddress_MatchesCanonicalVector(t *testing.T) {
+	// The same canonical 12-word vector → 0x9858EfFD...EcaEda94 at index 0
+	// fixture used by TestDerive_EVMAddressMatchesPublishedVector, but
+	// through the public DeriveAddress entry point that wallet.recover
+	// + the new daimon.wallet.derive RPC verb both call into. Drift in
+	// DeriveAddress would trip this test even if the lower-level
+	// deriveEVMKey/publicKeyAddress functions stay correct.
+	m, err := ParseMnemonic(canonicalTwelveWordMnemonic)
+	if err != nil {
+		t.Fatalf("ParseMnemonic: %v", err)
+	}
+	got, err := DeriveAddress(m, "evm:base", 0)
+	if err != nil {
+		t.Fatalf("DeriveAddress: %v", err)
+	}
+	if got.Address != canonicalTwelveWordEVMAddrIndex0 {
+		t.Fatalf("address mismatch:\n  got  %s\n  want %s", got.Address, canonicalTwelveWordEVMAddrIndex0)
+	}
+	if got.Path != "m/44'/60'/0'/0/0" {
+		t.Fatalf("unexpected path: %s", got.Path)
+	}
+	if got.Chain != "evm:base" {
+		t.Fatalf("chain not threaded through: %s", got.Chain)
+	}
+	if len(got.PubKey) != 66 { // 33 bytes compressed, hex = 66 chars
+		t.Fatalf("pubkey length: got %d, want 66 (33 bytes compressed)", len(got.PubKey))
+	}
+}
+
+func TestDeriveAddress_DistinctIndicesYieldDistinctAddresses(t *testing.T) {
+	m, _ := ParseMnemonic(trezorAllZerosMnemonic)
+	a, err := DeriveAddress(m, "evm:base", 0)
+	if err != nil {
+		t.Fatalf("index 0: %v", err)
+	}
+	b, err := DeriveAddress(m, "evm:base", 1)
+	if err != nil {
+		t.Fatalf("index 1: %v", err)
+	}
+	if a.Address == b.Address {
+		t.Fatalf("indices 0 and 1 collapsed to the same address: %s", a.Address)
+	}
+}
+
+func TestDeriveAddress_DoesNotPersist(t *testing.T) {
+	// Open a fresh keystore, derive, then assert the keystore's
+	// in-memory wallet list is still empty. Captures the "derive is
+	// read-only" contract.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	s, _, err := Open(path, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.Derive("evm:base", 0); err != nil {
+		t.Fatalf("Derive: %v", err)
+	}
+	if got := len(s.List()); got != 0 {
+		t.Fatalf("Derive persisted a wallet: List() returned %d, want 0", got)
+	}
+}
+
+func TestDeriveAddress_RejectsUnsupportedChain(t *testing.T) {
+	m, _ := ParseMnemonic(trezorAllZerosMnemonic)
+	if _, err := DeriveAddress(m, "svm:solana", 0); !errors.Is(err, ErrUnsupportedChain) {
+		t.Fatalf("expected ErrUnsupportedChain, got %v", err)
+	}
+}
+
+func TestDeriveAddress_RejectsEmptyMnemonic(t *testing.T) {
+	for _, m := range []*Mnemonic{nil, {Words: nil}, {Words: []string{}}} {
+		if _, err := DeriveAddress(m, "evm:base", 0); !errors.Is(err, ErrInvalidMnemonic) {
+			t.Fatalf("expected ErrInvalidMnemonic for %+v, got %v", m, err)
+		}
+	}
+}
+
 // --- RecoverInto: offline seed import ---------------------------------------
 
 func TestRecoverInto_WritesKeystoreFromSuppliedSeed(t *testing.T) {
