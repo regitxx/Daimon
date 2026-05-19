@@ -61,6 +61,25 @@ async function main() {
   }
   console.log(`ts: paying from ${evm.address} on ${evm.chain}`);
 
+  // Cross-language wire-shape check: derive at index 0 should match the
+  // existing wallet's address (both go through the same daemon-side BIP-44
+  // derivation pipeline). Sibling assertion to python_smoke.py — together
+  // they catch any drift between the two SDKs' derive wrappers AND between
+  // either wrapper and the daemon's daimon.wallet.derive handler.
+  const derived = await client.wallet.derive({ chain: evm.chain, index: 0 });
+  if (derived.address !== evm.address) {
+    console.error(
+      `ts: derive index 0 returned ${JSON.stringify(derived.address)} ` +
+        `but wallet.list reports ${JSON.stringify(evm.address)}`,
+    );
+    return 2;
+  }
+  if (derived.path !== "m/44'/60'/0'/0/0") {
+    console.error(`ts: derive index 0 returned path ${JSON.stringify(derived.path)}, want m/44'/60'/0'/0/0`);
+    return 2;
+  }
+  console.log(`ts: derive index 0 matches wallet.list — wire-shape parity ✓`);
+
   const t0 = process.hrtime.bigint();
   let result;
   try {

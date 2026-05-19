@@ -55,6 +55,22 @@ def main() -> int:
         return 1
     print(f"py: paying from {evm['address']} on {evm['chain']}")
 
+    # Cross-language wire-shape check: derive at index 0 should match the
+    # existing wallet's address (both go through the same daemon-side BIP-44
+    # derivation pipeline). Catches drift between Python's wallet.derive
+    # wrapper and the daemon's daimon.wallet.derive handler — and, paired
+    # with the TS smoke's same assertion, drift between Python's wrapper
+    # and TS's. If the field names or shape ever diverge, this trips.
+    derived = client.wallet.derive(chain=evm["chain"], index=0)
+    assert derived["address"] == evm["address"], (
+        f"py: derive index 0 returned {derived['address']!r} "
+        f"but wallet.list reports {evm['address']!r}"
+    )
+    assert derived["path"] == "m/44'/60'/0'/0/0", (
+        f"py: derive index 0 returned path {derived['path']!r}, want m/44'/60'/0'/0/0"
+    )
+    print(f"py: derive index 0 matches wallet.list — wire-shape parity ✓")
+
     t0 = time.monotonic()
     try:
         result = client.payment.pay(
