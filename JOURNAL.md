@@ -3229,3 +3229,47 @@ Symmetric counterpart to `show-mnemonic`: where show-mnemonic exports the seed, 
 - v0.1 stable + v0.2 pre-release surfaces remain unchanged on PyPI / npm. Recover is a Go binary change — users on the pre-release tracks get it automatically when they next pull the daimon CLI.
 - Test counts: 343 Go race+vet + 63 pytest + 63 vitest + 9 CI shards.
 - Still-pending: phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay) — same as session 46's exit state.
+
+## 2026-05-19 — Day Zero, sessions 49–51: dev.1 cut + version-drift fix + CI action bumps
+
+Three small follow-on commits closing housekeeping debt that surfaced as soon as the dev.1 publish was teed up.
+
+### Session 49 — Cut 0.2.0-dev.1 ([00f9613](https://github.com/regitxx/Daimon/commit/00f9613) + publish)
+
+The dev.0 pre-release shipped 2026-05-18; the SDK wrappers for `show_mnemonic` landed 2026-05-19 (session 47). Anyone running `pip install --pre daimon-protocol` or `npm install @daimon-protocol/sdk@dev` was getting dev.0, which predates the wrapper, so the README docs I wrote for session 47 were aspirational against the published artifact. Cut dev.1 to make the docs honest.
+
+Coordinated bump across all three doc surfaces (top-level README, both SDK READMEs, SPEC.md) plus the two version files (`pyproject.toml` 0.2.0.dev0 → 0.2.0.dev1, `package.json` 0.2.0-dev.0 → 0.2.0-dev.1). Both `[Unreleased]` CHANGELOG entries moved under dated `[0.2.0-dev.1]` / `[0.2.0.dev1]` blocks with a "Related" sub-section noting `daimon wallet recover` (CLI-only, no SDK surface — explained in the SPEC §14.6 rationale).
+
+SPEC §6.1 Wallet block gained `daimon.wallet.show_mnemonic` with the typed `-32008 CodeWrongPassword` semantics; new SPEC §14.6 ("Backup re-display and seed import") spells out the normative requirements for both verbs, so third-party Daimon-compatible implementations have a formal reference for the same behaviour the Go reference impl ships — not just "imitate what the daemon does."
+
+Published end-to-end:
+- npm: `npm publish --tag dev` → 0.2.0-dev.1 on the `@dev` channel; `latest` still points at 0.1.0.
+- PyPI: `python -m build` + `twine upload` → 0.2.0.dev1 visible at the simple index immediately; JSON manifest CDN-propagated over the next ~10 min.
+- Git: tagged `v0.2.0-dev.1` and pushed.
+
+### Session 50 — Python `__version__` codegen ([b6636e3](https://github.com/regitxx/Daimon/commit/b6636e3))
+
+Session 49 was a clean reminder of the version-drift hazard: bumping `pyproject.toml` requires manually bumping `daimon/__init__.py`'s hardcoded `__version__ = "..."` string in lockstep, and when I looked I found the constant had already drifted to `0.1.0.dev0` across two prior version cuts before anyone noticed. Same shape of bug as the TypeScript `VERSION` constant that bit us during the 0.1.0 GA (fixed structurally in session 39 via `scripts/gen-version.mjs`).
+
+Mirror fix on the Python side. Three pieces:
+
+- **`sdk/python/scripts/gen_version.py`** reads `pyproject.toml`'s `[project] version` (via regex — `tomllib` is 3.11+ only and pyproject targets 3.10) and writes `daimon/_version.py`. Idempotent.
+- **`daimon/_version.py`** is auto-generated, committed, and held to a single line: `__version__ = "<pyproject version>"`. `daimon/__init__.py` imports from there instead of holding its own string.
+- **CI drift check** in `.github/workflows/ci.yml`'s Python SDK shard: every run executes `python scripts/gen_version.py` AND asserts no diff via `git diff --exit-code daimon/_version.py`. A bumped `pyproject.toml` without a re-run of the script trips a PR-time failure, so the drift can never reach a release.
+
+The setuptools build still reads `version` directly from pyproject's `[project] version` for the wheel METADATA, so this change has zero effect on what PyPI sees — purely about keeping the runtime `daimon.__version__` honest.
+
+### Session 51 — CI action bumps to v6 ([5e61bba](https://github.com/regitxx/Daimon/commit/5e61bba))
+
+GitHub flagged `actions/checkout@v4`, `actions/setup-go@v5`, `actions/setup-python@v5`, and `actions/setup-node@v4` on every CI run since the September 2025 Node 20 deprecation announcement. Removal forced on 2026-09-16; Node 24 default kicks in 2026-06-02.
+
+All four actions have stable v6 releases targeting Node 24. Bumped in one shot rather than opting in to the `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` band-aid. The `with:` surfaces used by this repo are unchanged between v4/v5 and v6, so the upgrade is a no-op on observable CI behaviour — the only visible delta is "no more deprecation banner in the run summary."
+
+### State at end of session burst (sessions 47–51)
+
+- v0.2.0-dev.1 live on both PyPI (`pip install --pre daimon-protocol`) and npm (`npm install @daimon-protocol/sdk@dev`); v0.1.0 stable still on the default install paths.
+- The seed lifecycle (export via `show-mnemonic`, import via `recover`) is feature-complete in both Go binary AND SDKs, with normative SPEC coverage. Anyone wanting to write a third-party implementation has a formal reference.
+- Version drift is now structurally impossible on both SDKs (TypeScript via `gen-version.mjs`, Python via `gen_version.py`); CI drift check enforces.
+- CI is on Node 24-compatible action versions; no more deprecation noise on every push.
+- Test counts: 343 Go race+vet + 63 pytest + 63 vitest + 9 CI shards. Same as end of session 48 — sessions 49-51 were docs / publish / build hygiene with no test surface changes.
+- Still-pending (unchanged through this whole burst): phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay).
