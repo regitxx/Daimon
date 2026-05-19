@@ -357,6 +357,41 @@ func (s *Store) SignDigest(chain string, digest []byte) ([]byte, error) {
 	return nil, ErrNotFound
 }
 
+// ShowMnemonic re-verifies the caller knows the keystore password and
+// returns the stored mnemonic. The supplied password is run through the
+// full Argon2id + AES-GCM-decrypt pipeline against the on-disk keystore
+// — NOT compared against the in-memory `s.password` — so the operation
+// is a genuine "prove you know the password right now" attestation
+// rather than a "the daemon is unlocked, ergo any caller can read the
+// seed" leak.
+//
+// Returns ErrWrongPassword if the supplied password doesn't decrypt the
+// on-disk keystore. The Store's in-memory state is not consulted —
+// rotating the password on disk independently of an unlocked Store is
+// out of scope for v0.2.
+//
+// Performance: Argon2id KDF costs ~100ms by design. Callers should not
+// invoke this in a tight loop.
+func (s *Store) ShowMnemonic(password []byte) (*Mnemonic, error) {
+	s.mu.Lock()
+	path := s.path
+	s.mu.Unlock()
+
+	// Reuse loadKeystore's decrypt path — same Argon2id parameters, same
+	// AES-256-GCM authentication. If the password is wrong, the GCM
+	// authentication fails and we surface ErrWrongPassword exactly as
+	// the initial Open would.
+	verified, err := loadKeystore(path, password)
+	if err != nil {
+		return nil, err
+	}
+	// We only needed the mnemonic; close the verifier store so its
+	// password/mnemonic copy is zeroed promptly.
+	out := &Mnemonic{Words: append([]string(nil), verified.mnemonic.Words...)}
+	_ = verified.Close()
+	return out, nil
+}
+
 // Close zeroes the cached password and mnemonic. After Close, the Store is
 // not usable; create a new one via Open to resume operations.
 //

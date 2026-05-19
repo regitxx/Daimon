@@ -199,6 +199,61 @@ func TestHandleWalletSign_RejectsBadDigest(t *testing.T) {
 	}
 }
 
+// --- show_mnemonic ----------------------------------------------------------
+
+func TestHandleWalletShowMnemonic_ReturnsSeedOnRightPassword(t *testing.T) {
+	f, ws := newWalletFixture(t)
+	// Capture the daimon-generated mnemonic by re-running the same
+	// ShowMnemonic the RPC will call. (The fixture builds the wallet
+	// store with password "test-password".)
+	wantMnem, err := ws.ShowMnemonic([]byte("test-password"))
+	if err != nil {
+		t.Fatalf("ShowMnemonic baseline: %v", err)
+	}
+
+	resp := f.call(t, "daimon.wallet.show_mnemonic", map[string]any{
+		"password": "test-password",
+	})
+	var out walletShowMnemonicResult
+	resultAs(t, resp, &out)
+	if got, want := len(out.Mnemonic), 24; got != want {
+		t.Fatalf("mnemonic word count = %d, want %d", got, want)
+	}
+	for i, w := range wantMnem.Words {
+		if out.Mnemonic[i] != w {
+			t.Fatalf("mnemonic word %d = %q, want %q", i, out.Mnemonic[i], w)
+		}
+	}
+}
+
+func TestHandleWalletShowMnemonic_WrongPasswordMappedToWrongPasswordCode(t *testing.T) {
+	f, _ := newWalletFixture(t)
+	resp := f.call(t, "daimon.wallet.show_mnemonic", map[string]any{
+		"password": "definitely-wrong-password",
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for wrong password")
+	}
+	// Distinct from CodeIdentityLocked: the daimon IS unlocked. CLI
+	// clients should surface "wrong password" not "run daimon unlock".
+	if resp.Error.Code != CodeWrongPassword {
+		t.Fatalf("error code = %d, want CodeWrongPassword (%d)", resp.Error.Code, CodeWrongPassword)
+	}
+}
+
+func TestHandleWalletShowMnemonic_RejectsEmptyPassword(t *testing.T) {
+	f, _ := newWalletFixture(t)
+	resp := f.call(t, "daimon.wallet.show_mnemonic", map[string]any{
+		"password": "",
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for empty password")
+	}
+	if resp.Error.Code != CodeInvalidParams {
+		t.Fatalf("error code = %d, want CodeInvalidParams (%d)", resp.Error.Code, CodeInvalidParams)
+	}
+}
+
 // --- nil-wstore behaviour ---------------------------------------------------
 
 // When the daemon is unlocked but the wallet keystore failed to load, all
@@ -215,6 +270,7 @@ func TestWalletRPCs_RejectWhenWalletNotLoaded(t *testing.T) {
 		{"daimon.wallet.create", map[string]any{"chain": "evm:base"}},
 		{"daimon.wallet.address", map[string]any{"chain": "evm:base"}},
 		{"daimon.wallet.sign", map[string]any{"chain": "evm:base", "digest_hex": "00"}},
+		{"daimon.wallet.show_mnemonic", map[string]any{"password": "x"}},
 	} {
 		t.Run(c.method, func(t *testing.T) {
 			resp := f.call(t, c.method, c.params)

@@ -127,6 +127,14 @@ const (
 	// not been created, the chain is not in v0.2's allowlist, or the
 	// asset isn't the canonical USDC contract this build supports.
 	CodePaymentUnsupported = -32007
+
+	// CodeWrongPassword — password verification failed in a non-unlock
+	// context (e.g. daimon.wallet.show_mnemonic). Distinct from
+	// CodeIdentityLocked: the daimon IS unlocked, but the supplied
+	// password failed a re-verification step. CLI clients should NOT
+	// suggest "run daimon unlock first" — that won't help; the password
+	// was just typed wrong. v0.2 (phase 40.6.x).
+	CodeWrongPassword = -32008
 )
 
 // nullID is the JSON-RPC null id, used in responses where no client id could

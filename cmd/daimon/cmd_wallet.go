@@ -29,6 +29,8 @@ func cmdWallet(args []string) error {
 		return cmdWalletAddress(rest)
 	case "sign":
 		return cmdWalletSign(rest)
+	case "show-mnemonic":
+		return cmdWalletShowMnemonic(rest)
 	default:
 		return fmt.Errorf("daimon wallet: unknown subcommand %q", sub)
 	}
@@ -133,6 +135,74 @@ func cmdWalletAddress(args []string) error {
 		return printJSON(out)
 	}
 	fmt.Println(out.Address)
+	return nil
+}
+
+// --- daimon wallet show-mnemonic ---------------------------------------------
+
+// cmdWalletShowMnemonic prompts for the keystore password and re-displays
+// the BIP-39 mnemonic. The password is read no-echo (same readPassword
+// shim as `daimon unlock`); the mnemonic is rendered in the same
+// safe-backup banner the auto-create path uses on first unlock so the
+// presentation is consistent.
+//
+// The daemon-side handler re-runs the full Argon2id + AES-GCM-decrypt
+// pipeline against the on-disk keystore — it does NOT short-circuit on
+// the in-memory unlocked mnemonic. A wrong password fails the decrypt
+// and the CLI surfaces "wrong password" without revealing whether the
+// keystore exists or what mnemonic length it contains.
+func cmdWalletShowMnemonic(args []string) error {
+	fs := flag.NewFlagSet("daimon wallet show-mnemonic", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	asJSON := fs.Bool("json", false, "emit the mnemonic as a JSON array (default: safe-backup banner)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: daimon wallet show-mnemonic [--json]")
+	}
+
+	pw, err := readPassword("Password: ")
+	if err != nil {
+		return err
+	}
+	defer zero(pw)
+	if len(pw) == 0 {
+		return fmt.Errorf("password must not be empty")
+	}
+
+	params := map[string]any{"password": string(pw)}
+	var out struct {
+		Mnemonic []string `json:"mnemonic"`
+	}
+	if err := daemonCall("daimon.wallet.show_mnemonic", params, &out); err != nil {
+		return err
+	}
+
+	if *asJSON {
+		return printJSON(out)
+	}
+
+	// Banner identical in style to cmd_unlock.go's first-unlock display.
+	fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
+	fmt.Fprintln(os.Stderr, "Your wallet mnemonic — keep this private.")
+	fmt.Fprintln(os.Stderr, "───────────────────────────────────────────────────────────────────")
+	fmt.Fprintln(os.Stderr, "Anyone with this phrase can derive every wallet you've created and")
+	fmt.Fprintln(os.Stderr, "every wallet you will ever create from this daimon. Treat it like")
+	fmt.Fprintln(os.Stderr, "a password — write it down, don't paste it anywhere, never share.")
+	fmt.Fprintln(os.Stderr, "───────────────────────────────────────────────────────────────────")
+	for i := 0; i < len(out.Mnemonic); i += 4 {
+		end := i + 4
+		if end > len(out.Mnemonic) {
+			end = len(out.Mnemonic)
+		}
+		line := ""
+		for j := i; j < end; j++ {
+			line += fmt.Sprintf("  %2d. %-9s", j+1, out.Mnemonic[j])
+		}
+		fmt.Fprintln(os.Stderr, line)
+	}
+	fmt.Fprintln(os.Stderr, "═══════════════════════════════════════════════════════════════════")
 	return nil
 }
 

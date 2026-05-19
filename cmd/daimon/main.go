@@ -159,6 +159,13 @@ Usage:
               --chain <c>   should use daimon.payment.pay (phase 40.5+)
               --digest <h>  instead — this is for advanced/debug use.
               [--json]
+  daimon wallet show-mnemonic
+              [--json]      Re-display the BIP-39 mnemonic. Prompts for
+                            the keystore password (no echo) and re-runs
+                            the full KDF + decrypt against the on-disk
+                            file as a "prove you know the password right
+                            now" attestation. Use to verify backup, or
+                            to import the seed into MetaMask / Phantom.
 
   daimon payment pay        Pay an x402-protected URL end-to-end. Buffers
               <url>         the request body if any, dispatches the

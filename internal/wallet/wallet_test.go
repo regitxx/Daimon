@@ -309,6 +309,90 @@ func TestStore_List_ReturnsCopy(t *testing.T) {
 	}
 }
 
+// --- Store: ShowMnemonic ----------------------------------------------------
+
+func TestStore_ShowMnemonic_ReturnsStoredSeed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	pw := []byte("re-confirm-me")
+
+	s, fresh, err := Open(path, pw)
+	if err != nil {
+		t.Fatalf("Open(create): %v", err)
+	}
+	if fresh == nil {
+		t.Fatal("expected a fresh mnemonic on first create")
+	}
+	// Capture the mnemonic the daemon generated; we'll assert
+	// ShowMnemonic returns the same words.
+	want := fresh.String()
+
+	// ShowMnemonic must work even while the Store is open + holding the
+	// in-memory mnemonic — it should re-derive via the on-disk file, not
+	// just hand back s.mnemonic.
+	got, err := s.ShowMnemonic(pw)
+	if err != nil {
+		t.Fatalf("ShowMnemonic: %v", err)
+	}
+	if got.String() != want {
+		t.Fatalf("ShowMnemonic returned wrong mnemonic:\n  got  %s\n  want %s", got.String(), want)
+	}
+	s.Close()
+}
+
+func TestStore_ShowMnemonic_RejectsWrongPassword(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+
+	s, _, err := Open(path, []byte("correct"))
+	if err != nil {
+		t.Fatalf("Open(create): %v", err)
+	}
+	defer s.Close()
+
+	if _, err := s.ShowMnemonic([]byte("WRONG")); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("expected ErrWrongPassword, got %v", err)
+	}
+}
+
+func TestStore_ShowMnemonic_ReVerifiesAgainstDiskNotMemory(t *testing.T) {
+	// The structural property the function promises: it does NOT just
+	// hand back s.mnemonic to anyone with socket access. It re-runs the
+	// full KDF + AEAD-decrypt against the on-disk keystore. The
+	// wrong-password test above exercises that — if ShowMnemonic
+	// short-circuited on the in-memory mnemonic, a wrong password
+	// would still return the seed.
+	//
+	// This test asserts the same property from the other angle: it
+	// works correctly even after the Store has been used (wallet
+	// creation in flight), so the verification path doesn't depend
+	// on the keystore being "fresh".
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	pw := []byte("post-use")
+	s, fresh, err := Open(path, pw)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+	want := fresh.String()
+
+	if _, err := s.CreateWallet("evm:base"); err != nil {
+		t.Fatalf("CreateWallet: %v", err)
+	}
+	if _, err := s.CreateWallet("evm:base-sepolia"); err != nil {
+		t.Fatalf("CreateWallet: %v", err)
+	}
+
+	got, err := s.ShowMnemonic(pw)
+	if err != nil {
+		t.Fatalf("ShowMnemonic after creates: %v", err)
+	}
+	if got.String() != want {
+		t.Fatalf("mnemonic drift after wallet creates")
+	}
+}
+
 // --- Helpers -----------------------------------------------------------------
 
 func openFreshStore(t *testing.T) *Store {

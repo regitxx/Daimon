@@ -135,6 +135,57 @@ func (s *Server) handleWalletAddress(_ context.Context, params json.RawMessage) 
 	return walletAddressResult{Address: w.Address}, nil
 }
 
+// --- daimon.wallet.show_mnemonic --------------------------------------------
+
+// Re-surface the BIP-39 mnemonic stored in the keystore. Requires
+// password re-confirmation: the supplied password is fed through the
+// full Argon2id + AES-GCM-decrypt pipeline against the on-disk
+// keystore, so the operation is genuinely "prove you know the password
+// right now" rather than "the daemon is unlocked, ergo any caller with
+// socket access can pull the seed". Industry standard for seed reveal
+// in non-custodial wallets (MetaMask, Phantom, Trezor all require this).
+//
+// Use cases:
+//   - Principal wants to verify they wrote down the backup correctly
+//     after the unlock-time display.
+//   - Principal wants to import the daimon mnemonic into MetaMask /
+//     Phantom / Rabby to inspect or move funds outside the daimon.
+
+type walletShowMnemonicParams struct {
+	Password string `json:"password"`
+}
+
+type walletShowMnemonicResult struct {
+	Mnemonic []string `json:"mnemonic"`
+}
+
+func (s *Server) handleWalletShowMnemonic(_ context.Context, params json.RawMessage) (any, *RPCError) {
+	if s.wstore == nil {
+		return nil, walletNotReady()
+	}
+	var p walletShowMnemonicParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Password == "" {
+		return nil, newError(CodeInvalidParams, "password is required for mnemonic re-display")
+	}
+	m, err := s.wstore.ShowMnemonic([]byte(p.Password))
+	if errors.Is(err, wallet.ErrWrongPassword) {
+		// Distinct from CodeIdentityLocked: the daimon IS unlocked, the
+		// supplied password just doesn't decrypt the keystore. CLI
+		// clients should surface "wrong password — try again" rather
+		// than "run daimon unlock first" which is the wrong advice.
+		return nil, newError(CodeWrongPassword, "wrong password")
+	}
+	if err != nil {
+		return nil, newError(CodeInternalError, "show mnemonic", err.Error())
+	}
+	return walletShowMnemonicResult{
+		Mnemonic: append([]string(nil), m.Words...),
+	}, nil
+}
+
 // --- daimon.wallet.sign ------------------------------------------------------
 
 // walletSignParams accepts a hex-encoded 32-byte digest. The handler returns

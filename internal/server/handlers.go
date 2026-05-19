@@ -58,11 +58,12 @@ func (s *Server) registerMethods() {
 		"daimon.activity.verify": s.handleActivityVerify,
 		"daimon.provider.list":   s.handleProviderList,
 		"daimon.provider.invoke": s.handleProviderInvoke,
-		"daimon.wallet.list":     s.handleWalletList,
-		"daimon.wallet.create":   s.handleWalletCreate,
-		"daimon.wallet.address":  s.handleWalletAddress,
-		"daimon.wallet.sign":     s.handleWalletSign,
-		"daimon.payment.pay":     s.handlePaymentPay,
+		"daimon.wallet.list":          s.handleWalletList,
+		"daimon.wallet.create":        s.handleWalletCreate,
+		"daimon.wallet.address":       s.handleWalletAddress,
+		"daimon.wallet.sign":          s.handleWalletSign,
+		"daimon.wallet.show_mnemonic": s.handleWalletShowMnemonic,
+		"daimon.payment.pay":          s.handlePaymentPay,
 	}
 }
 

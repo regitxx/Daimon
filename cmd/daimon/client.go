@@ -58,8 +58,18 @@ func daemonStream(method string, params any, onDelta func(string), out any) erro
 // likely to hit — daemon not running, daemon running but locked — into the
 // actionable hint surfaced everywhere `daemon unlock` is the answer.
 func humaniseDaemonErr(err error) error {
-	if rpcErr, ok := asRPCError(err); ok && rpcErr.Code == codeIdentityLocked {
-		return fmt.Errorf("daemon is locked — run `daimon unlock` first")
+	if rpcErr, ok := asRPCError(err); ok {
+		switch rpcErr.Code {
+		case codeIdentityLocked:
+			return fmt.Errorf("daemon is locked — run `daimon unlock` first")
+		case codeWrongPassword:
+			// The daemon IS unlocked. The user typed the wrong password
+			// to a re-verification step (e.g. `daimon wallet
+			// show-mnemonic`). Suggesting `daimon unlock` is misleading
+			// because unlock won't help — they just need to type the
+			// right password.
+			return fmt.Errorf("wrong password")
+		}
 	}
 	if errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.ECONNREFUSED) {
 		return fmt.Errorf("daemon not running — run `daimon unlock` first")

@@ -46,6 +46,7 @@ func (e *jsonrpcError) Error() string {
 // without importing the server package.
 const (
 	codeIdentityLocked = -32001
+	codeWrongPassword  = -32008
 	codeNotFound       = -32002
 	codeInvalidParams  = -32602
 	codeInvalidRequest = -32600
