@@ -17,8 +17,7 @@ from .errors import (
     RPCError,
 )
 from ._stream import StreamHandle
-
-__version__ = "0.2.0.dev1"
+from ._version import __version__  # auto-generated; see scripts/gen_version.py
 
 __all__ = [
     "Client",

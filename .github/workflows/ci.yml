@@ -47,6 +47,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e .[dev] build twine
+      - name: Verify daimon/_version.py matches pyproject.toml
+        # Mirror of the TS gen-version step. The script is idempotent;
+        # if the committed _version.py is already in sync, the diff is
+        # empty. Catches the case where someone bumps the version in
+        # pyproject.toml without re-running scripts/gen_version.py.
+        run: |
+          python scripts/gen_version.py
+          git diff --exit-code daimon/_version.py || {
+            echo "::error::daimon/_version.py is out of sync with pyproject.toml. Run python scripts/gen_version.py and commit the result.";
+            exit 1;
+          }
       - name: pytest
         run: pytest -q
       - name: Build wheel + sdist
