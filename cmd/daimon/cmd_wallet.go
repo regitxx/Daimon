@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/regitxx/Daimon/internal/daimonhome"
+	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/wallet"
 )
 
@@ -354,9 +355,10 @@ func cmdWalletRecover(args []string) error {
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "The password you choose here MUST be the same as your daimon")
 	fmt.Fprintln(os.Stderr, "unlock password — daimond loads the wallet keystore using that")
-	fmt.Fprintln(os.Stderr, "password on every unlock. If they differ, wallet RPCs will")
-	fmt.Fprintln(os.Stderr, "silently disable themselves at next unlock (you'll see a stderr")
-	fmt.Fprintln(os.Stderr, "log line on daimond startup).")
+	fmt.Fprintln(os.Stderr, "password on every unlock. If an identity keystore already exists,")
+	fmt.Fprintln(os.Stderr, "this command verifies the password against it before writing the")
+	fmt.Fprintln(os.Stderr, "wallet keystore (Argon2id, ~100ms) so a mismatch is caught now,")
+	fmt.Fprintln(os.Stderr, "not later as silently disabled wallet RPCs.")
 	fmt.Fprintln(os.Stderr)
 	fmt.Fprintln(os.Stderr, "Your input is hidden. Paste or type the 12- or 24-word phrase as")
 	fmt.Fprintln(os.Stderr, "a single line, words separated by spaces.")
@@ -400,6 +402,45 @@ func cmdWalletRecover(args []string) error {
 	defer zero(pw2)
 	if string(pw1) != string(pw2) {
 		return errors.New("passwords did not match")
+	}
+
+	// Cross-check: if an identity keystore already exists, the password
+	// the user just confirmed MUST decrypt it. Otherwise the wallet
+	// keystore we're about to write will be encrypted under a password
+	// that doesn't match the identity password, and the next
+	// `daimon unlock` will silently disable wallet RPCs (wallet.Open
+	// fails non-fatally, logging "wallet keystore not loaded" to
+	// daemon stderr). Catching the mismatch HERE — at the moment
+	// the user is still standing at the keyboard — is the right place
+	// to surface it.
+	//
+	// If identity.keystore doesn't exist (user runs recover before
+	// `daimon init`, which is unusual but legal), the cross-check is
+	// skipped. The follow-on `daimon init` will pick a fresh password
+	// that the user is responsible for matching to the wallet password;
+	// init's --force path also wipes wallet.keystore now (cmd_init.go)
+	// so that mismatch is recoverable rather than silent.
+	identityPath := daimonhome.KeystorePath(home)
+	if _, err := os.Stat(identityPath); err == nil {
+		// Argon2id costs ~100ms — acceptable for a one-shot check.
+		if _, ierr := identity.LoadFromKeystore(identityPath, pw1); ierr != nil {
+			if errors.Is(ierr, identity.ErrWrongPassword) {
+				return fmt.Errorf("password does not match the existing identity keystore at %s.\n\n"+
+					"Recovery must use the SAME password as `daimon unlock` — the daemon\n"+
+					"loads both keystores under the same password on every unlock. If you\n"+
+					"forgot the identity password, your options are (a) `daimon init --force`\n"+
+					"to start fresh (DESTROYS the current identity, activity log, memory,\n"+
+					"and any existing wallet keystore — irrecoverable) or (b) restore\n"+
+					"identity.keystore from backup if you have one.",
+					identityPath)
+			}
+			return fmt.Errorf("could not verify password against %s: %w", identityPath, ierr)
+		}
+		fmt.Fprintln(os.Stderr, "Password matches identity keystore — recovery + unlock will share it.")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("stat identity keystore: %w", err)
+	} else {
+		fmt.Fprintln(os.Stderr, "No identity keystore yet — make sure `daimon init` uses this same password.")
 	}
 
 	if err := wallet.RecoverInto(walletPath, m, pw1); err != nil {

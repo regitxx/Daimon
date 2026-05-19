@@ -231,6 +231,37 @@ func TestRunInit_ForceCleansActivityLogAndMemoryDB(t *testing.T) {
 	}
 }
 
+// TestRunInit_ForceWipesWalletKeystore pins the wallet-keystore cleanup
+// added alongside the recover password cross-check. Without this, a
+// post-recover --force would leave wallet.keystore on disk encrypted
+// under the OLD identity's password, and the next `daimon unlock` would
+// silently disable wallet RPCs (wallet.Open fails non-fatally with a
+// stderr log line that nothing else surfaces). Removing it on --force
+// lets the next unlock re-auto-create a fresh wallet keystore under the
+// new password, restoring symmetry with activity.log + memory.db.
+func TestRunInit_ForceWipesWalletKeystore(t *testing.T) {
+	home := initHomeDir(t)
+
+	// Provision identity round one + plant a wallet.keystore so we can
+	// assert the cleanup removed it. Real bytes aren't needed — runInit
+	// just removes the path.
+	if _, err := runInit(home, []byte("pw-a"), false); err != nil {
+		t.Fatalf("first runInit: %v", err)
+	}
+	walletPath := filepath.Join(home, "wallet.keystore")
+	if err := os.WriteFile(walletPath, []byte("stale-wallet-keystore-bytes"), 0o600); err != nil {
+		t.Fatalf("write stale wallet.keystore: %v", err)
+	}
+
+	if _, err := runInit(home, []byte("pw-b"), true); err != nil {
+		t.Fatalf("second runInit (force): %v", err)
+	}
+
+	if _, err := os.Stat(walletPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("--force should remove stale wallet.keystore; stat err = %v", err)
+	}
+}
+
 func equalBytes(a, b []byte) bool {
 	if len(a) != len(b) {
 		return false

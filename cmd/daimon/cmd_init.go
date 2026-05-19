@@ -19,16 +19,18 @@ import (
 // rather than whatever the user happened to do first.
 //
 // Refuses to overwrite an existing keystore unless --force is passed. With
-// --force, the prior activity.log and memory.db are also removed: both are
-// signed/encrypted under the discarded identity and unreadable by the new one,
-// so leaving them on disk would only produce a chain Verify failure on the
-// first audit. init does NOT spawn daimond; the daemon comes up on the next
-// `daimon unlock`. Keeping init purely about provisioning means a user can
-// rsync the daimon home dir between machines without accidentally starting
-// two daemons.
+// --force, the prior activity.log, memory.db, AND wallet.keystore are also
+// removed: all three are signed/encrypted under the discarded identity's
+// password, so leaving them on disk would either produce a chain Verify
+// failure on the first audit (activity.log + memory.db) or silently disable
+// wallet RPCs when the next `daimon unlock` fails to decrypt wallet.keystore
+// with the new identity password (wallet.keystore). init does NOT spawn
+// daimond; the daemon comes up on the next `daimon unlock`. Keeping init
+// purely about provisioning means a user can rsync the daimon home dir
+// between machines without accidentally starting two daemons.
 func cmdInit(args []string) error {
 	fs := flag.NewFlagSet("daimon init", flag.ContinueOnError)
-	force := fs.Bool("force", false, "overwrite an existing keystore (DANGEROUS — discards the current identity, activity log, and memory store)")
+	force := fs.Bool("force", false, "overwrite an existing keystore (DANGEROUS — discards the current identity, activity log, memory store, and wallet keystore)")
 	fs.SetOutput(os.Stderr)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -93,19 +95,31 @@ func runInit(home string, password []byte, force bool) (*identity.Identity, erro
 	keystorePath := daimonhome.KeystorePath(home)
 	logPath := filepath.Join(home, "activity.log")
 	memDBPath := filepath.Join(home, "memory.db")
+	walletPath := filepath.Join(home, "wallet.keystore")
 
 	if _, err := os.Stat(keystorePath); err == nil {
 		if !force {
 			return nil, fmt.Errorf("keystore already exists at %s — pass --force to overwrite (DESTROYS the current identity)", keystorePath)
 		}
-		// --force: prior activity.log and memory.db are signed/encrypted under
-		// the old identity; the new identity cannot read either. Remove them so
-		// post-init the chain has exactly one entry (the new genesis).
-		if err := os.Remove(logPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove stale activity log: %w", err)
-		}
-		if err := os.Remove(memDBPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("remove stale memory store: %w", err)
+		// --force: prior activity.log, memory.db, and wallet.keystore are
+		// all signed/encrypted under the discarded identity's password.
+		// Activity.log + memory.db are unreadable by the new identity at
+		// all; wallet.keystore would silently fail to decrypt on the next
+		// unlock and leave wallet RPCs disabled with only a stderr log
+		// line. Remove all three so post-init the chain has exactly one
+		// entry (the new genesis) and the wallet keystore re-auto-creates
+		// on first unlock with the new password.
+		for _, p := range []struct {
+			name string
+			path string
+		}{
+			{"activity log", logPath},
+			{"memory store", memDBPath},
+			{"wallet keystore", walletPath},
+		} {
+			if err := os.Remove(p.path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return nil, fmt.Errorf("remove stale %s: %w", p.name, err)
+			}
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("stat keystore: %w", err)
