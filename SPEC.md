@@ -1,7 +1,7 @@
 # Daimon Protocol Specification
 
 **Version**: v0.2 (Draft)
-**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.1 pre-release shipped 2026-05-19 (wallet + x402 surface, with `show_mnemonic` re-display + `wallet recover` import on the seed-lifecycle side). v0.2 GA cuts once live Base Sepolia settlement is verified.
+**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.2 pre-release shipped 2026-05-19 (wallet + x402 surface, with `show_mnemonic` re-display + `wallet recover` import on the seed-lifecycle side). v0.2 GA cuts once live Base Sepolia settlement is verified.
 **Date**: 2026-05-19 (originally 2026-05-03 for v0.1)
 
 ---
@@ -794,4 +794,4 @@ Both rows are chained + Ed25519-signed under the principal's identity key, walka
 
 ---
 
-**Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.1 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.
+**Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.2 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.

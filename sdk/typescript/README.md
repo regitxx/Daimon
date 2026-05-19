@@ -5,7 +5,7 @@ surface (SPEC §6.1). Mirrors the Go `cmd/daimon` CLI and the Python SDK's
 wire-level behaviour: one connection per RPC, no pipelining, JSON-RPC 2.0.
 
 > Status: v0.1.0 GA on the `latest` tag (identity / memory / provider /
-> activity verbs). v0.2.0-dev.1 pre-release on the `dev` tag adds
+> activity verbs). v0.2.0-dev.2 pre-release on the `dev` tag adds
 > wallet + x402 payment methods. Full RPC parity with the Python SDK.
 
 ## Install
@@ -16,7 +16,7 @@ Default install — v0.1.0 GA:
 npm install @daimon-protocol/sdk
 ```
 
-Pre-release install — v0.2.0-dev.1 with wallet + x402 payments:
+Pre-release install — v0.2.0-dev.2 with wallet + x402 payments:
 
 ```
 npm install @daimon-protocol/sdk@dev
@@ -85,7 +85,7 @@ const { verified, ok } = await client.activity.verify() as {
 
 ## Wallet + payments (v0.2 pre-release)
 
-Available in `0.2.0-dev.1` (`npm install @daimon-protocol/sdk@dev`).
+Available in `0.2.0-dev.2` (`npm install @daimon-protocol/sdk@dev`).
 The wallet keystore is auto-created by the daemon on first `daimon
 unlock` — the 24-word BIP-39 mnemonic is surfaced exactly once in
 that unlock's RPC response. Wallets are MetaMask-compatible:

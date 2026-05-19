@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-dev.2] — 2026-05-19
+
+Same-day follow-on to dev.1. Adds the read-only derive verb on the
+SDK surface (the underlying daemon RPC + CLI shipped in the Daimon
+binary on 2026-05-19 within the same session). Also surfaces the
+wallet UX hardening work that landed on the CLI side: a recover
+cross-check against the identity keystore password, init --force
+wallet-keystore cleanup, and a daimon doctor wallet diagnostic.
+
 ### Added
 
 - **`client.wallet.derive({chain, index?})`** — compute the address
@@ -16,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minus the persistence fields. Useful for verifying a recovered
   seed produces the expected address before calling `create`, or
   for pre-computing what address index N would produce.
+- New exported types **`WalletDeriveParams`** and **`WalletDeriveResult`**
+  from `index.ts` for callers that want strict typing on the params
+  object or the response shape.
+
+### Related (Daimon CLI binary, not SDK)
+
+- **`daimon wallet recover` cross-checks against identity.keystore**
+  — if an identity keystore already exists, the recovery password
+  MUST decrypt it before the wallet keystore is written. Closes the
+  silent failure mode where a mismatched password would leave wallet
+  RPCs disabled at unlock time.
+- **`daimon init --force` now wipes wallet.keystore** alongside the
+  existing activity.log + memory.db cleanup. Restores the invariant
+  that all identity-bound state is encrypted under one password.
+- **`daimon doctor` Wallet section** surfaces the running daemon's
+  wallet RPC surface state (ok / not_loaded / rpc_error). The
+  not_loaded state is the silent failure mode the recover
+  cross-check protects against on the input side; doctor catches
+  it on the output side.
 
 ## [0.2.0-dev.1] — 2026-05-19
 

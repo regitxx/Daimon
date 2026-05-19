@@ -5,7 +5,7 @@ Thin Python client over the Daimon daemon's Unix-socket JSON-RPC surface
 connection per RPC, no pipelining, JSON-RPC 2.0.
 
 > Status: v0.1.0 GA on `latest` (identity / memory / provider /
-> activity verbs). v0.2.0-dev.1 pre-release on the `--pre` channel
+> activity verbs). v0.2.0-dev.2 pre-release on the `--pre` channel
 > adds wallet + x402 payment verbs.
 
 ## Install
@@ -16,7 +16,7 @@ Default install — v0.1.0 GA:
 pip install daimon-protocol
 ```
 
-Pre-release install — v0.2.0-dev.1 with wallet + x402 payments:
+Pre-release install — v0.2.0-dev.2 with wallet + x402 payments:
 
 ```
 pip install --pre daimon-protocol
@@ -88,7 +88,7 @@ result = client.activity.verify()                  # {"verified": N, "ok": True}
 
 ## Wallet + payments (v0.2 pre-release)
 
-Available in `0.2.0.dev1` (`pip install --pre daimon-protocol`). The
+Available in `0.2.0.dev2` (`pip install --pre daimon-protocol`). The
 wallet keystore is auto-created by the daemon on first `daimon unlock`
 — the 24-word BIP-39 mnemonic is surfaced exactly once in that
 unlock's RPC response. Wallets are MetaMask-compatible: importing the

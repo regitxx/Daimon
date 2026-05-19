@@ -22,9 +22,9 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.1 pre-release shipping on `--pre` / `@dev` channels.
+**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.2 pre-release shipping on `--pre` / `@dev` channels.
 
-The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release — including the export-and-import seed lifecycle (`daimon wallet show-mnemonic` to re-display the seed, `daimon wallet recover` to import one from an existing backup or external wallet). 343 Go test pass-lines + 63 pytest cases + 63 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server.
+The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release — including the export-and-import seed lifecycle (`daimon wallet show-mnemonic` to re-display the seed, `daimon wallet recover` to import one from an existing backup or external wallet). 356 Go test pass-lines + 65 pytest cases + 65 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server (now also asserting `wallet.derive` parity between both SDKs).
 
 - [`SPEC.md`](./SPEC.md) — the protocol document (v0.1 + v0.2)
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions

@@ -3,4 +3,4 @@
 # [project] version on each build. Edit pyproject.toml to
 # change the version; this file follows.
 
-__version__ = "0.2.0.dev1"
+__version__ = "0.2.0.dev2"

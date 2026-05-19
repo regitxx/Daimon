@@ -1,6 +1,6 @@
 {
   "name": "@daimon-protocol/sdk",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "description": "TypeScript SDK for the Daimon protocol — sovereign personal AI",
   "license": "Apache-2.0",
   "author": "Johannes Christian Koeleman",
