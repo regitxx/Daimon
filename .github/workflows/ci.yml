@@ -150,6 +150,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Run install.sh into a tempdir
+        env:
+          # Authenticated GitHub API calls have 5000 req/hour; unauthenticated
+          # is 60/hour per IP, and shared CI infrastructure hits that limit
+          # under load. install.sh respects GH_TOKEN / GITHUB_TOKEN — passing
+          # the runner's built-in token lets us avoid rate-limit-driven
+          # false-failures on this shard. The token has read-only public-repo
+          # scope which is exactly what the /releases endpoint needs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           TMP=$(mktemp -d 2>/dev/null || mktemp -d -t daimon-install-ci)

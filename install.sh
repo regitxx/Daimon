@@ -87,6 +87,26 @@ else
   echo "${PROG}: need either curl or wget" >&2
   exit 1
 fi
+
+# GitHub API has a 60 req/hour unauthenticated limit per IP. Shared
+# CI infrastructure (GitHub Actions runners, corporate gateways, …)
+# can hit this in normal use. If GH_TOKEN or GITHUB_TOKEN is set in
+# the environment, use it for the API call: authenticated requests
+# get 5000/hour. The token is ONLY sent to api.github.com (not to
+# the tarball download); that download is unauthenticated against
+# the public release artifact and doesn't need a token.
+GH_AUTH_HEADER=""
+GH_TOKEN_VAL="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+if [ -n "$GH_TOKEN_VAL" ]; then
+  GH_AUTH_HEADER="Authorization: Bearer $GH_TOKEN_VAL"
+fi
+gh_api() {
+  if [ -n "$GH_AUTH_HEADER" ]; then
+    $FETCH -H "$GH_AUTH_HEADER" "$1" 2>&1
+  else
+    $FETCH "$1" 2>&1
+  fi
+}
 if command -v shasum >/dev/null 2>&1; then
   SHA="shasum -a 256"
 elif command -v sha256sum >/dev/null 2>&1; then
@@ -110,10 +130,10 @@ if [ "${DAIMON_INSTALL_TAG:-}" = "" ]; then
   # the bare "could not resolve" — the previous version threw the
   # bodies away via `2>/dev/null` + `|| true` and produced confusing
   # CI failures.
-  LATEST_RESP=$($FETCH "https://api.github.com/repos/${REPO}/releases/latest" 2>&1 || true)
+  LATEST_RESP=$(gh_api "https://api.github.com/repos/${REPO}/releases/latest" || true)
   TAG=$(echo "$LATEST_RESP" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$TAG" ]; then
-    ALL_RESP=$($FETCH "https://api.github.com/repos/${REPO}/releases" 2>&1 || true)
+    ALL_RESP=$(gh_api "https://api.github.com/repos/${REPO}/releases" || true)
     TAG=$(echo "$ALL_RESP" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   fi
 else
