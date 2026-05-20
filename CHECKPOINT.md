@@ -47,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 376 Go race+vet + 65 pytest + 65 vitest = **506 tests, all green on every push**.
+**Tests:** 385 Go race+vet + 65 pytest + 65 vitest = **515 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -125,7 +125,9 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 - [JOURNAL.md](./JOURNAL.md) — chronological per-session decision log (full detail)
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — how to propose changes
 - [SECURITY.md](./SECURITY.md) — responsible disclosure (GitHub Private Vulnerability Reporting)
-- [PUBLISH.md](./PUBLISH.md) — release ritual
+- [PUBLISH.md](./PUBLISH.md) — release ritual (SDK publishes + binary distribution + dev cycling pattern)
+- [docs/perf.md](./docs/perf.md) — measured performance baselines (Argon2id, AEAD, BIP-32, EIP-712)
+- [design/v0.3-federation.md](./design/v0.3-federation.md) — v0.3 architectural proposal (DRAFT, awaiting review)
 - [sdk/python/README.md](./sdk/python/README.md) + [sdk/typescript/README.md](./sdk/typescript/README.md) — per-language reference
 - [examples/streaming](./examples/streaming) + [examples/x402-smoke](./examples/x402-smoke) — runnable cross-language demos
 
@@ -152,3 +154,7 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 63 | 2026-05-20 | **CHECKPOINT pruned** 195 → 150 lines; **[`design/v0.3-federation.md`](./design/v0.3-federation.md) DRAFT** posted for review |
 | 64 | 2026-05-20 | `daimon backup` + `daimon restore` — whole-daimon migration in one command |
 | 65 | 2026-05-20 | `install.sh` respects `GH_TOKEN`/`GITHUB_TOKEN` to avoid GitHub API rate limits in CI |
+| 66 | 2026-05-20 | `.github/ISSUE_TEMPLATE/*` + `PULL_REQUEST_TEMPLATE.md` + `go mod tidy` (3 deps indirect → direct) |
+| 67 | 2026-05-20 | `daimon completion bash/zsh/fish` — static shell completion scripts |
+| 68 | 2026-05-20 | `make ci-local` + `make build-all` — pre-push verification mirroring the 10-shard CI matrix |
+| 69 | 2026-05-20 | Performance baselines: 8 benchmarks (`internal/{identity,secretbox,wallet,payment}/bench_test.go`) + `make bench` target + [`docs/perf.md`](./docs/perf.md) |
