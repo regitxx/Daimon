@@ -42,7 +42,12 @@ import (
 	"github.com/regitxx/Daimon/internal/wallet"
 )
 
-const version = "v0.1.0-dev"
+// version is the daemon's reported version. The default "dev" is the
+// fallback for builds that don't pass `-ldflags "-X main.version=..."`.
+// The release workflow + Makefile both inject the real version via that
+// ldflag, derived from `git describe --tags --dirty --always`. See
+// .github/workflows/release.yml + Makefile.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {

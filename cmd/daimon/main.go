@@ -28,7 +28,15 @@ import (
 	"os"
 )
 
-const version = "v0.1.0-dev"
+// version is the binary's reported version. The default "dev" is the
+// fallback for builds that don't pass `-ldflags "-X main.version=..."`
+// (e.g. `go install`, IDE builds, ad-hoc `go build`). The release
+// workflow + Makefile both inject the real version via that ldflag,
+// derived from `git describe --tags --dirty --always` so binaries
+// built off a tagged commit report the tag, builds off main between
+// tags report `<tag>-<n>-g<sha>`, and dirty checkouts get a `-dirty`
+// suffix. See .github/workflows/release.yml + Makefile.
+var version = "dev"
 
 func main() {
 	if len(os.Args) < 2 {

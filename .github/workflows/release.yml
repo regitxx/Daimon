@@ -1,0 +1,153 @@
+# Cross-compile + publish release binaries to GitHub Releases on tag push.
+#
+# Trigger: pushing any `v*` tag (e.g. v0.2.0-dev.3, v0.2.0, v0.3.0).
+# Output: one tarball per platform attached to a GitHub Release on the tag,
+# plus a checksums.txt with SHA-256 of every artifact.
+#
+# Platforms shipped:
+#   - darwin-arm64  (M1+ macOS)
+#   - darwin-amd64  (Intel macOS)
+#   - linux-arm64   (e.g. Raspberry Pi 4+, AWS Graviton, Apple Silicon Linux VMs)
+#   - linux-amd64   (most servers + Intel laptops on Linux)
+#
+# Windows is intentionally NOT shipped: the daemon listens on a Unix socket
+# (SPEC §3), and native Windows AF_UNIX support is recent + uneven.
+# Windows users can build from source under WSL2 today; first-class Windows
+# binaries are reserved for a post-v0.2 release that wires the localhost
+# mTLS fallback the SPEC mentions.
+#
+# Binaries are statically linked (CGO_ENABLED=0) because the SQLite driver
+# (modernc.org/sqlite) is pure Go. No glibc dependency on Linux either.
+# Symbols are stripped (-w -s) — release binaries don't need debug info,
+# saves ~30% on size.
+#
+# Companion to the npm + PyPI pre-release publishes which happen separately
+# via `npm publish` / `twine upload`. The CLI-side artifacts attached here
+# let users who don't want to install Go pull a working `daimon` + `daimond`
+# pair directly.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    # Lets us re-run a release against an arbitrary tag from the Actions UI
+    # if something goes wrong on first attempt. The tag must already exist
+    # in the repo.
+    inputs:
+      tag:
+        description: 'Existing tag to (re-)release (e.g. v0.2.0-dev.3)'
+        required: true
+        type: string
+
+permissions:
+  # `gh release create` writes the release object + uploads assets.
+  contents: write
+
+jobs:
+  release:
+    name: Build + publish release binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve tag
+        id: resolve_tag
+        # `workflow_dispatch` runs against the default branch by default,
+        # so we have to explicitly check out the requested tag below. For
+        # the push trigger, github.ref_name is the tag.
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.resolve_tag.outputs.tag }}
+          # Need full history so release notes can reference the previous
+          # tag in the future (currently we just use the tag annotation).
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Cross-compile binaries
+        env:
+          # Pure-Go SQLite (modernc.org/sqlite) is the only "native" dep; we
+          # don't need cgo for any of it. -w -s strips DWARF + symbol table.
+          # -X main.version injects the binary's reported version so
+          # `daimon --help` shows the release tag instead of "dev".
+          # daimon and daimond both have a `var version = "dev"` symbol
+          # in their main package; x402-mock-server uses its own const so
+          # we don't pass the ldflag to it.
+          CGO_ENABLED: '0'
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve_tag.outputs.tag }}"
+          # Use the resolved tag verbatim as the embedded version — for a
+          # tag-triggered release this matches what `git describe` would
+          # produce anyway, but resolving it from inputs/ref_name avoids
+          # any ambiguity about which tag the artifacts correspond to.
+          mkdir -p dist
+          for platform in darwin-amd64 darwin-arm64 linux-amd64 linux-arm64; do
+            os="${platform%-*}"
+            arch="${platform#*-}"
+            stage="dist/daimon-${tag}-${platform}"
+            mkdir -p "$stage"
+            for bin in daimon daimond; do
+              echo "  building $bin for $platform"
+              GOOS="$os" GOARCH="$arch" go build \
+                -trimpath \
+                -ldflags "-w -s -X main.version=${tag}" \
+                -o "$stage/$bin" \
+                "./cmd/$bin"
+            done
+            # x402-mock-server doesn't surface a version flag; build
+            # without the -X to keep the ldflags simple.
+            echo "  building x402-mock-server for $platform"
+            GOOS="$os" GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-w -s" \
+              -o "$stage/x402-mock-server" \
+              ./cmd/x402-mock-server
+            cp LICENSE "$stage/"
+            cp README.md "$stage/" 2>/dev/null || true
+            cp QUICKSTART.md "$stage/" 2>/dev/null || true
+            # Tar from inside dist/ so the archive contains a single
+            # top-level directory the user can untar anywhere.
+            (cd dist && tar czf "daimon-${tag}-${platform}.tar.gz" "$(basename "$stage")")
+            rm -rf "$stage"
+          done
+          ls -la dist/
+
+      - name: Compute SHA-256 checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > checksums.txt
+          cat checksums.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.resolve_tag.outputs.tag }}"
+          # Idempotent: if a release already exists for this tag we update
+          # its assets rather than failing. Lets us re-run the workflow on
+          # a tag that already has a partial release attached.
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release for $tag already exists — uploading assets (clobbering existing)"
+            gh release upload "$tag" dist/*.tar.gz dist/checksums.txt --clobber
+          else
+            # First-time release. Use the tag annotation as the body; the
+            # tag was created with `git tag -m "..."` so the annotation is
+            # the human-readable summary the user wants to see on the
+            # release page.
+            gh release create "$tag" \
+              --title "$tag" \
+              --notes-from-tag \
+              dist/*.tar.gz dist/checksums.txt
+          fi
