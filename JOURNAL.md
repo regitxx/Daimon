@@ -3332,3 +3332,54 @@ End-to-end smoke against a temp `$DAIMON_HOME`: `daimon doctor` correctly transi
 - Test counts: **356 Go race+vet + 65 pytest + 65 vitest + 9 CI shards** (delta: +13 / +2 / +2 from end of session 51). All green on every push.
 - v0.2.0-dev.1 still current on PyPI + npm; sessions 52–54 added new RPC surface (derive) that will land in the next pre-release cut OR v0.2.0 GA. Both SDK CHANGELOG `[Unreleased]` blocks track the additions.
 - Still-pending (same as session 51): phase 40.4 (live Base Sepolia) and phase 40.5b (provider.invoke auto-pay) — neither moved this burst, both blocked on externals (test funds + a real x402-protected endpoint; an LLM provider that actually returns 402).
+
+## 2026-05-20 — Day Zero, sessions 56–58: pre-built binary distribution + QUICKSTART
+
+Closes the install-friction story QUICKSTART.md surfaced at the end of yesterday: the walkthrough opened with `git clone && make build` because that was the only install path. Now anyone can grab a tarball from GitHub Releases and have a working `daimon` + `daimond` in three `curl + tar + install` commands. No Go install needed.
+
+Three commits + a tag-driven release:
+
+### Session 56 — `.github/workflows/release.yml` + ldflags version injection ([3fa5e8d](https://github.com/regitxx/Daimon/commit/3fa5e8d))
+
+Two coordinated pieces.
+
+**`.github/workflows/release.yml`** triggers on any `v*` tag push and supports `workflow_dispatch` with an input tag for manual re-runs against an arbitrary existing tag. Cross-compiles `daimon` + `daimond` + `x402-mock-server` for darwin-arm64, darwin-amd64, linux-arm64, linux-amd64 via plain `GOOS=$os GOARCH=$arch go build`. All binaries are statically linked (`CGO_ENABLED=0`; pure-Go SQLite via modernc.org/sqlite), stripped (`-w -s`), ~11 MB per platform tarball. Each tarball packages binaries alongside LICENSE + README + QUICKSTART. SHA-256 checksums are computed across all tarballs and saved into a `checksums.txt` that ships in the release. The workflow uses `gh release create --notes-from-tag` for first-time creation and `gh release upload --clobber` if a release already exists (idempotent re-runs). `contents: write` is the only added permission — minimal, scoped to releases.
+
+**Binary version injection via ldflags**: `cmd/daimon/main.go` + `cmd/daimond/main.go` switched their `const version = "v0.1.0-dev"` to `var version = "dev"` (Go's `-ldflags -X` only works on package-level VARIABLES, not constants), with the release pipeline overriding it via `-ldflags "-X main.version=<tag>"`. Same posture as the SDKs' build-time version codegen (TS via `scripts/gen-version.mjs`, Python via `scripts/gen_version.py`); the Go binaries are now on the same anti-drift footing. Makefile picks up `git describe --tags --dirty --always` for local builds — so `bin/daimon --help` reports a meaningful version even between releases (e.g. `v0.2.0-dev.3-2-g9536b01-dirty` for a dirty checkout 2 commits past dev.3).
+
+Test fixtures in `cmd_activity_test.go` that reference the literal string `"v0.1.0-dev"` don't break — they're opaque payload data in the activity-log renderer tests, not assertions against the runtime const value.
+
+### Session 57 — first release artifact production (tag `v0.2.0-dev.3`)
+
+Same-day with session 56. Tagged `v0.2.0-dev.3` immediately after the workflow landed, which fired the workflow on its first real run. Two minutes 43 seconds end-to-end:
+
+- Cross-compiles all 4 platforms
+- Tarballs assembled with binaries + docs
+- SHA-256 checksums computed
+- GitHub Release [v0.2.0-dev.3](https://github.com/regitxx/Daimon/releases/tag/v0.2.0-dev.3) created with all 5 assets attached (4 tarballs + checksums.txt)
+- Tag annotation surfaced as release notes
+
+**No SDK version bump** in lockstep — the SDKs (Python `0.2.0.dev2`, npm `0.2.0-dev.2`) didn't change surface-wise since dev.2, so no PyPI/npm publish. The `dev.3` cut is purely about the BINARY distribution. v0.2 has a binary track + an SDK track now; they don't have to march in lockstep.
+
+End-to-end verified: downloaded the published darwin-arm64 tarball via `gh release download`, extracted, ran `./daimon --help` → reports `v0.2.0-dev.3` correctly (no more stale "v0.1.0-dev" carryover from v0.1 GA). SHA-256 of downloaded tarball matches checksums.txt byte-for-byte.
+
+### Session 58 — surface the new install path in docs ([9536b01](https://github.com/regitxx/Daimon/commit/9536b01))
+
+QUICKSTART.md's "Install" section split into Option A (pre-built binaries) + Option B (build from source). Option A is now ~3 commands: `curl` the tarball, `tar -C /tmp -xzf`, `sudo install ... /usr/local/bin/`. Plus an optional `shasum -c` verification step against the published `checksums.txt` for users who want cryptographic integrity on a binary they didn't build.
+
+Top-level README:
+- "Try v0.1" section gains a one-liner pointer to the latest GitHub Release as the no-Go-needed path, ahead of the existing `make build` snippet.
+- Status block bumped to surface `v0.2.0-dev.3 + binaries` alongside the SDK pre-release channels.
+- Also fixed `daimon memory search "sky"` example to `daimon memory list` — search needs Ollama for the embedder, list works unconditionally. (Drift between docs and actual behavior; caught during the QUICKSTART pass yesterday and now mirrored to the top-level README.)
+
+### State at end of session burst (sessions 56–58)
+
+- **Three install paths** instead of one:
+  - Pre-built binary tarball from [GitHub Releases](https://github.com/regitxx/Daimon/releases/latest) — fastest for anyone without Go
+  - Python SDK: `pip install --pre daimon-protocol` (still 0.2.0.dev2)
+  - TypeScript SDK: `npm install @daimon-protocol/sdk@dev` (still 0.2.0-dev.2)
+  - Plus build-from-source via `make build` for hacking
+- Binary version reporting is structurally correct. Locally-built binaries report `git describe`; CI-built release artifacts report the exact tag. Same anti-drift posture the SDKs got in sessions 50 + Python gen_version.
+- New release workflow is reusable for every future `v*` tag — subsequent releases auto-produce artifacts without any manual cross-build orchestration. The `workflow_dispatch` path with an input tag covers the "I need to re-release this tag from scratch" case.
+- Test counts unchanged from session 55: 356 Go race+vet + 65 pytest + 65 vitest + 9 CI shards (CI itself unchanged; the new `Release` workflow is a separate workflow, not a CI shard).
+- Still-pending (unchanged through this whole burst): phase 40.4 (live Base Sepolia) + phase 40.5b (provider.invoke auto-pay) — both still blocked on externals.
