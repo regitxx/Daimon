@@ -1,0 +1,72 @@
+name: Feature request
+description: Propose a feature or enhancement.
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Daimon's a small project run by one person plus AI pairing.
+        We're open to ideas but **scope is precious**. The
+        [roadmap](../README.md#roadmap) names which phase ships
+        what; features that don't fit a current phase get deferred
+        explicitly so we don't accumulate a punt-list.
+
+        **Before filing**: scan [CHECKPOINT.md](../CHECKPOINT.md)
+        for what's already in tree, [SPEC.md](../SPEC.md) for what's
+        on the protocol surface, and
+        [design/v0.3-federation.md](../design/v0.3-federation.md)
+        for what's already proposed for v0.3.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What user problem does this solve?
+      description: |
+        Lead with the user, not the implementation. "I can't X
+        without Y" is the right shape; "we should add Y" is not.
+        If you can describe the workflow you're trying to do, the
+        right design often becomes obvious.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: |
+        Concrete: new CLI verb? new RPC method? new SDK method?
+        Sketch the interface. We'd rather discuss a wrong design
+        than a vague one.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        What other approaches did you think about? Why did you
+        land on this proposal vs them? "Alternatives considered"
+        is one of the strongest signals that a proposal has been
+        thought through — every architectural decision in the
+        v0.3 design doc has one.
+
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Which roadmap phase does this fit?
+      options:
+        - v0.1.x (post-GA patch/polish — bug fixes only)
+        - v0.2.x (post-v0.2.0 patch — wallet + payment polish)
+        - v0.2.0 GA (currently blocked on phase 40.4 — live Base Sepolia)
+        - v0.3 (federation — see design/v0.3-federation.md draft)
+        - v0.4+ (later)
+        - Unsure / out of scope / let me know
+    validations:
+      required: true
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Links to related issues, prior art elsewhere, etc.

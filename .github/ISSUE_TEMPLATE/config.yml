@@ -1,0 +1,21 @@
+# Issue template config. The web "New issue" page lists the templates
+# below + the contact links here. We disable blank issues so every
+# bug/feature lands in a template with the right fields; security
+# issues route through Private Vulnerability Reporting instead.
+
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/regitxx/Daimon/security/advisories/new
+    about: |
+      Do NOT file a public issue for a security vulnerability. Use
+      GitHub Private Vulnerability Reporting — it's encrypted in
+      transit, scoped to maintainers, and gives us a tracked
+      timeline. See SECURITY.md for the full policy and scope.
+  - name: Discussions (open-ended questions, ideas)
+    url: https://github.com/regitxx/Daimon/discussions
+    about: |
+      For "how does this work?", "would X be a good idea?", or
+      "I'm thinking about contributing Y but want feedback first"
+      — discussions are the lower-bar venue. Issues are for
+      reproducible bugs and concrete feature proposals.

@@ -1,0 +1,108 @@
+name: Bug report
+description: Report a reproducible bug in the Daimon daemon, CLI, or SDKs.
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Before filing**: make sure this isn't
+        a security vulnerability (those go through
+        [Private Vulnerability Reporting](https://github.com/regitxx/Daimon/security/advisories/new)
+        per [SECURITY.md](../SECURITY.md), not public issues).
+
+        For each bullet below, more detail is better — we'd rather
+        you over-share than under-share.
+
+  - type: input
+    id: version
+    attributes:
+      label: Daimon version
+      description: |
+        Output of `daimon version` (for the CLI/daemon), or your SDK
+        version (`pip show daimon-protocol` / `npm list @daimon-protocol/sdk`).
+        If you built from source, paste the output of `git rev-parse HEAD`.
+      placeholder: "e.g. daimon v0.2.0-dev.3, sdk-python 0.2.0.dev2"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Which surface is affected?
+      multiple: true
+      options:
+        - CLI (`daimon` command)
+        - Daemon (`daimond`)
+        - Python SDK (`daimon-protocol`)
+        - TypeScript SDK (`@daimon-protocol/sdk`)
+        - SPEC (wire-shape / protocol behaviour)
+        - Build / CI / Release pipeline
+        - Docs (README, QUICKSTART, SPEC prose, etc.)
+        - Other (please describe)
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 14.5 (darwin-arm64), Ubuntu 24.04 (linux-amd64), Fedora 40"
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: How to reproduce
+      description: |
+        Minimum sequence of commands that produces the bug from a
+        fresh state. Use a tmp `$DAIMON_HOME` so we can copy-paste:
+
+        ```sh
+        export DAIMON_HOME=/tmp/daimon-repro
+        daimon init
+        daimon unlock
+        # … the buggy command(s) …
+        ```
+
+        If the bug is in a streaming provider, please mock the
+        provider (e.g. with a static HTTP server) so we can
+        reproduce without your API key.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you thought would happen and why.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: |
+        What actually happened. Include relevant log output,
+        stderr from the failing command, daemon.log lines, etc.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "Output of `daimon doctor --json` (optional)"
+      description: |
+        Helps us see your environment state at a glance. SAFE to
+        share — doctor reports presence-of-API-keys but NEVER the
+        keys themselves. Run with `--json` for clean copy-paste.
+      render: json
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Workarounds you've tried, related issues, screenshots, etc.
