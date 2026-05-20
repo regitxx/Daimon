@@ -129,18 +129,45 @@ jobs:
           sha256sum *.tar.gz > checksums.txt
           cat checksums.txt
 
+      - name: Detect pre-release tag
+        id: detect_prerelease
+        run: |
+          tag="${{ steps.resolve_tag.outputs.tag }}"
+          # SemVer pre-release tags have a hyphen after the version core:
+          # v0.2.0-dev.3, v0.2.0-rc.1, v0.2.0-alpha.1. Plain `vX.Y.Z` is
+          # a stable release. This regex matches the SemVer-compatible
+          # pre-release shape.
+          if echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "tag $tag matches SemVer pre-release pattern → flagging release as prerelease"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "tag $tag is a stable release"
+          fi
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag="${{ steps.resolve_tag.outputs.tag }}"
+          prerelease_flag=""
+          if [ "${{ steps.detect_prerelease.outputs.is_prerelease }}" = "true" ]; then
+            prerelease_flag="--prerelease"
+          fi
           # Idempotent: if a release already exists for this tag we update
           # its assets rather than failing. Lets us re-run the workflow on
-          # a tag that already has a partial release attached.
+          # a tag that already has a partial release attached. We also
+          # re-set the prerelease flag every run so flipping a tag's
+          # status (very rare) propagates without manual cleanup.
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "release for $tag already exists — uploading assets (clobbering existing)"
             gh release upload "$tag" dist/*.tar.gz dist/checksums.txt --clobber
+            if [ -n "$prerelease_flag" ]; then
+              gh release edit "$tag" --prerelease
+            else
+              gh release edit "$tag" --prerelease=false
+            fi
           else
             # First-time release. Use the tag annotation as the body; the
             # tag was created with `git tag -m "..."` so the annotation is
@@ -149,5 +176,6 @@ jobs:
             gh release create "$tag" \
               --title "$tag" \
               --notes-from-tag \
+              $prerelease_flag \
               dist/*.tar.gz dist/checksums.txt
           fi

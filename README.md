@@ -33,16 +33,18 @@ The v0.1 surface (identity / memory / activity log / four streaming provider ada
 
 ## Try v0.1 — memory + provider routing
 
-Grab a pre-built binary from the [latest release](https://github.com/regitxx/Daimon/releases/latest) (darwin-arm64 / darwin-amd64 / linux-arm64 / linux-amd64, no Go install needed) — or build from source:
-
 ```sh
-git clone https://github.com/regitxx/Daimon.git && cd Daimon
-make build
-./bin/daimon init        # once — choose a password
-./bin/daimon unlock      # auto-spawns daimond
-./bin/daimon memory write --kind fact "the sky is blue"
-./bin/daimon memory list # search needs Ollama for embeddings
+# Install (one-line, no Go required, SHA-256 verified):
+curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
+
+daimon init              # once — choose a password
+daimon unlock            # auto-spawns daimond
+daimon memory write --kind fact "the sky is blue"
+daimon memory list       # search needs Ollama for embeddings
 ```
+
+Or build from source: `git clone https://github.com/regitxx/Daimon.git && cd Daimon && make build`.
+Full walkthrough including v0.2 wallet + x402 payments: [QUICKSTART.md](./QUICKSTART.md).
 
 Or use one of the SDKs:
 
@@ -59,15 +61,15 @@ The v0.2 surface adds a wallet the daimon holds + signs with, and end-to-end x40
 pip install --pre daimon-protocol         # or @dev on npm:
 npm install @daimon-protocol/sdk@dev
 
-# From a repo checkout (covers both daemon binaries):
-./bin/daimon unlock                       # auto-creates wallet keystore + surfaces 24-word mnemonic ONCE
-./bin/daimon wallet create --chain evm:base
-./bin/daimon payment pay https://example.com/paid --ceiling-usd 0.10
+# With a `daimon` binary on PATH (one-liner install above):
+daimon unlock                       # auto-creates wallet keystore + surfaces 24-word mnemonic ONCE
+daimon wallet create --chain evm:base
+daimon payment pay --ceiling-usd 0.10 https://example.com/paid
 
 # Forgot to write the mnemonic down? Re-display it (password-gated):
-./bin/daimon wallet show-mnemonic
+daimon wallet show-mnemonic
 # Already have a 24-word backup elsewhere? Use THAT seed instead (offline, before first unlock):
-./bin/daimon wallet recover
+daimon wallet recover
 ```
 
 The seed lifecycle is fully under user control. `show-mnemonic` re-runs the full Argon2id KDF + AES-GCM-decrypt against the on-disk keystore (NOT the in-memory unlocked state), so the operation is a genuine "prove you know the password right now" attestation — wrong password surfaces a typed `-32008 CodeWrongPassword` distinct from "daemon is locked." `recover` is offline-only and refuses to overwrite a non-empty keystore, so an existing wallet can never be silently orphaned. The same canonical 12-word BIP-39 test vector (`abandon ... about` → `0x9858EfFD…EcaEda94`) that every external derivation tool (iancoleman.io/bip39, MetaMask, Phantom) produces is pinned in `internal/wallet`'s tests as an interop fixture.

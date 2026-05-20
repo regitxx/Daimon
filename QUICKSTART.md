@@ -43,7 +43,21 @@ mkdir -p "$DAIMON_HOME"
 
 ## Install
 
-### Option A — pre-built binaries (no Go needed)
+### Option A — one-line installer (recommended, no Go needed)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
+```
+
+The script resolves the latest GitHub Release, detects your platform, downloads the matching tarball, verifies its SHA-256 against the published `checksums.txt`, and drops `daimon` + `daimond` into `/usr/local/bin` (or `$HOME/.local/bin` if that's not writable). Useful env vars before piping into `sh`:
+
+- `DAIMON_INSTALL_PREFIX=…` — install somewhere else (e.g. `$HOME/bin`)
+- `DAIMON_INSTALL_TAG=v0.2.0-dev.3` — pin to a specific release (the installer otherwise tracks the latest non-pre-release; for pre-releases like dev.3, you currently need to pin until v0.2.0 GA lands)
+- `DAIMON_INCLUDE_MOCK=1` — also install `x402-mock-server`
+
+The script is at [`install.sh`](./install.sh) — review it before running if `curl | sh` makes you nervous (it makes me nervous too; the manual path below is the same workflow, just step-by-step).
+
+### Option B — manual tarball download (no Go needed)
 
 Download the tarball for your platform from the [latest release](https://github.com/regitxx/Daimon/releases/latest), extract it, drop `daimon` + `daimond` somewhere on `PATH`:
 
@@ -68,7 +82,7 @@ shasum -a 256 -c <(grep "daimon-${TAG}-${PLAT}.tar.gz" checksums.txt)
 
 Binaries are statically linked (no libc dependency on Linux), stripped, and ~11 MB per tarball. No Windows build — the daemon listens on a Unix socket (SPEC §3); Windows users can build from source under WSL2 today.
 
-### Option B — build from source
+### Option C — build from source
 
 Requires **Go 1.22+** (`go version`):
 
