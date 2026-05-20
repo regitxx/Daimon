@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
+	github.com/flynn/noise v1.1.0
 	github.com/mr-tron/base58 v1.3.0
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/tyler-smith/go-bip32 v1.0.0
