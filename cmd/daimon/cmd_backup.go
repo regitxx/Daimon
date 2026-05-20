@@ -273,11 +273,12 @@ func cmdRestore(args []string) error {
 	fs := flag.NewFlagSet("daimon restore", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	force := fs.Bool("force", false, "overwrite an existing daimon at $DAIMON_HOME (DESTROYS the current daimon there)")
+	dryRun := fs.Bool("dry-run", false, "verify the backup file is valid without writing anything to $DAIMON_HOME (decrypts if encrypted, prompts for passphrase, walks the tarball, reports the manifest)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: daimon restore [--force] <path-to-backup>")
+		return fmt.Errorf("usage: daimon restore [--force] [--dry-run] <path-to-backup>")
 	}
 	fromPath := fs.Arg(0)
 
@@ -286,30 +287,35 @@ func cmdRestore(args []string) error {
 		return err
 	}
 
-	// Same offline check as backup.
-	if socket, _, err := daimonhome.SocketPath(home); err == nil {
-		if conn, derr := net.DialTimeout("unix", socket, 200*time.Millisecond); derr == nil {
-			_ = conn.Close()
-			return fmt.Errorf("daimond is currently listening on %s — stop it before restoring", socket)
-		}
-	}
-
-	// Refuse to restore into a non-empty $DAIMON_HOME unless --force.
-	// Specifically check for the backup files themselves; other files
-	// like daimon.log or daimon.sock are fine to coexist (well, sock
-	// shouldn't be there per the above check, but stale log is fine).
-	for _, name := range backupFiles {
-		path := filepath.Join(home, name)
-		if _, err := os.Stat(path); err == nil {
-			if !*force {
-				return fmt.Errorf("%s already exists at the target — use --force to overwrite "+
-					"(DESTROYS the current daimon at %s)", name, home)
+	// Same offline check as backup — except --dry-run skips it. Dry-run
+	// only reads the backup file and inspects its contents in memory;
+	// it never touches $DAIMON_HOME or the daemon, so there's no
+	// torn-write risk that justifies refusing while the daemon's up.
+	if !*dryRun {
+		if socket, _, err := daimonhome.SocketPath(home); err == nil {
+			if conn, derr := net.DialTimeout("unix", socket, 200*time.Millisecond); derr == nil {
+				_ = conn.Close()
+				return fmt.Errorf("daimond is currently listening on %s — stop it before restoring", socket)
 			}
 		}
-	}
 
-	if err := os.MkdirAll(home, 0700); err != nil {
-		return fmt.Errorf("create %s: %w", home, err)
+		// Refuse to restore into a non-empty $DAIMON_HOME unless --force.
+		// Specifically check for the backup files themselves; other files
+		// like daimon.log or daimon.sock are fine to coexist (well, sock
+		// shouldn't be there per the above check, but stale log is fine).
+		for _, name := range backupFiles {
+			path := filepath.Join(home, name)
+			if _, err := os.Stat(path); err == nil {
+				if !*force {
+					return fmt.Errorf("%s already exists at the target — use --force to overwrite "+
+						"(DESTROYS the current daimon at %s)", name, home)
+				}
+			}
+		}
+
+		if err := os.MkdirAll(home, 0700); err != nil {
+			return fmt.Errorf("create %s: %w", home, err)
+		}
 	}
 
 	fileBytes, err := os.ReadFile(fromPath)
@@ -322,7 +328,11 @@ func cmdRestore(args []string) error {
 		return fmt.Errorf("decode backup: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Backup mode: %s\n", mode)
+	fmt.Fprintf(os.Stderr, "Backup mode:    %s\n", mode)
+	fmt.Fprintf(os.Stderr, "Backup file:    %s (%s)\n", fromPath, humanBytes(int64(len(fileBytes))))
+	if *dryRun {
+		fmt.Fprintln(os.Stderr, "Dry-run:        no files will be written to $DAIMON_HOME")
+	}
 	if mode == "encrypted" {
 		passphrase, err := readPassword("Backup passphrase: ")
 		if err != nil {
@@ -337,6 +347,33 @@ func cmdRestore(args []string) error {
 		if err != nil {
 			return fmt.Errorf("decrypt backup: %w", err)
 		}
+	}
+
+	if *dryRun {
+		// Walk the tarball in memory without writing. Reports each
+		// entry's name + size and asserts the structure invariants
+		// extractTarball would assert at write time (path-traversal
+		// rejection, allowlist enforcement, gzip integrity). Catches
+		// a corrupted backup BEFORE the user commits to an actual
+		// restore.
+		entries, err := walkTarball(tarball)
+		if err != nil {
+			return fmt.Errorf("verify tarball: %w", err)
+		}
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Backup verified — file is structurally valid and decryptable.")
+		fmt.Fprintln(os.Stderr, "  Contents:")
+		for _, e := range entries {
+			fmt.Fprintf(os.Stderr, "    %-20s %s\n", e.name, humanBytes(e.size))
+		}
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "To actually restore, re-run without --dry-run:\n")
+		fmt.Fprintf(os.Stderr, "  daimon restore %s\n", fromPath)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "Note: dry-run verifies the BACKUP FILE'S integrity (gzip, tar, encryption envelope).")
+		fmt.Fprintln(os.Stderr, "It does NOT verify the inner activity chain — that requires the daimon password and")
+		fmt.Fprintln(os.Stderr, "happens automatically on `daimon activity verify` after a real restore + unlock.")
+		return nil
 	}
 
 	included, err := extractTarball(tarball, home)
@@ -358,6 +395,63 @@ func cmdRestore(args []string) error {
 	fmt.Fprintln(os.Stderr, "the BACKUP passphrase only protected the file in transit, the inner keystore")
 	fmt.Fprintln(os.Stderr, "passwords are unchanged.)")
 	return nil
+}
+
+// tarEntry captures just the name + size of a tarball entry — what
+// dry-run mode reports to the user. Doesn't include the body because
+// dry-run is in-memory-only and we don't need to retain bytes once
+// we've verified the structure.
+type tarEntry struct {
+	name string
+	size int64
+}
+
+// walkTarball reads the same gzipped-tar stream extractTarball does
+// but DOES NOT write files. Used by --dry-run mode to verify a backup
+// without modifying disk. Applies the same structural checks
+// extractTarball does (path-traversal rejection, allowlist
+// enforcement) so a tarball that would fail real extract also fails
+// dry-run.
+func walkTarball(tarball []byte) ([]tarEntry, error) {
+	gz, err := gzip.NewReader(bytes.NewReader(tarball))
+	if err != nil {
+		return nil, fmt.Errorf("gzip: %w", err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+
+	var out []tarEntry
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("tar next: %w", err)
+		}
+		if filepath.IsAbs(hdr.Name) || hdr.Name != filepath.Base(hdr.Name) {
+			return nil, fmt.Errorf("backup contains illegal path %q (must be a bare filename)", hdr.Name)
+		}
+		allowed := false
+		for _, name := range backupFiles {
+			if hdr.Name == name {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, fmt.Errorf("backup contains unexpected file %q (allowed: %v)", hdr.Name, backupFiles)
+		}
+		// Read + discard the body to force gzip to validate the
+		// underlying compressed stream. A corrupt gzip would error
+		// here, on a body read, rather than on tr.Next.
+		body, err := io.ReadAll(tr)
+		if err != nil {
+			return nil, fmt.Errorf("tar read %s: %w", hdr.Name, err)
+		}
+		out = append(out, tarEntry{name: hdr.Name, size: int64(len(body))})
+	}
+	return out, nil
 }
 
 func decodeBackup(fileBytes []byte) (tarball []byte, mode string, err error) {

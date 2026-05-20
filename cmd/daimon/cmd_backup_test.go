@@ -225,6 +225,84 @@ func TestDecodeBackup_EncryptedModeReportsCorrectly(t *testing.T) {
 	}
 }
 
+// --- walkTarball (dry-run mode under restore --dry-run) ---------------------
+
+func TestWalkTarball_HappyPath(t *testing.T) {
+	// Build a valid tarball via buildTarball, then walk it. Should
+	// report all included files with correct sizes.
+	home := t.TempDir()
+	mustWriteFileBackup(t, filepath.Join(home, "identity.keystore"), []byte("alpha"))
+	mustWriteFileBackup(t, filepath.Join(home, "memory.db"), bytes.Repeat([]byte("x"), 100))
+
+	tarball, _, err := buildTarball(home)
+	if err != nil {
+		t.Fatalf("buildTarball: %v", err)
+	}
+
+	entries, err := walkTarball(tarball)
+	if err != nil {
+		t.Fatalf("walkTarball: %v", err)
+	}
+	if got, want := len(entries), 2; got != want {
+		t.Fatalf("entry count: got %d, want %d", got, want)
+	}
+	// Order isn't guaranteed by tarball (matches backupFiles order in
+	// buildTarball, but the test shouldn't depend on that). Build a map.
+	byName := map[string]int64{}
+	for _, e := range entries {
+		byName[e.name] = e.size
+	}
+	if byName["identity.keystore"] != 5 {
+		t.Errorf("identity.keystore size: got %d, want 5", byName["identity.keystore"])
+	}
+	if byName["memory.db"] != 100 {
+		t.Errorf("memory.db size: got %d, want 100", byName["memory.db"])
+	}
+}
+
+func TestWalkTarball_RejectsPathTraversal(t *testing.T) {
+	// Same defense-in-depth check extractTarball does. A tarball that
+	// would be rejected at extract time MUST also be rejected at
+	// dry-run, so users can't be tricked into believing a malicious
+	// backup is safe by running dry-run first.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	body := []byte("evil")
+	_ = tw.WriteHeader(&tar.Header{Name: "../escape.txt", Mode: 0600, Size: int64(len(body))})
+	_, _ = tw.Write(body)
+	tw.Close()
+	gz.Close()
+
+	if _, err := walkTarball(buf.Bytes()); err == nil {
+		t.Error("walkTarball: expected error for path-traversal entry, got nil")
+	}
+}
+
+func TestWalkTarball_RejectsUnexpectedFile(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	body := []byte("rogue")
+	_ = tw.WriteHeader(&tar.Header{Name: "not-in-allowlist.txt", Mode: 0600, Size: int64(len(body))})
+	_, _ = tw.Write(body)
+	tw.Close()
+	gz.Close()
+
+	if _, err := walkTarball(buf.Bytes()); err == nil {
+		t.Error("walkTarball: expected error for file outside backupFiles allowlist")
+	}
+}
+
+func TestWalkTarball_RejectsCorruptGzip(t *testing.T) {
+	// Random bytes that don't form a valid gzip stream. walkTarball
+	// should error at gzip.NewReader (which validates the magic + flags
+	// up front) or at the first read attempt.
+	if _, err := walkTarball([]byte("not a gzip stream")); err == nil {
+		t.Error("walkTarball: expected error for non-gzip input, got nil")
+	}
+}
+
 // --- Helpers ----------------------------------------------------------------
 
 func mustWriteFileBackup(t *testing.T, path string, body []byte) {

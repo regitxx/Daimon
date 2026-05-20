@@ -210,8 +210,12 @@ Usage:
 
   daimon restore <path>     Inverse of backup. Auto-detects encrypted vs
               [--force]     plain mode from the file's magic header.
-                            Refuses to overwrite a non-empty $DAIMON_HOME
-                            unless --force. Offline.
+              [--dry-run]   Refuses to overwrite a non-empty $DAIMON_HOME
+                            unless --force. With --dry-run, verifies the
+                            backup file (decrypts, walks the tarball,
+                            reports manifest) WITHOUT writing anything to
+                            $DAIMON_HOME — useful for checking old backups
+                            without committing to a restore. Offline.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
