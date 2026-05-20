@@ -127,3 +127,46 @@ jobs:
           # CI runners are loaded; a higher port avoids conflict with
           # any unrelated services bound to the typical 8xxx range.
           PORT: 18402
+
+  install-script:
+    name: install.sh — end-to-end against published release
+    # The repo's `curl | sh` install path is a public-facing contract.
+    # This shard runs the CURRENT install.sh from the checkout against
+    # whatever's published as the latest release, then runs the
+    # installed binaries to confirm they work. Catches three regression
+    # classes:
+    #   1. install.sh syntax errors / portability bugs
+    #   2. GitHub API tag-resolution drift (e.g. response shape changes)
+    #   3. Broken artifacts in the published release (corrupt tarball,
+    #      wrong checksum, binary fails to execute)
+    # We test both ubuntu-latest (linux-amd64) and macos-latest (currently
+    # darwin-arm64) so the macOS-specific shasum codepath gets exercised
+    # alongside the Linux sha256sum one.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run install.sh into a tempdir
+        run: |
+          set -euo pipefail
+          TMP=$(mktemp -d 2>/dev/null || mktemp -d -t daimon-install-ci)
+          echo "::group::install.sh output"
+          DAIMON_INSTALL_PREFIX="$TMP" sh ./install.sh
+          echo "::endgroup::"
+          # The script's own end-of-output already prints the version,
+          # but assert structurally here so a future cosmetic change to
+          # the script doesn't accidentally silence the CI check.
+          version=$("$TMP/daimon" --help 2>&1 | head -1)
+          echo "daimon --help: $version"
+          echo "$version" | grep -E '^daimon v[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::daimon --help did not report a v-prefixed version"; exit 1; }
+          # Confirm daimond launches its usage rather than segfaulting.
+          # We don't actually run `daimond serve` — that would need a
+          # full $DAIMON_HOME setup; the --help path proves the binary
+          # is executable and the version-injection ldflag landed.
+          "$TMP/daimond" --help | head -1 \
+            | grep -E '^daimond v[0-9]+\.[0-9]+\.[0-9]+' \
+            || { echo "::error::daimond --help did not report a v-prefixed version"; exit 1; }
