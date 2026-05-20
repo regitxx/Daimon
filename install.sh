@@ -76,9 +76,13 @@ need() {
 }
 need tar
 if command -v curl >/dev/null 2>&1; then
-  FETCH="curl -fsSL"
+  # --retry 3 + --retry-delay 2 covers transient network blips that would
+  # otherwise show up as "could not resolve a release tag" with no useful
+  # underlying error. --retry-connrefused retries on TCP reset too (some
+  # macOS network stacks reset under load before the TLS handshake).
+  FETCH="curl -fsSL --retry 3 --retry-delay 2 --retry-connrefused"
 elif command -v wget >/dev/null 2>&1; then
-  FETCH="wget -qO-"
+  FETCH="wget -qO- --tries=3 --retry-connrefused"
 else
   echo "${PROG}: need either curl or wget" >&2
   exit 1
@@ -100,11 +104,17 @@ if [ "${DAIMON_INSTALL_TAG:-}" = "" ]; then
   # need to fall back to /releases and pick the most recent one. We try
   # /latest first because once a real GA exists this is the right
   # answer; the fallback is just for the bootstrap period.
-  TAG=$($FETCH "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
-        | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+  #
+  # Save the actual response bodies so a failure surfaces something
+  # diagnostic (rate-limit message, network error, etc.) instead of
+  # the bare "could not resolve" — the previous version threw the
+  # bodies away via `2>/dev/null` + `|| true` and produced confusing
+  # CI failures.
+  LATEST_RESP=$($FETCH "https://api.github.com/repos/${REPO}/releases/latest" 2>&1 || true)
+  TAG=$(echo "$LATEST_RESP" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   if [ -z "$TAG" ]; then
-    TAG=$($FETCH "https://api.github.com/repos/${REPO}/releases" 2>/dev/null \
-          | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)
+    ALL_RESP=$($FETCH "https://api.github.com/repos/${REPO}/releases" 2>&1 || true)
+    TAG=$(echo "$ALL_RESP" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
   fi
 else
   TAG="$DAIMON_INSTALL_TAG"
@@ -112,6 +122,13 @@ fi
 
 if [ -z "$TAG" ]; then
   echo "${PROG}: could not resolve a release tag from https://api.github.com/repos/${REPO}/releases" >&2
+  echo "${PROG}: /releases/latest response (first 200 chars):" >&2
+  echo "  ${LATEST_RESP:-(empty)}" | head -c 200 >&2
+  echo >&2
+  echo "${PROG}: /releases response (first 200 chars):" >&2
+  echo "  ${ALL_RESP:-(empty)}" | head -c 200 >&2
+  echo >&2
+  echo "${PROG}: try pinning manually: DAIMON_INSTALL_TAG=v0.2.0-dev.3 sh install.sh" >&2
   exit 2
 fi
 

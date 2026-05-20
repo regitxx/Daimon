@@ -167,6 +167,9 @@ jobs:
           # We don't actually run `daimond serve` — that would need a
           # full $DAIMON_HOME setup; the --help path proves the binary
           # is executable and the version-injection ldflag landed.
-          "$TMP/daimond" --help | head -1 \
+          # daimond writes usage to STDERR (cmd/daimond/main.go's
+          # usage() uses fmt.Fprintf(os.Stderr, ...)) so we redirect
+          # stderr to stdout before grepping.
+          "$TMP/daimond" --help 2>&1 | head -1 \
             | grep -E '^daimond v[0-9]+\.[0-9]+\.[0-9]+' \
             || { echo "::error::daimond --help did not report a v-prefixed version"; exit 1; }
