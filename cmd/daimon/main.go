@@ -72,6 +72,8 @@ func main() {
 		exitOnErr(cmdBackup(args))
 	case "restore":
 		exitOnErr(cmdRestore(args))
+	case "completion":
+		exitOnErr(cmdCompletion(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -216,6 +218,12 @@ Usage:
                             reports manifest) WITHOUT writing anything to
                             $DAIMON_HOME — useful for checking old backups
                             without committing to a restore. Offline.
+
+  daimon completion <shell> Print a shell-completion script to stdout for
+                            bash, zsh, or fish. Source from your shell rc
+                            or install into the shell's completion dir
+                            (see 'daimon help' inside the script for the
+                            recommended path per shell).
 
   daimon version            Print the CLI version.
   daimon help               Show this message.
