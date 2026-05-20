@@ -52,7 +52,7 @@ curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
 The script resolves the latest GitHub Release, detects your platform, downloads the matching tarball, verifies its SHA-256 against the published `checksums.txt`, and drops `daimon` + `daimond` into `/usr/local/bin` (or `$HOME/.local/bin` if that's not writable). Useful env vars before piping into `sh`:
 
 - `DAIMON_INSTALL_PREFIX=…` — install somewhere else (e.g. `$HOME/bin`)
-- `DAIMON_INSTALL_TAG=v0.2.0-dev.3` — pin to a specific release (the installer otherwise tracks the latest non-pre-release; for pre-releases like dev.3, you currently need to pin until v0.2.0 GA lands)
+- `DAIMON_INSTALL_TAG=v0.2.0-dev.3` — pin to a specific release. The installer prefers the latest stable release if one exists, and falls back to the most recent pre-release otherwise (which is what you get today since v0.2.0 GA hasn't shipped yet). Once GA lands, pin via this var to opt back into pre-releases.
 - `DAIMON_INCLUDE_MOCK=1` — also install `x402-mock-server`
 
 The script is at [`install.sh`](./install.sh) — review it before running if `curl | sh` makes you nervous (it makes me nervous too; the manual path below is the same workflow, just step-by-step).

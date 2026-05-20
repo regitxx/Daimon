@@ -22,9 +22,9 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.3 pre-release with **pre-built binaries** on [GitHub Releases](https://github.com/regitxx/Daimon/releases/latest) (no Go install needed); SDK pre-releases (`daimon-protocol 0.2.0.dev2` / `@daimon-protocol/sdk@dev`) on `--pre` / `@dev` channels.
+**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.3 pre-release with **pre-built binaries** on [GitHub Releases](https://github.com/regitxx/Daimon/releases/latest) (`curl | sh` one-liner installer in the next section, or `pip install --pre daimon-protocol` / `npm install @daimon-protocol/sdk@dev` for the SDKs).
 
-The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release — including the export-and-import seed lifecycle (`daimon wallet show-mnemonic` to re-display the seed, `daimon wallet recover` to import one from an existing backup or external wallet). 356 Go test pass-lines + 65 pytest cases + 65 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server (now also asserting `wallet.derive` parity between both SDKs).
+The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments + full seed lifecycle — show-mnemonic, recover, derive) is in tree, CI-protected, and published as a pre-release on both registries + as platform binaries on GitHub Releases. 356 Go test pass-lines + 65 pytest cases + 65 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server (cryptographically verifies EIP-3009 signature recovery + asserts `wallet.derive` parity between both SDKs).
 
 - **[`QUICKSTART.md`](./QUICKSTART.md)** — zero-to-paid-x402-resource in ~30 minutes, the whole v0.1 + v0.2 surface end-to-end
 - [`SPEC.md`](./SPEC.md) — the protocol document (v0.1 + v0.2)
@@ -102,12 +102,25 @@ A single daimon running on your machine. Holds your identity and memory. Routes 
 - First-party SDKs in Python and TypeScript at full RPC parity, both with native streaming surfaces
 - **Single-player killer feature**: switch providers without losing context, memory, or identity
 
+## v0.2 scope — the daimon holds its own money
+
+Everything in v0.1, plus the wallet + payments primitive that makes "your agent acts on your behalf" real:
+
+- **BIP-39/BIP-32 HD wallet** (24-word mnemonic, MetaMask-compatible). One seed per principal, N derived keypairs per chain. v0.2 ships EVM chains only (Base + Base-Sepolia in the chain registry); SLIP-10 / Ed25519 chains (Solana, Stellar) deferred to v0.2.x.
+- **x402 payment client** — daimon parses HTTP 402 responses, signs EIP-3009 `transferWithAuthorization` against the matching wallet, retries with `PAYMENT-SIGNATURE`. Ceiling enforced **before** signing (over-budget 402s never produce a signature on the wire). Typed RPC error codes (`-32006 CodePaymentCeiling`, `-32007 CodePaymentUnsupported`) propagate to both SDKs.
+- **Full seed lifecycle**: `daimon wallet show-mnemonic` (password-gated re-display, distinct typed `-32008 CodeWrongPassword`); `daimon wallet recover` (offline import from a 12- or 24-word phrase, refuses if a keystore already exists, cross-checks against identity keystore password); `daimon wallet derive` (read-only "what address would I get?" verification, no persistence). Recovery's success block displays the derived index-0 EVM address so users catch typos BEFORE any state change.
+- **Audit chain extends naturally**: same Ed25519-signed hash chain as v0.1's memory rows now also carries `wallet.created` + `payment.signed` + `payment.settled` + `payment.failed` kinds.
+- **SDK parity** in both Python and TypeScript: `client.wallet.{list, create, address, sign, derive, show_mnemonic}` + `client.payment.pay({url, ceilingSmallestUnit, …})`, byte-for-byte mirroring the daemon's wire shape.
+- **`daimon doctor` Wallet section** surfaces the running daemon's wallet RPC surface state, with actionable remediation on the silent password-mismatch failure mode.
+
+GA blocked on phase 40.4: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (the cryptographic surface is self-tested end-to-end via the CI x402-smoke shard, but the on-chain settle step needs an external endpoint).
+
 ## Roadmap
 
 | Phase | Months | Ships |
 |---|---|---|
 | v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 4 provider adapters ✅ **shipped GA 2026-05-12** |
-| v0.2 | 2–4 | x402 payment integration, agent wallet ✅ **pre-release on PyPI `--pre` / npm `@dev` 2026-05-18**; GA blocked on live Base Sepolia settlement |
+| v0.2 | 2–4 | x402 payment integration, agent wallet, full seed lifecycle ✅ **pre-release on PyPI `--pre` / npm `@dev` 2026-05-18, pre-built binaries on GitHub Releases 2026-05-20** (`v0.2.0-dev.3`); GA blocked on live Base Sepolia settlement |
 | v0.3 | 4–6 | A2A discovery, federation, encrypted channels |
 | v0.4 | 6–9 | Biscuit-token capability delegation, reputation primitive |
 | v0.5 | 9–12 | First labor-market wedge: post-task / agent-bid / escrow |
