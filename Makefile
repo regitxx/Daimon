@@ -1,4 +1,4 @@
-.PHONY: all build test clean demo fmt vet
+.PHONY: all build test clean demo fmt vet build-all ci-local
 
 BUILD_DIR := bin
 PKG := ./...
@@ -40,3 +40,49 @@ demo: build
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# Builds everything: daimond + daimon + x402-mock-server. The mock
+# server is excluded from the default `make build` (it's a CI/example
+# binary, not part of the user-facing product), but having a one-shot
+# build for it is useful when running the x402 smoke locally.
+build-all: build
+	go build -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/x402-mock-server ./cmd/x402-mock-server
+
+# Runs everything CI runs, in roughly the same order. Useful for
+# pre-push verification — beats waiting for the GitHub Actions
+# round-trip on every push. Stops on the first failure (set -e
+# semantics via the standard Make recipe behaviour).
+#
+# Mirror of .github/workflows/ci.yml's 10-shard matrix, minus the
+# install-script shard (that one needs the published GitHub Release
+# and can't run pre-push by definition).
+#
+# Total runtime: ~2 minutes on an M1 / M2 laptop. The x402-smoke
+# step dominates (binary builds + mock server spin-up + two SDK
+# round-trips); skip it via SKIP_SMOKE=1 if you're iterating fast
+# and only need the Go + SDK suites.
+ci-local: build-all
+	@echo "=== go vet ==="
+	go vet $(PKG)
+	@echo "=== go test -race ==="
+	go test -race $(PKG)
+	@echo "=== Python SDK suite ==="
+	@if [ -d sdk/python ]; then \
+		cd sdk/python && \
+		python3 scripts/gen_version.py && \
+		python3 -m pytest -q; \
+	fi
+	@echo "=== TypeScript SDK suite ==="
+	@if [ -d sdk/typescript ]; then \
+		cd sdk/typescript && \
+		npm run typecheck && \
+		npm test; \
+	fi
+	@if [ "$$SKIP_SMOKE" = "1" ]; then \
+		echo "=== x402-smoke (SKIPPED via SKIP_SMOKE=1) ==="; \
+	else \
+		echo "=== x402 cross-language smoke ==="; \
+		bash examples/x402-smoke/run.sh; \
+	fi
+	@echo
+	@echo "ci-local: all checks passed (version=$(VERSION))."

@@ -28,8 +28,24 @@ default: assume good faith, be respectful, focus on the work.
 git clone https://github.com/regitxx/Daimon.git
 cd Daimon
 make build              # produces bin/daimon + bin/daimond
-make test               # 356 Go test pass-lines, ~15 seconds
+make build-all          # also builds bin/x402-mock-server
+make test               # Go suite, ~15 seconds
 ```
+
+### Pre-push verification
+
+To run everything CI runs in one command, locally, before pushing:
+
+```sh
+make ci-local                # full suite incl. x402 cross-language smoke (~2 minutes)
+make ci-local SKIP_SMOKE=1   # Go + Python + TS only, skips the smoke (~30 seconds)
+```
+
+This mirrors the 10-shard CI matrix (minus the install-script shard, which
+needs the published GitHub Release and can't run pre-push by definition).
+Stops on the first failure. Useful when you've got an unpushed branch with
+non-trivial changes and want to catch issues before the round-trip to GitHub
+Actions.
 
 For the SDKs:
 
