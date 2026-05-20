@@ -1,4 +1,4 @@
-.PHONY: all build test clean demo fmt vet build-all ci-local
+.PHONY: all build test clean demo fmt vet build-all ci-local bench
 
 BUILD_DIR := bin
 PKG := ./...
@@ -61,6 +61,23 @@ build-all: build
 # step dominates (binary builds + mock server spin-up + two SDK
 # round-trips); skip it via SKIP_SMOKE=1 if you're iterating fast
 # and only need the Go + SDK suites.
+# Runs the Go benchmark suite over internal/{identity, secretbox,
+# wallet, payment} — the CPU-bound hot paths that dominate daimon's
+# user-visible latency. Use to capture a perf baseline before a
+# refactor or to verify nothing's regressed after one. Results are
+# documented in docs/perf.md.
+#
+# benchtime=2s strikes a balance: stable enough to compare runs
+# (CV < 5% typically), short enough to fit in the inner loop.
+# Crank to 5s+ if you're trying to chase a specific regression
+# down to <1% noise.
+bench:
+	go test -bench=. -benchtime=2s -run='^$$' \
+		./internal/identity/ \
+		./internal/secretbox/ \
+		./internal/wallet/ \
+		./internal/payment/
+
 ci-local: build-all
 	@echo "=== go vet ==="
 	go vet $(PKG)
