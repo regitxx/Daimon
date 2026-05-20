@@ -3550,3 +3550,82 @@ Fix in two places:
 **Still-pending** (same as sessions 51-62, unchanged): phase 40.4 (live Base Sepolia) + phase 40.5b (provider.invoke auto-pay). Both blocked on externals.
 
 **This is a natural stopping point for the burst.** 33 commits, the wallet/password/state-migration surface is structurally complete in the "every reasonable user action has a non-destructive answer" sense, and v0.3 has a concrete proposal to debate. Further work without huckgod direction would either be v0.3 implementation (which I told myself not to start) or polish with diminishing returns.
+
+## 2026-05-20 — Day Zero, sessions 66–69: post-stopping-point polish under huckgod's "go on" mandate
+
+After session 65's "this is a natural stopping point" framing, huckgod kept saying "go on" — eventually escalating to "all good I approve you can continue." Continued autonomous work on items I'd flagged as small but useful, none of which touched v0.3 implementation (which I explicitly told myself to defer until design review). Four commits.
+
+### Session 66 — `.github` templates + `go mod tidy` ([f01fed9](https://github.com/regitxx/Daimon/commit/f01fed9))
+
+Standard public-repo hygiene that was missing:
+
+- **`.github/ISSUE_TEMPLATE/config.yml`** disables blank issues, routes security to Private Vulnerability Reporting, points open-ended questions at Discussions.
+- **`bug_report.yml`** — structured YAML form with version, affected surface, OS, repro, expected vs actual, optional `daimon doctor --json` output (safe to share: presence-of-API-keys only, never the keys themselves).
+- **`feature_request.yml`** — leads with user problem not implementation, requires "alternatives considered" (same posture the v0.3 design doc takes), forces a roadmap phase pick at intake, scan-suggestions point at CHECKPOINT / SPEC / design draft.
+- **`PULL_REQUEST_TEMPLATE.md`** — checklist for CI green, SPEC updates if wire-shape changed, cryptographic-layer changes pre-discussed in an issue, SDK parity if SDK surface changed, CHANGELOG entries, new-dependency supply-chain review.
+
+Also ran `go mod tidy`: three deps (`decred/dcrd/dcrec/secp256k1/v4`, `tyler-smith/go-bip32`, `tyler-smith/go-bip39`) moved from indirect to direct (they're imported directly by `internal/wallet`). Same versions, same transitive graph — just bookkeeping cleanup.
+
+### Session 67 — Shell completion for bash / zsh / fish ([1700759](https://github.com/regitxx/Daimon/commit/1700759))
+
+New `daimon completion <shell>` subcommand that emits static completion scripts. Modern CLI pattern (kubectl, gh, cargo, etc). Covers:
+
+- Top-level subcommand enumeration (15 verbs)
+- Second-level subcommands for memory / provider / activity / wallet / payment / completion
+- `--kind` enum values for memory verbs (fact / preference / task / observation)
+- Path completion for `backup --to` and `restore <path>`
+
+**Anti-regression tests** (+5, 380 → 385 Go): every top-level verb asserted to appear in all 3 shell scripts; every memory kind too. A future PR that adds a new verb to `main.go`'s switch but forgets to update completion trips at unit-test time.
+
+Local syntax verification: `bash -n` + `zsh -n` both parse the generated scripts cleanly.
+
+### Session 68 — `make ci-local` + `make build-all` ([422cbf5](https://github.com/regitxx/Daimon/commit/422cbf5))
+
+Pre-push verification that mirrors the 10-shard CI matrix locally:
+
+- `make ci-local` runs go vet + go test -race + Python pytest (with gen_version regen) + TypeScript typecheck + vitest + x402 cross-language smoke
+- `SKIP_SMOKE=1` env var skips the heavy smoke shard (~30s total without smoke vs ~2 min with)
+- `make build-all` adds `bin/x402-mock-server` to the default `bin/daimon` + `bin/daimond` build
+
+CONTRIBUTING.md's "Local setup" gained a "Pre-push verification" subsection so contributors discover it. The install-script CI shard is intentionally NOT mirrored — that one needs the published GitHub Release and can't run pre-push by definition.
+
+### Session 69 — Performance baselines ([83b7576](https://github.com/regitxx/Daimon/commit/83b7576))
+
+Captures regression baselines for the four CPU-bound hot paths that dominate daimon's user-visible latency. 8 benchmarks across `internal/{identity,secretbox,wallet,payment}/bench_test.go`:
+
+- **identity**: `LoadFromKeystore` (Argon2id + AES-GCM open — the dominant cost of `daimon unlock`), `RotatePassword` (3× Argon2id)
+- **secretbox**: `SealAAD` + `OpenAAD` on 256-byte plaintexts (the AES-256-GCM hot path for memory + activity rows)
+- **wallet**: `DeriveAddress` at index 0 and 100 (BIP-32 + secp256k1 + Keccak256 + EIP-55)
+- **payment**: `EIP3009Digest` + `DomainSeparator` (the EIP-712 hashing path)
+
+New `make bench` Makefile target runs all 8 at benchtime=2s in ~28s.
+
+New `docs/perf.md` documents the measured baselines on Apple M5 Pro:
+
+- LoadFromKeystore: **33 ms/op** (~30 ms Argon2id is by design — if this drops to single-digit ms, the KDF was weakened)
+- RotatePassword: 95 ms/op (~3× LoadFromKeystore, as expected)
+- SealAAD: 647 ns/op (395 MB/s) | OpenAAD: 305 ns/op (840 MB/s, faster because no nonce rand.Read)
+- DeriveAddress: ~5 ms/op
+- EIP3009Digest: 2.2 µs/op | DomainSeparator: 1.1 µs/op
+
+Each number annotated with "what this tells you" commentary. Limitations section names what's NOT measured (HTTP overhead, SQLite throughput, audit walk at scale, streaming providers) — those paths are I/O- or provider-bound and benchmarking them in isolation tells you less than profiling a real workload.
+
+Regeneration policy: `make bench`, update the table by hand. CI does NOT enforce regressions (would add CI time without clear benefit at v0.2 scale).
+
+### State at end of sessions 66–69
+
+**Test counts:** 376 → 385 Go race+vet (+9 across completion tests + benchmark Test-name-prefixed checks — benchmarks themselves don't count as tests). 65 pytest + 65 vitest unchanged. **515 total tests, 10 CI shards green.** Plus 8 benchmarks runnable via `make bench` (not in CI).
+
+**Burst total: 39 commits, all CI-green.** What landed beyond the wallet/password/state-migration surface (already complete at session 65):
+
+| What | Why it matters |
+|---|---|
+| Issue + PR templates | Public-repo hygiene every serious project has |
+| Shell completion (bash/zsh/fish) | CLI ergonomics; standard kubectl/gh/cargo pattern |
+| `make ci-local` + `make build-all` | Contributors can pre-push verify in ~30s |
+| Perf baselines + `make bench` | Anti-regression catch for crypto-heavy paths |
+| `go mod tidy` | go.mod accurately reflects what's imported |
+
+**Genuinely still pending** (unchanged through the whole burst): phase 40.4 (live Base Sepolia) + phase 40.5b (`provider.invoke` auto-pay). Both blocked on externals. v0.3 implementation waits on the design doc review.
+
+**Next directional decision is huckgod's.** Either review the v0.3 design, redirect to something specific, or call the burst done. Further autonomous work without direction would either be v0.3 implementation (which I haven't done) or polish on materially-diminishing margins.
