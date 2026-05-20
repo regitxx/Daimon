@@ -3383,3 +3383,74 @@ Top-level README:
 - New release workflow is reusable for every future `v*` tag — subsequent releases auto-produce artifacts without any manual cross-build orchestration. The `workflow_dispatch` path with an input tag covers the "I need to re-release this tag from scratch" case.
 - Test counts unchanged from session 55: 356 Go race+vet + 65 pytest + 65 vitest + 9 CI shards (CI itself unchanged; the new `Release` workflow is a separate workflow, not a CI shard).
 - Still-pending (unchanged through this whole burst): phase 40.4 (live Base Sepolia) + phase 40.5b (provider.invoke auto-pay) — both still blocked on externals.
+
+## 2026-05-20 — Day Zero, sessions 59–62: public repo polish
+
+Four contiguous commits closing the "this is a serious public project" gap that the public-repo flip opened. Each one closes a specific UX or operational hole rather than adding new protocol surface — v0.2 was structurally complete by end of session 58; this burst is about credibility, robustness, and a small but meaningful new password-management feature.
+
+### Session 59 — one-line installer + pre-release auto-detection ([a5f8e5e](https://github.com/regitxx/Daimon/commit/a5f8e5e))
+
+QUICKSTART.md (session 55) opened with `git clone && make build` as the only documented install path — that's a Go-1.22+ floor for anyone trying the protocol. Closed two ways:
+
+- **`install.sh`** at the repo root: POSIX-shell installer. `curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh` resolves the latest GitHub Release (preferring stable releases, falling back to the most recent pre-release when no GA exists — bootstrap-period support since v0.2.0 GA hasn't shipped), detects platform (darwin/linux × amd64/arm64), downloads the matching tarball, **verifies SHA-256 against the published `checksums.txt`** (refuses to install on mismatch), drops `daimon` + `daimond` into `/usr/local/bin` or `$HOME/.local/bin`. Env vars: `DAIMON_INSTALL_PREFIX`, `DAIMON_INSTALL_TAG`, `DAIMON_INCLUDE_MOCK`. Three exit codes — 0/1/2 — and zero modifications outside the prefix (the script prints the export line for the user to add to their shell rc, doesn't touch anything itself).
+- **`release.yml` auto-flags pre-release tags** — regex match on the SemVer pre-release shape `vX.Y.Z-…`, applies `--prerelease` on `gh release create`. Plain `vX.Y.Z` stays as a stable release. Idempotent on re-runs (re-sets the flag every time, so flipping a tag's status propagates). Manually flipped v0.2.0-dev.3 to pre-release so the GitHub UI stops surfacing it as "Latest."
+
+### Session 60 — repo public flip + README v0.2 scope ([e24c5c4](https://github.com/regitxx/Daimon/commit/e24c5c4) + [460c672](https://github.com/regitxx/Daimon/commit/460c672))
+
+I surfaced the repo-private state as an AskUserQuestion (the install.sh path I'd just built didn't work for outside users because all the download URLs returned 404 unauthenticated). huckgod chose "Make repo public" and flipped via `gh repo edit --visibility public --accept-visibility-change-consequences`.
+
+Verified unauthenticated post-flip: `DAIMON_INSTALL_PREFIX=/tmp/test sh ./install.sh` resolves v0.2.0-dev.3 via the public GitHub API, SHA-256 verifies, installed binary reports `daimon v0.2.0-dev.3` correctly. **All three install channels (binary, PyPI, npm) became live to outside users.**
+
+Same-session README refresh:
+
+- **New "v0.2 scope" section** parallel to "v0.1 scope" listing every concrete v0.2 surface (BIP-39/BIP-32 HD wallet, x402 payment client with ceiling-before-signing, the show-mnemonic + recover + derive seed lifecycle, audit chain extension to wallet/payment kinds, SDK parity in both languages, doctor wallet diagnostic).
+- Status block leads with install paths the reader wants right now (`curl | sh` for binaries, `pip install --pre` / `npm install ...@dev` for SDKs).
+- Roadmap row for v0.2 surfaces both pre-release milestones (SDK 2026-05-18, binaries 2026-05-20).
+- CHECKPOINT updated to reflect the new public state.
+
+### Session 61 — community files + install.sh CI shard ([42d523b](https://github.com/regitxx/Daimon/commit/42d523b) + fix-up [cde06ab](https://github.com/regitxx/Daimon/commit/cde06ab))
+
+Three coordinated pieces:
+
+- **`CONTRIBUTING.md`** — short on purpose. Points contributors at SPEC + CHECKPOINT + JOURNAL + QUICKSTART for context, draws clear lines for small-fix-direct-PR vs SPEC-changing PRs (which need an issue first), names the cryptographic layers that need extra scrutiny.
+- **`SECURITY.md`** — GitHub Private Vulnerability Reporting as the channel (no separate inbox to maintain), explicit in-scope / out-of-scope lists keyed to SPEC §9.2, 72h ack / 30d fix / 90d disclosure cap timeline, AND the pinned cryptographic anchors (canonical BIP-39 vector address, two EIP-712 typehashes) so reporters can self-triage when a "vulnerability" turns out to hinge on one of those being different than documented.
+- **`install-script` CI shard** (10th shard) — runs the current `install.sh` from the checkout against the published release on both ubuntu-latest AND macos-latest. Catches three regression classes: install.sh syntax/portability bugs, GitHub API drift, broken artifacts in published releases.
+
+The new shard found two real bugs **on its first real run**, which is exactly the kind of catch the shard exists for:
+- Ubuntu: I'd written `daimond --help | head -1` but `daimond` writes its usage to stderr — pipe only saw an empty stream. Fixed: `2>&1` before the pipe.
+- macOS: transient GitHub API blip → "could not resolve a release tag" with no underlying error. Fixed two ways: added `curl --retry 3 --retry-delay 2 --retry-connrefused` (also covers macOS network-stack resets under load) AND made the "could not resolve" error path print the actual response bodies (rate-limit JSON, 503 body, etc.) so the next failure is debuggable from CI logs.
+
+### Session 62 — `daimon rotate-password` ([e175942](https://github.com/regitxx/Daimon/commit/e175942) + [4303da6](https://github.com/regitxx/Daimon/commit/4303da6))
+
+Closes the last real UX gap in the password-management surface: until now, the ONLY way to change the at-rest password on a daimon was `daimon init --force`, which destroys identity + activity log + memory store + wallet keystore. Anyone wanting a different password (rotation policy, exposure, organisational handoff) had to choose between living with the old one or losing all their state.
+
+**Architecture** (offline-CLI pattern mirroring `recover`):
+
+- **`internal/identity.RotatePassword(path, oldPw, newPw)`** — verifies oldPw decrypts identity.keystore, re-encrypts under newPw to a sibling `.rotate-tmp`, **paranoia-verifies the temp file decrypts under newPw before atomic-renaming** (catches the rare "writeKeystore claimed success but the bytes on disk aren't readable" case). The Ed25519 private key is unchanged — DID + audit chain continuity preserved.
+- **`internal/wallet.RotatePassword(path, oldPw, newPw)`** — same shape on the wallet keystore. Mnemonic + wallets[] unchanged — every derived address survives the rotate byte-for-byte.
+- **`daimon rotate-password` CLI** — refuses while daimond is listening on the socket (a live rotate would desynchronise daemon's in-memory state from disk). Pre-flights both keystores under oldPw BEFORE writing anything (catches typos without leaving a half-rotated state). Rotates identity first, then wallet. If wallet rotate fails after identity succeeded, the error surfaces FOUR explicit recovery paths (re-run rotate, manual re-encrypt, restore from backup, `init --force` as last resort).
+
+**Tests** (+8 across identity + wallet packages, 354 → 364 Go total): round-trip (new pw → same DID + same derived address at index 0); wrong-old → ErrWrongPassword AND original keystore still readable; empty-new rejection; no temp-file leak on success.
+
+**End-to-end smoke** verified all 7 scenarios against a temp `$DAIMON_HOME`: init → unlock → wallet creation → daemon kill → rotate → unlock-with-old-fails → unlock-with-new-succeeds-with-SAME-DID → doctor-reports-wallet-OK → wrong-old-rotate-refused-with-NEW-state-preserved. Docs surfaced in QUICKSTART step 1 + README v0.2 scope bullet.
+
+### State at end of session burst (sessions 59–62)
+
+The wallet + password management surface is now **complete in the "every reasonable user action has a non-destructive answer" sense**:
+
+| Question | Answer |
+|---|---|
+| How do I install? | `curl -fsSL .../install.sh \| sh`, or `pip install --pre daimon-protocol`, or `npm install @daimon-protocol/sdk@dev`, or `make build` |
+| How do I create a daimon? | `daimon init` |
+| How do I see my seed again? | `daimon wallet show-mnemonic` (password-gated) |
+| How do I import a seed from elsewhere? | `daimon wallet recover` (offline, refuses on existing keystore, cross-checks password) |
+| What address would I get for X? | `daimon wallet derive --chain X --index N` (read-only, no persist) |
+| How do I change my password? | `daimon rotate-password` (offline, preserves DID + mnemonic + chain) |
+| Am I in a broken state? | `daimon doctor` (surfaces every failure mode with remediation) |
+| How do I start over? | `daimon init --force` (destructive, last resort) |
+
+CI signal-of-seriousness now covers: the wire shape across both SDKs (cross-language x402 smoke), the install path itself (install.sh shard on ubuntu + macOS), the audit chain integrity (Go race + vet across all internal packages), the SDK pre-release publish flow (Python build + twine check; TS typecheck + vitest + pack), the EIP-712 / EIP-3009 typehashes (pinned in tests), the canonical BIP-39 vector (pinned in tests). Public-facing CONTRIBUTING + SECURITY documents are in place.
+
+**Test counts**: 364 Go race+vet + 65 pytest + 65 vitest = 494 tests, all green on every push. 10 CI shards + 1 separate Release workflow.
+
+Still-pending (unchanged from session 51 onward): phase 40.4 (live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator) + phase 40.5b (`provider.invoke` auto-pay on 402). Both blocked on externals.
