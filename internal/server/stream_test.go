@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/regitxx/Daimon/internal/activity"
+	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
@@ -575,9 +576,9 @@ func TestProviderStream_LogsActivityWithStreamedFlag(t *testing.T) {
 func TestProviderStream_LockedDaemonRejected(t *testing.T) {
 	// Build a server in serve-mode (locked) without ever unlocking, then try
 	// to stream. Should get CodeIdentityLocked.
-	srv, err := New(Options{Unlock: func(_ context.Context, _ string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
+	srv, err := New(Options{Unlock: func(_ context.Context, _ string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, *addressbook.Book, error) {
 		t.Fatal("unlock should not be called")
-		return nil, nil, nil, nil, nil, nil
+		return nil, nil, nil, nil, nil, nil, nil
 	}})
 	if err != nil {
 		t.Fatal(err)

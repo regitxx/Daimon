@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/regitxx/Daimon/internal/activity"
+	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/daimonhome"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
@@ -140,20 +141,22 @@ func runServe() error {
 	walletPath := filepath.Join(home, "wallet.keystore")
 	fmt.Fprintf(os.Stderr, "               wallet=%s\n", walletPath)
 
-	unlock := func(uctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, error) {
+	abookPath := filepath.Join(home, "address_book.enc")
+
+	unlock := func(uctx context.Context, password string) (*identity.Identity, *memory.Store, *activity.Log, *wallet.Store, *wallet.Mnemonic, *addressbook.Book, error) {
 		id, err := identity.LoadFromKeystore(keystorePath, []byte(password))
 		if err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		emb := pickEmbedder(uctx)
 		store, err := memory.Open(filepath.Join(home, "memory.db"), id, emb)
 		if err != nil {
-			return nil, nil, nil, nil, nil, fmt.Errorf("memory.Open: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("memory.Open: %w", err)
 		}
 		alog, err := activity.Open(filepath.Join(home, "activity.log"), id)
 		if err != nil {
 			_ = store.Close()
-			return nil, nil, nil, nil, nil, fmt.Errorf("activity.Open: %w", err)
+			return nil, nil, nil, nil, nil, nil, fmt.Errorf("activity.Open: %w", err)
 		}
 		// Wallet keystore: opens existing file OR auto-creates with the same
 		// password. On creation the returned mnemonic is non-nil and MUST
@@ -171,11 +174,33 @@ func runServe() error {
 			wstore = nil
 			freshMnemonic = nil
 		}
+		// Address book: opens existing file OR returns an empty book if
+		// absent (the file's optional — a fresh daimon has no peers yet,
+		// so address_book.enc only gets created on first Save). Encryption
+		// key is derived from the identity's Ed25519 seed via HKDF with the
+		// addressbook.EncryptionKeyLabel label. Failure is non-fatal — same
+		// posture as wallet: the daemon stays unlocked, address-book RPCs
+		// surface "not loaded" until repaired.
+		abookKey, akerr := id.DeriveSubkey(addressbook.EncryptionKeyLabel, 32)
+		var abook *addressbook.Book
+		if akerr != nil {
+			fmt.Fprintf(os.Stderr, "daimond serve: DeriveSubkey for address book failed: %v\n", akerr)
+		} else {
+			abook, akerr = addressbook.Open(abookPath, abookKey)
+			// Zero the derived key after Open copies it — defense in depth.
+			for i := range abookKey {
+				abookKey[i] = 0
+			}
+			if akerr != nil {
+				fmt.Fprintf(os.Stderr, "daimond serve: addressbook.Open failed (address-book RPCs disabled): %v\n", akerr)
+				abook = nil
+			}
+		}
 		fmt.Fprintf(os.Stderr, "daimond serve: unlocked, did=%s\n", id.DID())
 		if freshMnemonic != nil {
 			fmt.Fprintf(os.Stderr, "daimond serve: wallet keystore initialised (mnemonic surfaced to caller exactly once)\n")
 		}
-		return id, store, alog, wstore, freshMnemonic, nil
+		return id, store, alog, wstore, freshMnemonic, abook, nil
 	}
 
 	srv, err := server.New(server.Options{

@@ -70,6 +70,16 @@ const (
 	KindPaymentSigned  Kind = "payment.signed"
 	KindPaymentSettled Kind = "payment.settled"
 	KindPaymentFailed  Kind = "payment.failed"
+
+	// v0.3 — federation address-book kinds. Logged on every peer
+	// trust-state change so the audit chain carries the full pin/unpin
+	// history alongside memory + payment activity. Verifiers must
+	// continue to accept unknown kinds (see package doc).
+	KindPeerAddressBookAdded     Kind = "peer.address_book.added"
+	KindPeerAddressBookPinned    Kind = "peer.address_book.pinned"
+	KindPeerAddressBookBlocked   Kind = "peer.address_book.blocked"
+	KindPeerAddressBookUnblocked Kind = "peer.address_book.unblocked"
+	KindPeerAddressBookRemoved   Kind = "peer.address_book.removed"
 )
 
 // Common errors.

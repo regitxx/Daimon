@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 
 	"github.com/regitxx/Daimon/internal/activity"
+	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
@@ -44,6 +45,7 @@ type Options struct {
 	Store       *memory.Store
 	Log         *activity.Log
 	Wallet      *wallet.Store
+	AddressBook *addressbook.Book
 	Providers   *provider.Registry
 	Credentials *provider.CredentialStore
 
@@ -76,6 +78,7 @@ type UnlockFunc func(ctx context.Context, password string) (
 	alog *activity.Log,
 	wstore *wallet.Store,
 	freshMnemonic *wallet.Mnemonic,
+	abook *addressbook.Book,
 	err error,
 )
 
@@ -98,6 +101,7 @@ type Server struct {
 	store     *memory.Store
 	alog      *activity.Log
 	wstore    *wallet.Store
+	abook     *addressbook.Book
 	providers *provider.Registry
 	creds     *provider.CredentialStore
 
@@ -159,6 +163,7 @@ func New(opts Options) (*Server, error) {
 		s.store = opts.Store
 		s.alog = opts.Log
 		s.wstore = opts.Wallet
+		s.abook = opts.AddressBook
 		// Stays locked until handleIdentityUnlock runs successfully.
 	} else {
 		if opts.Identity == nil {
@@ -173,7 +178,8 @@ func New(opts Options) (*Server, error) {
 		s.id = opts.Identity
 		s.store = opts.Store
 		s.alog = opts.Log
-		s.wstore = opts.Wallet // optional — may be nil in demo mode
+		s.wstore = opts.Wallet         // optional — may be nil in demo mode
+		s.abook = opts.AddressBook     // optional — may be nil in demo mode
 		s.unlocked.Store(true)
 	}
 	s.registerMethods()

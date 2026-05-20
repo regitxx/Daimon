@@ -66,6 +66,12 @@ func (s *Server) registerMethods() {
 		"daimon.wallet.show_mnemonic": s.handleWalletShowMnemonic,
 		"daimon.payment.pay":          s.handlePaymentPay,
 		"daimon.federation.config":    s.handleFederationConfig,
+		"daimon.peer.address_book.list":    s.handleAddressBookList,
+		"daimon.peer.address_book.add":     s.handleAddressBookAdd,
+		"daimon.peer.address_book.pin":     s.handleAddressBookPin,
+		"daimon.peer.address_book.block":   s.handleAddressBookBlock,
+		"daimon.peer.address_book.unblock": s.handleAddressBookUnblock,
+		"daimon.peer.address_book.remove":  s.handleAddressBookRemove,
 	}
 }
 
@@ -124,7 +130,7 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 		return identityUnlockResult{DID: s.id.DID()}, nil
 	}
 
-	id, store, alog, wstore, freshMnemonic, err := s.unlockFn(ctx, p.Password)
+	id, store, alog, wstore, freshMnemonic, abook, err := s.unlockFn(ctx, p.Password)
 	if err != nil {
 		// We do not log the password or hash thereof. The error message is
 		// surfaced verbatim — typically "wrong password or corrupted
@@ -134,9 +140,10 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 	if id == nil || store == nil || alog == nil {
 		return nil, newError(CodeInternalError, "unlock callback returned nil trio without error")
 	}
-	// wstore MAY be nil if wallet keystore failed to load for a non-fatal
-	// reason (corrupted, future-version format, etc.); the daemon stays
-	// unlocked but wallet RPCs surface "no wallet store" until fixed.
+	// wstore + abook MAY be nil if either keystore / address book failed
+	// to load for a non-fatal reason (corrupted, future-version format,
+	// etc.); the daemon stays unlocked but the affected RPC surface
+	// reports "not loaded" until repaired.
 
 	// Field writes happen-before the atomic.Store(true) below; subsequent
 	// dispatch.Load() returning true is paired with these writes via
@@ -145,6 +152,7 @@ func (s *Server) handleIdentityUnlock(ctx context.Context, params json.RawMessag
 	s.store = store
 	s.alog = alog
 	s.wstore = wstore
+	s.abook = abook
 	s.unlocked.Store(true)
 
 	out := identityUnlockResult{DID: id.DID()}
