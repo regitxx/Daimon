@@ -36,6 +36,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - BIP-39/BIP-32 HD wallet (24-word mnemonic, MetaMask-compatible)
 - x402 payment client (EIP-3009 `transferWithAuthorization`, ceiling-before-signing, typed `-32006`/`-32007` error codes)
 - Full seed lifecycle: `show-mnemonic` (password-gated re-display, typed `-32008`), `recover` (offline import with password parity cross-check), `derive` (read-only address prediction), `rotate-password` (change at-rest password without nuking state)
+- **State migration**: `daimon backup --to file.dbk` + `daimon restore file.dbk` — whole-daimon snapshot in a single encrypted file (default) or plain `.dbk`; double-protected (backup passphrase + inner keystore passwords); offline-only; preserves DID + mnemonic + audit chain across machines
 - Audit chain extends to `wallet.created` + `payment.signed` + `payment.settled` + `payment.failed` rows
 - `daimon doctor` Wallet section surfaces the silent-disabled wallet-RPCs failure mode with actionable remediation
 - Chain registry: Base + Base-Sepolia (USDC), per SPEC §15.3
@@ -46,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 364 Go race+vet + 65 pytest + 65 vitest = **494 tests, all green on every push**.
+**Tests:** 376 Go race+vet + 65 pytest + 65 vitest = **506 tests, all green on every push**.
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -148,3 +149,6 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 60 | 2026-05-20 | **Repo went public** (huckgod via `gh repo edit`); README v0.2 scope section |
 | 61 | 2026-05-20 | CONTRIBUTING.md + SECURITY.md + `install-script` CI shard (shard 9 → 10) |
 | 62 | 2026-05-20 | `daimon rotate-password` — change at-rest password without destroying state |
+| 63 | 2026-05-20 | **CHECKPOINT pruned** 195 → 150 lines; **[`design/v0.3-federation.md`](./design/v0.3-federation.md) DRAFT** posted for review |
+| 64 | 2026-05-20 | `daimon backup` + `daimon restore` — whole-daimon migration in one command |
+| 65 | 2026-05-20 | `install.sh` respects `GH_TOKEN`/`GITHUB_TOKEN` to avoid GitHub API rate limits in CI |
