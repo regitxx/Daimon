@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,6 +126,103 @@ func TestKeystoreWrongPassword(t *testing.T) {
 	}
 	if _, err := LoadFromKeystore(path, []byte("wrong")); err != ErrWrongPassword {
 		t.Errorf("LoadFromKeystore with wrong password: got %v, want ErrWrongPassword", err)
+	}
+}
+
+func TestRotatePassword_RoundTrip(t *testing.T) {
+	// Rotate the password, then assert new password decrypts to the
+	// same private key the original was holding, AND the old password
+	// no longer decrypts.
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.encrypted")
+	if err := id.SaveToKeystore(path, []byte("old")); err != nil {
+		t.Fatalf("SaveToKeystore: %v", err)
+	}
+	originalDID := id.DID()
+
+	if err := RotatePassword(path, []byte("old"), []byte("new")); err != nil {
+		t.Fatalf("RotatePassword: %v", err)
+	}
+
+	// New password works + yields the SAME private key (same DID).
+	loaded, err := LoadFromKeystore(path, []byte("new"))
+	if err != nil {
+		t.Fatalf("LoadFromKeystore(new): %v", err)
+	}
+	if loaded.DID() != originalDID {
+		t.Fatalf("rotate changed DID: %s → %s", originalDID, loaded.DID())
+	}
+
+	// Old password no longer works.
+	if _, err := LoadFromKeystore(path, []byte("old")); err != ErrWrongPassword {
+		t.Errorf("post-rotate load with old password: got %v, want ErrWrongPassword", err)
+	}
+}
+
+func TestRotatePassword_RejectsWrongOldPassword(t *testing.T) {
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.encrypted")
+	if err := id.SaveToKeystore(path, []byte("correct")); err != nil {
+		t.Fatalf("SaveToKeystore: %v", err)
+	}
+
+	if err := RotatePassword(path, []byte("WRONG"), []byte("new")); err != ErrWrongPassword {
+		t.Errorf("RotatePassword with wrong old password: got %v, want ErrWrongPassword", err)
+	}
+
+	// Original keystore must still decrypt under the correct password —
+	// a failed rotate is non-destructive.
+	if _, err := LoadFromKeystore(path, []byte("correct")); err != nil {
+		t.Errorf("post-failed-rotate load with correct password: got %v, want success", err)
+	}
+}
+
+func TestRotatePassword_RejectsEmptyNew(t *testing.T) {
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.encrypted")
+	if err := id.SaveToKeystore(path, []byte("pw")); err != nil {
+		t.Fatalf("SaveToKeystore: %v", err)
+	}
+	if err := RotatePassword(path, []byte("pw"), []byte("")); err == nil {
+		t.Error("RotatePassword with empty new password: expected error, got nil")
+	}
+	// Original still works.
+	if _, err := LoadFromKeystore(path, []byte("pw")); err != nil {
+		t.Errorf("post-empty-new-rotate load: got %v, want success", err)
+	}
+}
+
+func TestRotatePassword_TempFileCleanedUpOnFailure(t *testing.T) {
+	// On a successful rotate, the .rotate-tmp sibling must NOT exist
+	// after the rename. Captures the "we didn't leak a temp file in
+	// the happy path" property.
+	id, err := Generate()
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "keys.encrypted")
+	if err := id.SaveToKeystore(path, []byte("a")); err != nil {
+		t.Fatalf("SaveToKeystore: %v", err)
+	}
+	if err := RotatePassword(path, []byte("a"), []byte("b")); err != nil {
+		t.Fatalf("RotatePassword: %v", err)
+	}
+	tmp := path + ".rotate-tmp"
+	if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rotate-tmp file leaked on success: stat err = %v", err)
 	}
 }
 

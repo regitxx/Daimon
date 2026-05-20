@@ -66,6 +66,8 @@ func main() {
 		exitOnErr(cmdWallet(args))
 	case "payment":
 		exitOnErr(cmdPayment(args))
+	case "rotate-password":
+		exitOnErr(cmdRotatePassword(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -187,6 +189,12 @@ Usage:
                             comma-separated.
               [--json]      Emit full RPC result envelope. Default:
                             HTTP status to stderr, body to stdout.
+
+  daimon rotate-password    Change the at-rest password for the identity +
+                            wallet keystores. Offline-only (daemon must be
+                            stopped). DID, mnemonic, derived addresses, and
+                            audit chain are all preserved across the rotate;
+                            only the Argon2id KEK changes.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.

@@ -84,6 +84,71 @@ func saveKeystore(path string, priv ed25519.PrivateKey, password []byte) error {
 	return os.WriteFile(path, data, 0600)
 }
 
+// RotatePassword re-encrypts the identity keystore at path under
+// newPassword, after verifying oldPassword decrypts the existing file.
+// The Ed25519 private key is unchanged — only the at-rest KEK is rotated,
+// so the daimon's DID + audit chain continuity are preserved across the
+// rotate.
+//
+// Atomic-ish: writes the new keystore to a sibling `.rotate-tmp` file,
+// verifies it decrypts under newPassword, and only then atomically
+// renames over the original. A failed rotate leaves the original
+// keystore unchanged on disk; the `.rotate-tmp` file is removed.
+//
+// Offline-only by design — same posture as wallet.RotatePassword. The
+// CLI surface (`daimon rotate-password`) refuses to rotate while the
+// daemon is running, because a live rotate would desynchronise the
+// in-memory identity from the on-disk keystore.
+//
+// Returns ErrWrongPassword if oldPassword doesn't decrypt the keystore.
+func RotatePassword(path string, oldPassword, newPassword []byte) error {
+	if len(newPassword) == 0 {
+		return errors.New("identity: new password must not be empty")
+	}
+	// Step 1: verify old password.
+	priv, err := loadKeystore(path, oldPassword)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Zero the private-key copy after we're done re-encrypting it.
+		for i := range priv {
+			priv[i] = 0
+		}
+	}()
+
+	// Step 2: write under new password to a sibling temp file. Failure
+	// leaves the original untouched.
+	tmp := path + ".rotate-tmp"
+	if err := saveKeystore(tmp, priv, newPassword); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write rotated keystore: %w", err)
+	}
+
+	// Step 3: paranoia re-decrypt the temp file with newPassword before
+	// committing. Catches the rare "writeKeystore claimed success but
+	// the bytes on disk aren't readable" case (disk error not surfaced
+	// as an os.WriteFile error, bug in saveKeystore, …) before we
+	// atomically clobber the working keystore.
+	verify, err := loadKeystore(tmp, newPassword)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("verify rotated keystore: %w", err)
+	}
+	// Zero the verify-load copy too.
+	for i := range verify {
+		verify[i] = 0
+	}
+
+	// Step 4: atomic rename. POSIX rename(2) is atomic on the same
+	// filesystem.
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit rotated keystore: %w", err)
+	}
+	return nil
+}
+
 func loadKeystore(path string, password []byte) (ed25519.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

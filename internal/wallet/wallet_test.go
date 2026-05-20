@@ -475,6 +475,108 @@ func TestDeriveAddress_RejectsEmptyMnemonic(t *testing.T) {
 	}
 }
 
+// --- RotatePassword: re-encrypt keystore under a new password ---------------
+
+func TestRotatePassword_RoundTrip(t *testing.T) {
+	// Rotate the password and confirm:
+	// - new password decrypts to the same mnemonic + wallets
+	// - old password no longer decrypts
+	// - the same address gets derived at index 0 (mnemonic preserved)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+
+	s, fresh, err := Open(path, []byte("old"))
+	if err != nil {
+		t.Fatalf("Open(create): %v", err)
+	}
+	if fresh == nil {
+		t.Fatal("expected fresh mnemonic on first create")
+	}
+	preMnemonic := fresh.String()
+	w, err := s.CreateWallet("evm:base")
+	if err != nil {
+		t.Fatalf("CreateWallet: %v", err)
+	}
+	preAddress := w.Address
+	s.Close()
+
+	if err := RotatePassword(path, []byte("old"), []byte("new")); err != nil {
+		t.Fatalf("RotatePassword: %v", err)
+	}
+
+	// New password decrypts + preserves mnemonic + wallets.
+	s2, _, err := Open(path, []byte("new"))
+	if err != nil {
+		t.Fatalf("Open(post-rotate, new pw): %v", err)
+	}
+	defer s2.Close()
+	postMnemonic := s2.mnemonic.String()
+	if postMnemonic != preMnemonic {
+		t.Fatalf("rotate changed mnemonic")
+	}
+	got, err := s2.FindByChain("evm:base")
+	if err != nil {
+		t.Fatalf("FindByChain after rotate: %v", err)
+	}
+	if got.Address != preAddress {
+		t.Fatalf("rotate changed derived address: %s → %s", preAddress, got.Address)
+	}
+
+	// Old password no longer decrypts.
+	if _, _, err := Open(path, []byte("old")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("post-rotate load with old password: got %v, want ErrWrongPassword", err)
+	}
+}
+
+func TestRotatePassword_RejectsWrongOldPassword(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	s, _, err := Open(path, []byte("correct"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Close()
+
+	if err := RotatePassword(path, []byte("WRONG"), []byte("new")); !errors.Is(err, ErrWrongPassword) {
+		t.Errorf("RotatePassword with wrong old password: got %v, want ErrWrongPassword", err)
+	}
+
+	// Failed rotate must leave the original intact under the original password.
+	if _, _, err := Open(path, []byte("correct")); err != nil {
+		t.Errorf("post-failed-rotate load with correct password: got %v, want success", err)
+	}
+}
+
+func TestRotatePassword_RejectsEmptyNew(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	s, _, err := Open(path, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Close()
+	if err := RotatePassword(path, []byte("pw"), []byte("")); err == nil {
+		t.Error("RotatePassword with empty new password: expected error, got nil")
+	}
+}
+
+func TestRotatePassword_TempFileCleanedUpOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "wallet.keystore")
+	s, _, err := Open(path, []byte("a"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	s.Close()
+	if err := RotatePassword(path, []byte("a"), []byte("b")); err != nil {
+		t.Fatalf("RotatePassword: %v", err)
+	}
+	tmp := path + ".rotate-tmp"
+	if _, err := os.Stat(tmp); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("rotate-tmp file leaked on success: stat err = %v", err)
+	}
+}
+
 // --- RecoverInto: offline seed import ---------------------------------------
 
 func TestRecoverInto_WritesKeystoreFromSuppliedSeed(t *testing.T) {

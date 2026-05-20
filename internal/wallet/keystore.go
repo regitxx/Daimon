@@ -194,6 +194,68 @@ func loadKeystore(path string, password []byte) (*Store, error) {
 	}, nil
 }
 
+// RotatePassword re-encrypts the wallet keystore at path under newPassword,
+// after verifying oldPassword decrypts the existing file. The mnemonic and
+// derived wallets[] are unchanged — only the at-rest KEK is rotated.
+// Argon2id parameters are also reset to the package defaults (so an old
+// keystore with weaker KDF params would get upgraded on rotate), but
+// since v0.2 ships one set of params, this is a no-op today.
+//
+// Atomic-ish: writes the new keystore to a sibling `.rotate-tmp` file,
+// verifies it decrypts under newPassword, and only then atomically
+// renames over the original. A failed rotate leaves the original
+// keystore unchanged on disk; the `.rotate-tmp` file is removed.
+//
+// Offline-only by design. A live rotate on a running daimon would
+// desynchronise the in-memory Store from the on-disk file (same
+// half-state we avoid in RecoverInto). The CLI surface refuses to
+// rotate while the daemon is running.
+//
+// Returns ErrWrongPassword if oldPassword doesn't decrypt the keystore.
+// Returns an error wrapping the underlying os/json/aead failure otherwise.
+func RotatePassword(path string, oldPassword, newPassword []byte) error {
+	if len(newPassword) == 0 {
+		return errors.New("wallet: new password must not be empty")
+	}
+	// Step 1: verify old password by decrypting the existing keystore.
+	// loadKeystore returns a *Store which carries password + mnemonic +
+	// wallets in memory; we just need the plaintext shape to re-encrypt.
+	s, err := loadKeystore(path, oldPassword)
+	if err != nil {
+		return err
+	}
+	pt := plaintext{Mnemonic: s.mnemonic.String(), Wallets: s.wallets}
+	_ = s.Close() // zero the password + mnemonic copies in the verifier store
+
+	// Step 2: write the new keystore to a sibling temp file under
+	// newPassword. If this fails, the original is untouched.
+	tmp := path + ".rotate-tmp"
+	if err := writeKeystore(tmp, newPassword, pt); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write rotated keystore: %w", err)
+	}
+
+	// Step 3: re-decrypt the temp file with newPassword as a paranoia
+	// check before committing. If the new file is somehow corrupt
+	// (bug in writeKeystore, disk error not surfaced as os error, …)
+	// we don't atomically rename a broken keystore over the working one.
+	verify, err := loadKeystore(tmp, newPassword)
+	if err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("verify rotated keystore: %w", err)
+	}
+	_ = verify.Close()
+
+	// Step 4: atomic rename. POSIX rename(2) is atomic on the same
+	// filesystem — the only failure modes here are EXDEV (cross-fs)
+	// or permission errors, both of which leave the original intact.
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("commit rotated keystore: %w", err)
+	}
+	return nil
+}
+
 // RecoverInto writes a fresh wallet keystore at path from a caller-supplied
 // BIP-39 mnemonic, encrypted under password. The symmetric counterpart to
 // ShowMnemonic — ShowMnemonic exports the seed for portability, RecoverInto
