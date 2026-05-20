@@ -121,6 +121,13 @@ durable. If you want to also save the encrypted file itself,
 `$DAIMON_HOME/identity.keystore` is a 4 KiB blob you can rsync between
 machines — you'll need both the file AND the password.
 
+Want to change the password later (rotation policy, exposure, organisational
+handoff)? Stop the daemon and run `daimon rotate-password`. The Ed25519
+identity key, BIP-39 mnemonic, derived wallet addresses, and audit chain
+are all preserved across the rotate — only the Argon2id KEK changes. The
+operation is offline-only and atomic per keystore (`.rotate-tmp` siblings
++ atomic rename), so a failed rotate leaves the original state intact.
+
 ## Step 2: Unlock the daemon
 
 ```sh
