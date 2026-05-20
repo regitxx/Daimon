@@ -3629,3 +3629,82 @@ Regeneration policy: `make bench`, update the table by hand. CI does NOT enforce
 **Genuinely still pending** (unchanged through the whole burst): phase 40.4 (live Base Sepolia) + phase 40.5b (`provider.invoke` auto-pay). Both blocked on externals. v0.3 implementation waits on the design doc review.
 
 **Next directional decision is huckgod's.** Either review the v0.3 design, redirect to something specific, or call the burst done. Further autonomous work without direction would either be v0.3 implementation (which I haven't done) or polish on materially-diminishing margins.
+
+## 2026-05-20 — Day Zero, sessions 70–72: v0.3 phase 30 (discovery primitive)
+
+After session 69's "I'm out of leverage" framing, huckgod explicitly confirmed the v0.3 design and authorized big-parts work: **"I CONFIRM THE NEW DESIGN, I authorize everything, look when I say go on it means you can do big parts next as well."** With that mandate, started implementing phase 30 of design/v0.3-federation.md.
+
+Phase 30's scope (per the design doc): the **discovery primitive** — how a daimon resolves another daimon's DID to a verified network endpoint. Three coherent slices, each one a separate commit.
+
+### Session 70 — Slice 1: W3C did:web resolver ([94936e4](https://github.com/regitxx/Daimon/commit/94936e4))
+
+Pure W3C did:web spec implementation as a standalone Go package (`internal/did/web/`). No Daimon-specific anything yet; just the W3C standard. Three files (~700 LoC):
+
+- **parse.go** — `Parse(s)` splits a did:web identifier into Authority + Path. Handles percent-encoded ports (`did:web:example.com%3A8443`), strips DID-Core fragments + queries, rejects path-traversal segments (`.`, `..`), rejects raw slashes, rejects percent-encoded slashes after decoding (defense-in-depth). `Identifier.DocURL()` emits the canonical resolution URL (`https://<authority>/<path>/did.json` or `.well-known` fallback). `Identifier.String()` emits the canonical did:web form so Parse→String→Parse is byte-stable.
+- **document.go** — `Document` is the W3C DID Document shape (id, verificationMethod, authentication, service). `@context` is polymorphic (string OR array OR mixed array per JSON-LD) — handled via a custom `rawContext.UnmarshalJSON`. Constants for `DaimonServiceType` ("DaimonEndpoint") and `DIDv1Context` ("https://www.w3.org/ns/did/v1"); the parse step asserts the latter appears in @context.
+- **resolve.go** — `Resolver.Resolve(ctx, did)` HTTPS-fetches the document. Bounds the response at 256 KiB (defense-in-depth against memory-exhaustion DoS), bounds the request at 5s default timeout. **Asserts document.id matches the requested DID** — prevents a wildcard catch-all server from silently impersonating other DIDs. Returns typed `ErrNotFound` on HTTP 404.
+
+**+19 tests** (385 → 404 Go race+vet): parse positive (5 cases), parse negative (11 rejection cases), DocURL (4), String round-trip (4), parseDocument (6 cases including malformed JSON), Resolve via httptest.NewTLSServer (happy path, ID-mismatch rejection, 404 → ErrNotFound, 500 → plain error, oversized-body rejection).
+
+### Session 71 — Slice 2: DaimonEndpoint + Ed25519 sign/verify ([cea5f2c](https://github.com/regitxx/Daimon/commit/cea5f2c))
+
+Daimon-specific value-add on top of slice 1: an endpoint document that proves it was published by the DID's identity key. ~520 LoC.
+
+**Architecture:** A daimon publishes its did:web document with a service entry of type `"DaimonEndpoint"`. That entry's `serviceEndpoint` field is a `SignedEndpoint` — the DaimonEndpoint fields (URL, transport pubkey, protocols, payment address) plus an Ed25519 signature over the canonical serialization. The W3C DID Document itself remains spec-compliant, so general non-Daimon consumers can parse it; Daimon-aware clients verify the signature against the document's verificationMethod pubkey before trusting any of the endpoint fields.
+
+**Trust model (chains to design Decision 5 — TOFU + pinning):**
+- Standard did:web resolution proves "this document was served from `<authority>`"
+- The verificationMethod entry asserts "this DID is controlled by Ed25519 pubkey X"
+- The SignedEndpoint signature proves "the URL + protocols + payment address were authorized by the holder of pubkey X" — chains the network endpoint to the identity key
+- Address-book pinning (future slice) records the (DID, pubkey, endpoint) tuple; subsequent fetches that drift the pubkey trip a TOFU violation
+
+**Why not W3C Data Integrity + JCS:** the conventional W3C choice would be Data Integrity Proofs with JCS (RFC 8785) canonicalization. We deliberately chose a Daimon-flavored scheme: SHA-256 over NUL-joined tuple `("daimon-endpoint-v1" || URL || TransportPubKey || sorted-protocols... || PaymentAddress)`. JCS is ~150 LoC of careful sort + escape logic; our scheme is 30 LoC and impossible to ambiguate. The signed bytes have a versioned prefix so v2-and-beyond can extend without ambiguity. Daimon endpoints are consumed only by other daimons, so general-W3C interop doesn't apply.
+
+**+12 tests** (404 → 416 Go race+vet): determinism + protocols-order-invariance, field-mutation detection (5 fields each), Sign→Verify round-trip, Sign input validation (short priv, missing fields), Verify rejection on wrong pubkey + tampered fields + malformed signature, ExtractSignedEndpoint happy path + ErrNoDaimonEndpoint sentinel + JSON-parse failures.
+
+### Session 72 — Slice 3: `daimon.federation.config` RPC verb ([dfdf442](https://github.com/regitxx/Daimon/commit/dfdf442))
+
+The introspection primitive that SDK callers will use to ask "what does this daimon support over federation?" before invoking peer.* verbs. ~120 LoC.
+
+**Response shape:**
+```json
+{
+  "did": "did:key:z6Mk…",
+  "transport_pubkey_multibase": "z6Mk…",
+  "did_methods": ["did:key"],
+  "protocols": [],
+  "public_endpoint": "",
+  "federation_version": "v0.3-draft"
+}
+```
+
+At phase 30 baseline, `protocols` + `public_endpoint` are empty because the rest of the federation surface (transport in phase 31, peer.* verbs in phases 33+) hasn't landed. The verb's value at this stage: prove the RPC dispatch path works end-to-end, give SDK consumers a stable shape to introspect, and let a client confirm "this daimon implements federation v0.3-draft" before any peer-level call.
+
+**Key continuity invariant pinned by test** (design Decision 1): `transport_pubkey_multibase` MUST equal the multibase fragment of the daimon's DID. Same key for identity AND transport (no separate "network identity"); a future bug that introduces key drift trips `TestHandleFederationConfig_ReturnsBaseline`.
+
+**No wallet dependency:** federation.config doesn't touch wstore. The verb explicitly does NOT belong on the wstore-nil rejection table; `TestHandleFederationConfig_NotInWalletNotReadyTable` is the anti-regression guard.
+
+**+2 tests** (416 → 418 Go race+vet).
+
+### Phase 30 complete
+
+| Slice | Commit | What |
+|---|---|---|
+| 1 | 94936e4 | Pure W3C did:web resolver (`internal/did/web/{parse,document,resolve}.go`) |
+| 2 | cea5f2c | DaimonEndpoint + Ed25519 sign/verify (`internal/did/web/endpoint.go`) |
+| 3 | dfdf442 | `daimon.federation.config` RPC verb (`internal/server/federation_handlers.go`) |
+
+**Test count delta:** 385 → 418 Go race+vet (+33 across 3 slices). 65 pytest + 65 vitest unchanged (no SDK wrappers in phase 30 per the design's phase split — those land at phase 36). **548 total tests, 10 CI shards green.**
+
+### What's NOT here yet
+
+Subsequent phases from design/v0.3-federation.md:
+
+- **Phase 31** — Noise IK + QUIC transport. The biggest jump in scope (pulls in quic-go + flynn/noise as new deps, multiplexed-stream lifecycle, ~800-1200 LoC). Worth treating as its own multi-slice arc.
+- **Phase 32** — Address book + TOFU pinning. Persistence layer; ~300-400 LoC.
+- **Phase 33** — First peer-served verb (peer.echo). Validates the full federation stack with a minimal A2A protocol.
+- **Phase 34** — peer.ask (cross-daimon provider.invoke). First peer verb with real economic implications.
+- **Phase 35** — x402 recipient (peer.pay.required). First inbound payment.
+- **Phase 36** — SDK wrappers for `client.peer.*` + `client.federation.*` in both languages. Cross-language tests.
+
+Phase 30 is the foundation everything else builds on: a daimon now has a way to resolve another daimon's DID + verify the endpoint document's authenticity. The next directional decision is whether to push into phase 31 (transport) — a much bigger lift — or pause for huckgod's review of phase 30's artifacts.

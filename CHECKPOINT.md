@@ -47,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 385 Go race+vet + 65 pytest + 65 vitest = **515 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**Tests:** 418 Go race+vet + 65 pytest + 65 vitest = **548 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -59,7 +59,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 |---|---|---|---|
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
-| v0.3 | months 4–6 | A2A discovery, federation across machines, MLS/Noise encrypted channels, did:ion anchor, daimon as payment recipient | not started — see [`design/v0.3-federation.md`](./design/v0.3-federation.md) draft |
+| v0.3 | months 4–6 | A2A discovery, federation across machines, MLS/Noise encrypted channels, did:ion anchor, daimon as payment recipient | **phase 30 (discovery primitive) shipped 2026-05-20**; phases 31–36 pending. Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
 | v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | not started |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
@@ -158,3 +158,6 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 67 | 2026-05-20 | `daimon completion bash/zsh/fish` — static shell completion scripts |
 | 68 | 2026-05-20 | `make ci-local` + `make build-all` — pre-push verification mirroring the 10-shard CI matrix |
 | 69 | 2026-05-20 | Performance baselines: 8 benchmarks (`internal/{identity,secretbox,wallet,payment}/bench_test.go`) + `make bench` target + [`docs/perf.md`](./docs/perf.md) |
+| 70 | 2026-05-20 | **v0.3 phase 30 slice 1**: W3C did:web resolver (`internal/did/web/{parse,document,resolve}.go`, +19 tests) |
+| 71 | 2026-05-20 | **v0.3 phase 30 slice 2**: DaimonEndpoint + Ed25519 sign/verify (`internal/did/web/endpoint.go`, +12 tests) |
+| 72 | 2026-05-20 | **v0.3 phase 30 slice 3**: `daimon.federation.config` RPC verb (`internal/server/federation_handlers.go`, +2 tests) |
