@@ -22,7 +22,7 @@ Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. 
 
 ## Status
 
-**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.2 pre-release shipping on `--pre` / `@dev` channels.
+**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.3 pre-release with **pre-built binaries** on [GitHub Releases](https://github.com/regitxx/Daimon/releases/latest) (no Go install needed); SDK pre-releases (`daimon-protocol 0.2.0.dev2` / `@daimon-protocol/sdk@dev`) on `--pre` / `@dev` channels.
 
 The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments) is in tree, CI-protected, and published as a pre-release — including the export-and-import seed lifecycle (`daimon wallet show-mnemonic` to re-display the seed, `daimon wallet recover` to import one from an existing backup or external wallet). 356 Go test pass-lines + 65 pytest cases + 65 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server (now also asserting `wallet.derive` parity between both SDKs).
 
@@ -33,13 +33,15 @@ The v0.1 surface (identity / memory / activity log / four streaming provider ada
 
 ## Try v0.1 — memory + provider routing
 
+Grab a pre-built binary from the [latest release](https://github.com/regitxx/Daimon/releases/latest) (darwin-arm64 / darwin-amd64 / linux-arm64 / linux-amd64, no Go install needed) — or build from source:
+
 ```sh
 git clone https://github.com/regitxx/Daimon.git && cd Daimon
 make build
 ./bin/daimon init        # once — choose a password
 ./bin/daimon unlock      # auto-spawns daimond
 ./bin/daimon memory write --kind fact "the sky is blue"
-./bin/daimon memory search "sky"
+./bin/daimon memory list # search needs Ollama for embeddings
 ```
 
 Or use one of the SDKs:

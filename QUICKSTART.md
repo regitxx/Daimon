@@ -43,14 +43,43 @@ mkdir -p "$DAIMON_HOME"
 
 ## Install
 
-From a checkout of this repo:
+### Option A — pre-built binaries (no Go needed)
+
+Download the tarball for your platform from the [latest release](https://github.com/regitxx/Daimon/releases/latest), extract it, drop `daimon` + `daimond` somewhere on `PATH`:
+
+```sh
+# Replace darwin-arm64 with darwin-amd64 / linux-arm64 / linux-amd64 to match.
+TAG=v0.2.0-dev.3
+PLAT=darwin-arm64
+curl -L -o /tmp/daimon.tar.gz \
+  "https://github.com/regitxx/Daimon/releases/download/${TAG}/daimon-${TAG}-${PLAT}.tar.gz"
+tar -C /tmp -xzf /tmp/daimon.tar.gz
+sudo install /tmp/daimon-${TAG}-${PLAT}/{daimon,daimond} /usr/local/bin/
+daimon --help                              # daimon v0.2.0-dev.3 — Daimon Protocol CLI
+```
+
+Verify the download against the published checksums (optional but recommended for any binary you didn't build yourself):
+
+```sh
+curl -LO "https://github.com/regitxx/Daimon/releases/download/${TAG}/checksums.txt"
+shasum -a 256 -c <(grep "daimon-${TAG}-${PLAT}.tar.gz" checksums.txt)
+# daimon-v0.2.0-dev.3-darwin-arm64.tar.gz: OK
+```
+
+Binaries are statically linked (no libc dependency on Linux), stripped, and ~11 MB per tarball. No Windows build — the daemon listens on a Unix socket (SPEC §3); Windows users can build from source under WSL2 today.
+
+### Option B — build from source
+
+Requires **Go 1.22+** (`go version`):
 
 ```sh
 git clone https://github.com/regitxx/Daimon.git
 cd Daimon
 make build
 # Produces bin/daimond (~15 MB) and bin/daimon (~4.6 MB).
-# Add to your PATH:
+# The Makefile injects `git describe --tags --dirty --always` as the
+# binary's --version, so locally-built binaries report e.g.
+# "v0.2.0-dev.3-2-g3fa5e8d-dirty" if you have uncommitted changes.
 export PATH="$PWD/bin:$PATH"
 ```
 
