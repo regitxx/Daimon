@@ -68,6 +68,10 @@ func main() {
 		exitOnErr(cmdPayment(args))
 	case "rotate-password":
 		exitOnErr(cmdRotatePassword(args))
+	case "backup":
+		exitOnErr(cmdBackup(args))
+	case "restore":
+		exitOnErr(cmdRestore(args))
 	case "version", "--version", "-v":
 		fmt.Printf("daimon %s\n", version)
 	case "help", "-h", "--help":
@@ -195,6 +199,19 @@ Usage:
                             stopped). DID, mnemonic, derived addresses, and
                             audit chain are all preserved across the rotate;
                             only the Argon2id KEK changes.
+
+  daimon backup             Snapshot the whole daimon (identity + wallet +
+              --to <path>   memory + activity log) into a single file for
+              [--no-encrypt] migration or archival. Encrypted by default
+              [--force]     under a user-supplied passphrase (Argon2id +
+                            AES-256-GCM); --no-encrypt produces a plain
+                            .dbk wrapper for rsync-style copying. Inner
+                            keystores stay encrypted regardless. Offline.
+
+  daimon restore <path>     Inverse of backup. Auto-detects encrypted vs
+              [--force]     plain mode from the file's magic header.
+                            Refuses to overwrite a non-empty $DAIMON_HOME
+                            unless --force. Offline.
 
   daimon version            Print the CLI version.
   daimon help               Show this message.

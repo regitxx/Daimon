@@ -128,6 +128,16 @@ are all preserved across the rotate — only the Argon2id KEK changes. The
 operation is offline-only and atomic per keystore (`.rotate-tmp` siblings
 + atomic rename), so a failed rotate leaves the original state intact.
 
+Want to migrate the whole daimon to a new machine or take a periodic
+snapshot? Stop the daemon and run `daimon backup --to my-daimon.dbk`. The
+command produces a single file containing your identity + wallet + memory +
+activity log, encrypted under a backup passphrase you choose (the inner
+keystores stay encrypted under your original daimon password, so the
+backup is double-protected). On the target machine: `daimon restore
+my-daimon.dbk` against a fresh `$DAIMON_HOME` reconstitutes the daimon
+byte-for-byte — same DID, same wallet addresses, same audit chain
+(verifiable via `daimon activity verify` post-restore).
+
 ## Step 2: Unlock the daemon
 
 ```sh
