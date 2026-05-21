@@ -32,6 +32,12 @@ export type {
   PaymentPayParams,
   PaymentPayResult,
   PaymentResponse,
+  // v0.3 surface
+  FederationConfig,
+  PeerChannel,
+  PeerDialResult,
+  AddressBookEntry,
+  PaymentRequirement,
 } from "./client.js";
 export { StreamHandle, DEFAULT_STREAM_TIMEOUT_MS } from "./stream.js";
 export {

@@ -3946,3 +3946,66 @@ Response (from serving daimon):
 **What's next (phase 36+):**
 - **Phase 36** — SDK wrappers for `client.peer.*` and `client.federation.*` in Python + TypeScript. Cross-language integration test: Python client dials a Go daimon, invokes peer.echo, reads the result.
 - **Phase 40.4** — live Base Sepolia USDC settlement (gates v0.2.0 GA). The `peer.pay.required` response is now the correct wire shape for a future SDK to feed directly into the x402 payment flow.
+
+---
+
+## 2026-05-21 — Day Zero, session 80: v0.3 phase 36 (SDK wrappers — client.peer.* + client.federation.*)
+
+Phase 36 completes the v0.3 federation arc: every verb that the Go daemon exposes over the Unix socket now has a typed, documented wrapper in both SDKs.
+
+### What we built
+
+**Python SDK additions** (`sdk/python/daimon/client.py`):
+
+Three new namespaces on `Client`:
+- `client.federation` → `_FederationNamespace`: `config()` — wraps `daimon.federation.config`
+- `client.peer` → `_PeerNamespace`: `dial`, `close`, `list`, `invoke`, `echo`, `pay_required`
+- `client.peer.address_book` → `_PeerAddressBookNamespace`: `list`, `add`, `pin`, `block`, `unblock`, `remove`
+
+**TypeScript SDK additions** (`sdk/typescript/src/client.ts`):
+
+New interfaces: `FederationConfig`, `PeerChannel`, `PeerDialResult`, `AddressBookEntry`, `PaymentRequirement` — all exported from `index.ts`.
+
+Three new namespace classes:
+- `FederationNamespace`: `config()` returns typed `FederationConfig`
+- `AddressBookNamespace`: mirrors address book RPC surface with typed params
+- `PeerNamespace`: `dial`, `close`, `list`, `invoke`, `echo`, `payRequired`; exposes `addressBook` sub-namespace
+
+The TypeScript `PeerNamespace.invoke` correctly returns `result.result ?? result` so callers see the peer's actual result, not the `{result: ...}` envelope layer. Python uses the same unwrap in `_PeerNamespace.invoke`.
+
+**Convenience methods:**
+- `peer.echo(channel_id, message)` — wraps invoke with `peer.echo` method, returns `{message, from_did}`
+- `peer.pay_required(channel_id, service)` / `peer.payRequired(...)` — wraps invoke with `peer.pay.required`, returns the `requirements` list directly
+
+### Test count delta
+
+| Surface | Before | After | Delta |
+|---|---|---|---|
+| Go race+vet | 513 | 513 | 0 (no Go changes) |
+| pytest | 65 | 84 | +19 |
+| vitest | 65 | 85 | +20 |
+| **Total** | **643** | **682** | **+39** |
+
+All tests use the existing `StubDaemon` / `startStubDaemon` pattern — byte-for-byte JSON-RPC 2.0 without a real daemon process. Tests confirm:
+- Correct method names on the wire (`daimon.federation.config`, `daimon.peer.dial`, `daimon.peer.address_book.pin`, etc.)
+- Correct param shapes (optional fields omitted when not passed)
+- Result unwrapping from the `peerInvokeResult` envelope
+- Null/empty normalisation (`[]` for empty lists, `{}` for empty address book)
+
+### v0.3 federation arc complete
+
+All six phases shipped:
+
+| Phase | What | Tests added |
+|---|---|---|
+| 30 | did:web resolver, DaimonEndpoint, daimon.federation.config | +33 Go |
+| 31 | TCP+Noise IK transport, Ed25519↔X25519 conversion | +20 Go |
+| 32 | Address book persistence + RPC verbs | +31 Go |
+| 33 | peer.echo — first cross-daimon A2A verb | +29 Go |
+| 34 | peer.ask — cross-daimon provider.invoke + authorization | +8 Go |
+| 35 | peer.pay.required — x402 price discovery + audit | +7 Go |
+| 36 | SDK wrappers: client.federation.* + client.peer.* | +19 pytest, +20 vitest |
+
+**GA criterion status** (from design/v0.3-federation.md): phases 30–36 all green ✅; cross-daimon smoke runs in Go test suite (`TestPeerEcho_TwoDaemons`, `TestPeerAsk_AuthorizedPeer`, `TestPeerPayRequired_ReturnsRequirements`) ✅; real-world dogfood (one full week between two daimons) — pending huckgod.
+
+**What's next:** v0.2.0 GA gated on phase 40.4 (live Base Sepolia USDC settlement). The `peer.pay.required` response shape is now the correct x402 input — connecting the dots from price discovery → payment authorization → peer.ask settlement lands in phase 40.4.

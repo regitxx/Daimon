@@ -486,6 +486,266 @@ class _PaymentNamespace:
         }
 
 
+class _FederationNamespace:
+    """Verbs under ``daimon.federation.*`` (v0.3, phase 30+).
+
+    Introspection surface for this daimon's federation identity:
+    its DID, transport pubkey, supported DID methods, served protocols,
+    and (when PeerListen is active) its public TCP endpoint.
+
+    Clients use ``config()`` to:
+
+    - Discover the daimon's DID before dialling it from another daimon
+    - Check which ``peer.*`` verbs it serves before invoking them
+    - Obtain the public endpoint URL for ``client.peer.dial``
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def config(self) -> dict:
+        """Return federation configuration for this daimon.
+
+        Returns a dict with keys:
+
+        - ``did`` — the daimon's own did:key DID (always present)
+        - ``transport_pubkey_multibase`` — base58btc-encoded Ed25519 pubkey
+          fragment (the z6Mk… portion of the DID, usable as Noise IK static)
+        - ``did_methods`` — list of DID methods this daimon resolves
+          (``["did:key"]`` in v0.3)
+        - ``protocols`` — list of ``peer.*`` verbs this daimon serves
+          (``["peer.echo", "peer.ask", "peer.pay.required"]`` when fully
+          configured)
+        - ``public_endpoint`` — ``"tcp://host:port"`` when PeerListen is
+          active; absent otherwise
+        - ``federation_version`` — ``"v0.3-draft"``
+
+        Requires the identity to be unlocked (returns CodeIdentityLocked
+        if not). Pure-read — no audit-log row, no state mutation.
+        """
+        return self._c._call("daimon.federation.config", None)
+
+
+class _PeerAddressBookNamespace:
+    """Verbs under ``daimon.peer.address_book.*`` (v0.3, phase 32).
+
+    The address book records the trust state of every daimon this node has
+    interacted with. Entries progress through three states:
+
+    - **FirstSeen** — dialled but not yet explicitly trusted. ``peer.*``
+      verbs beyond ``peer.echo`` are blocked.
+    - **Pinned** — explicitly trusted. ``peer.ask`` (and future verbs) are
+      allowed per ``ApprovedVerbs``.
+    - **Blocked** — explicitly refused. All ``peer.*`` calls fail.
+
+    ``Touch(did, pubkey)`` is called automatically on every successful
+    ``daimon.peer.dial`` — it creates a ``FirstSeen`` entry on first contact
+    and enforces TOFU (the same pubkey must appear on every subsequent dial
+    from that DID).
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def list(self) -> list[dict]:
+        """Return all entries in the address book.
+
+        Each entry is a dict with at minimum:
+        ``{did, label, status, approved_verbs, transport_pubkey_multibase,
+        first_seen, last_seen}``.
+        Empty book returns ``[]``.
+        """
+        result = self._c._call("daimon.peer.address_book.list", None)
+        if result is None:
+            return []
+        return result.get("entries", []) or []
+
+    def add(self, *, did: str, label: str = "", pubkey_multibase: str = "") -> dict:
+        """Manually add a peer to the address book as FirstSeen.
+
+        Idempotent: if the DID is already present, returns an error
+        (:class:`RPCError` with code ``-32603``, message
+        "address book: entry already exists"). Use ``pin`` after ``add``
+        to grant verb-level authorization.
+
+        Parameters
+        ----------
+        did:
+            The peer's DID (``did:key:z6Mk...``).
+        label:
+            Optional human-readable name shown in ``daimon peer list``.
+        pubkey_multibase:
+            The multibase fragment of the peer's did:key DID
+            (the ``z6Mk…`` portion). Required for Noise IK authentication;
+            can be left empty and populated by ``daimon.peer.dial``.
+        """
+        params: dict[str, Any] = {"did": did}
+        if label:
+            params["label"] = label
+        if pubkey_multibase:
+            params["pubkey_multibase"] = pubkey_multibase
+        return self._c._call("daimon.peer.address_book.add", params)
+
+    def pin(self, *, did: str, verbs: list[str]) -> dict:
+        """Elevate a peer from FirstSeen → Pinned and set approved verbs.
+
+        ``verbs`` is the complete list of ``peer.*`` verbs this peer may
+        invoke on this daimon (e.g. ``["peer.ask"]``). An empty list grants
+        Pinned status with no additional verb rights (peer can still call
+        the universally-available ``peer.echo`` and ``peer.pay.required``).
+
+        Raises :class:`RPCError` (CodeNotFound) if the DID is not in the
+        address book; call ``add`` first.
+        """
+        return self._c._call(
+            "daimon.peer.address_book.pin",
+            {"did": did, "verbs": verbs},
+        )
+
+    def block(self, *, did: str) -> dict:
+        """Block a peer. All inbound peer.* calls from this DID will fail.
+
+        Idempotent — blocking an already-blocked entry is not an error.
+        Clears ApprovedVerbs.
+        """
+        return self._c._call("daimon.peer.address_book.block", {"did": did})
+
+    def unblock(self, *, did: str) -> dict:
+        """Unblock a peer — transitions Blocked → Pinned.
+
+        The entry retains its previous ApprovedVerbs; use ``pin`` afterwards
+        to update them if needed.
+        """
+        return self._c._call("daimon.peer.address_book.unblock", {"did": did})
+
+    def remove(self, *, did: str) -> dict:
+        """Permanently remove a peer from the address book.
+
+        Raises :class:`RPCError` (CodeNotFound) if the DID is not present.
+        Removing a Pinned peer does NOT revoke in-flight connections — it
+        only prevents future authorization lookups from finding the entry.
+        """
+        return self._c._call("daimon.peer.address_book.remove", {"did": did})
+
+
+class _PeerNamespace:
+    """Verbs under ``daimon.peer.*`` (v0.3, phases 33–35).
+
+    The peer surface has two layers:
+
+    **Outbound channel management** (calls *from* this daimon):
+
+    - :meth:`dial` — open a Noise IK channel to a remote daimon
+    - :meth:`close` — close an open channel
+    - :meth:`list` — enumerate open channels
+    - :meth:`invoke` — raw peer.* verb dispatch
+    - :meth:`echo` — convenience wrapper for ``peer.echo``
+    - :meth:`pay_required` — convenience wrapper for ``peer.pay.required``
+
+    **Address book management** (trust model):
+
+    - ``client.peer.address_book.*`` — list, add, pin, block, unblock, remove
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+        self.address_book = _PeerAddressBookNamespace(client)
+
+    def dial(self, *, did: str, endpoint: str) -> dict:
+        """Open an authenticated Noise IK channel to a remote daimon.
+
+        ``did`` must be a ``did:key:z6Mk…`` DID (the peer's identity key
+        is embedded in the DID and used directly for Noise IK mutual auth).
+        ``endpoint`` is the peer's TCP address — either ``"tcp://host:port"``
+        or bare ``"host:port"``.
+
+        On success, returns ``{channel_id, peer_did, opened_at}``. The
+        ``channel_id`` is used by :meth:`invoke`, :meth:`close`, and
+        :meth:`echo`. Multiple channels to the same peer are allowed.
+
+        Also auto-populates the local address book: the peer is added as
+        ``FirstSeen`` on first contact and ``LastSeen`` is updated on
+        subsequent dials. A TOFU violation (transport pubkey changed since
+        first sight) is audited but does NOT abort the dial — the Noise
+        handshake is the security gate.
+
+        Raises :class:`RPCError` with ``CodePeerUnreachable (-32010)`` on
+        network failure or Noise handshake rejection.
+        """
+        return self._c._call("daimon.peer.dial", {"did": did, "endpoint": endpoint})
+
+    def close(self, channel_id: str) -> None:
+        """Close an open peer channel. Idempotent — does not error if already closed."""
+        self._c._call("daimon.peer.close", {"channel_id": channel_id})
+
+    def list(self) -> list[dict]:
+        """List open outbound peer channels.
+
+        Returns a list of ``{channel_id, peer_did, opened_at}`` dicts.
+        An empty or null result is normalised to ``[]``.
+        """
+        result = self._c._call("daimon.peer.list", None)
+        if result is None:
+            return []
+        return result.get("channels", []) or []
+
+    def invoke(
+        self,
+        channel_id: str,
+        method: str,
+        params: Any | None = None,
+    ) -> Any:
+        """Raw peer verb dispatch — send ``method`` with ``params`` over
+        ``channel_id`` and return the peer's ``result`` field verbatim.
+
+        Use :meth:`echo` and :meth:`pay_required` for the common verbs.
+        Use this method for custom peer verbs or future additions.
+
+        Raises :class:`RPCError` with ``CodePeerUnreachable (-32010)`` if
+        the channel was broken (remote closed, network timeout). The broken
+        channel is removed from the open-channel map automatically — a new
+        :meth:`dial` is needed to reconnect.
+        """
+        p: dict[str, Any] = {"channel_id": channel_id, "method": method}
+        if params is not None:
+            p["params"] = params
+        result = self._c._call("daimon.peer.invoke", p)
+        if isinstance(result, dict):
+            return result.get("result")
+        return result
+
+    def echo(self, channel_id: str, *, message: str) -> dict:
+        """Invoke ``peer.echo`` on the remote daimon.
+
+        Sends ``message`` and returns ``{message, from_did}`` where
+        ``from_did`` is the remote daimon's own DID. Available on every
+        daimon regardless of address-book state — the canonical health-check
+        / "is this channel still alive?" verb.
+        """
+        result = self.invoke(channel_id, "peer.echo", {"message": message})
+        return result if isinstance(result, dict) else {}
+
+    def pay_required(self, channel_id: str, *, service: str) -> list[dict]:
+        """Query the remote daimon's payment requirements for ``service``.
+
+        Returns a list of ``PaymentRequirements`` dicts (x402 v2 shape):
+        ``{scheme, network, maxAmountRequired, resource, description,
+        payTo, maxTimeoutSeconds, asset}``. Callers use the list to
+        pick a (scheme, network, asset) tuple they can satisfy and construct
+        the EIP-3009 authorization.
+
+        In v0.3 only ``service="peer.ask"`` is supported. An empty list
+        means the remote daimon hasn't configured a wallet for payments yet
+        (treat as "service not available at this peer").
+
+        Universally available — no address-book authorization required.
+        """
+        result = self.invoke(channel_id, "peer.pay.required", {"service": service})
+        if isinstance(result, dict):
+            return result.get("requirements", []) or []
+        return []
+
+
 class Client:
     """Synchronous Daimon client over the local Unix socket.
 
@@ -521,6 +781,8 @@ class Client:
         self.activity = _ActivityNamespace(self)
         self.wallet = _WalletNamespace(self)
         self.payment = _PaymentNamespace(self)
+        self.federation = _FederationNamespace(self)
+        self.peer = _PeerNamespace(self)
 
     @property
     def socket_path(self) -> Path:

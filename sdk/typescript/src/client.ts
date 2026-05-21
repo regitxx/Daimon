@@ -144,6 +144,77 @@ export interface PaymentPayParams {
   validitySeconds?: number;
 }
 
+// --- v0.3 surface: federation + peer -----------------------------------------
+
+/**
+ * Returned by `daimon.federation.config`.
+ * Lets a client introspect this daimon's federation identity and capabilities.
+ */
+export interface FederationConfig {
+  /** This daimon's own DID (always present). */
+  did: string;
+  /**
+   * Base58btc-encoded Ed25519 public key (the z6Mk… fragment of the DID).
+   * Used as the Noise IK static key for transport auth.
+   */
+  transport_pubkey_multibase: string;
+  /** DID methods this daimon can resolve outbound. `["did:key"]` in v0.3. */
+  did_methods: string[];
+  /**
+   * peer.* verbs this daimon serves over inbound Noise channels.
+   * `["peer.echo", "peer.ask", "peer.pay.required"]` when fully configured.
+   */
+  protocols: string[];
+  /**
+   * `"tcp://host:port"` when PeerListen is active; absent when not listening.
+   * Use as the `endpoint` argument to `client.peer.dial`.
+   */
+  public_endpoint?: string;
+  /** Protocol vocabulary version. `"v0.3-draft"` in the current release. */
+  federation_version: string;
+}
+
+/** Wire shape for one open outbound peer channel. */
+export interface PeerChannel {
+  channel_id: string;
+  peer_did: string;
+  opened_at: string;
+}
+
+/** Returned by `client.peer.dial`. */
+export interface PeerDialResult extends PeerChannel {}
+
+/** One entry in the local address book. */
+export interface AddressBookEntry {
+  did: string;
+  label: string;
+  /** `"FirstSeen"` | `"Pinned"` | `"Blocked"` */
+  status: string;
+  approved_verbs: string[];
+  transport_pubkey_multibase: string;
+  first_seen: string;
+  last_seen: string;
+}
+
+/** x402 v2 PaymentRequirements shape returned by `peer.pay.required`. */
+export interface PaymentRequirement {
+  scheme: string;
+  network: string;
+  /** Smallest-unit integer, decimal string. E.g. `"1000000"` for 1.00 USDC. */
+  maxAmountRequired: string;
+  /** Protected resource identifier. E.g. `"peer.ask"`. */
+  resource: string;
+  description: string;
+  /** EIP-55-checksummed recipient address. */
+  payTo: string;
+  maxTimeoutSeconds: number;
+  /** Token contract address on the specified network. */
+  asset: string;
+  mimeType?: string;
+  outputSchema?: unknown;
+  extra?: unknown;
+}
+
 /** PAYMENT-RESPONSE structure parsed by the daemon. */
 export interface PaymentResponse {
   success: boolean;
@@ -460,6 +531,211 @@ class PaymentNamespace {
   }
 }
 
+class FederationNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * Return federation configuration for this daimon.
+   *
+   * Returns a `FederationConfig` with the daimon's DID, transport pubkey,
+   * supported DID methods, served `peer.*` protocols, optional public
+   * endpoint URL, and federation protocol version.
+   *
+   * Pure-read — no audit-log row, no state mutation. Requires identity
+   * to be unlocked (throws `DaemonLocked` if not).
+   */
+  async config(): Promise<FederationConfig> {
+    return (await this.c._call(
+      "daimon.federation.config",
+      undefined,
+    )) as FederationConfig;
+  }
+}
+
+class AddressBookNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * List all entries in the address book.
+   * Returns `[]` when empty or when the daemon returns null.
+   */
+  async list(): Promise<AddressBookEntry[]> {
+    const result = (await this.c._call(
+      "daimon.peer.address_book.list",
+      undefined,
+    )) as { entries?: AddressBookEntry[] } | null;
+    return result?.entries ?? [];
+  }
+
+  /**
+   * Manually add a peer as `FirstSeen`. Use `pin` afterwards to grant
+   * verb-level authorization.
+   *
+   * Throws `RPCError` (`-32603`) if the DID is already in the address book.
+   */
+  async add(params: {
+    did: string;
+    label?: string;
+    pubkeyMultibase?: string;
+  }): Promise<JsonObject> {
+    const wire: JsonObject = { did: params.did };
+    if (params.label !== undefined) wire["label"] = params.label;
+    if (params.pubkeyMultibase !== undefined)
+      wire["pubkey_multibase"] = params.pubkeyMultibase;
+    return (await this.c._call(
+      "daimon.peer.address_book.add",
+      wire,
+    )) as JsonObject;
+  }
+
+  /**
+   * Elevate a peer to `Pinned` and set the allowed `peer.*` verbs.
+   * Throws `RPCError` (`-32002` CodeNotFound) if the DID is not in the book.
+   */
+  async pin(params: { did: string; verbs: string[] }): Promise<JsonObject> {
+    return (await this.c._call("daimon.peer.address_book.pin", {
+      did: params.did,
+      verbs: params.verbs,
+    })) as JsonObject;
+  }
+
+  /**
+   * Block a peer. All inbound `peer.*` calls from this DID will fail.
+   * Idempotent.
+   */
+  async block(did: string): Promise<JsonObject> {
+    return (await this.c._call("daimon.peer.address_book.block", {
+      did,
+    })) as JsonObject;
+  }
+
+  /**
+   * Unblock a peer — transitions `Blocked` → `Pinned` (retaining prior
+   * `ApprovedVerbs`). Throws `RPCError` if the DID is not in the book.
+   */
+  async unblock(did: string): Promise<JsonObject> {
+    return (await this.c._call("daimon.peer.address_book.unblock", {
+      did,
+    })) as JsonObject;
+  }
+
+  /**
+   * Permanently remove a peer from the address book.
+   * Throws `RPCError` (`-32002` CodeNotFound) if the DID is not present.
+   */
+  async remove(did: string): Promise<JsonObject> {
+    return (await this.c._call("daimon.peer.address_book.remove", {
+      did,
+    })) as JsonObject;
+  }
+}
+
+class PeerNamespace {
+  /** Address book sub-namespace (`client.peer.addressBook.*`). */
+  readonly addressBook: AddressBookNamespace;
+
+  constructor(private readonly c: Client) {
+    this.addressBook = new AddressBookNamespace(c);
+  }
+
+  /**
+   * Open an authenticated Noise IK channel to a remote daimon.
+   *
+   * `did` must be a `did:key:z6Mk…` DID. `endpoint` is the peer's TCP
+   * address — either `"tcp://host:port"` or bare `"host:port"`.
+   *
+   * The returned `channel_id` is used by `invoke`, `close`, and `echo`.
+   * Also auto-populates the local address book as `FirstSeen`.
+   *
+   * Throws `RPCError` with `CodePeerUnreachable (-32010)` on network
+   * failure or Noise handshake rejection.
+   */
+  async dial(params: { did: string; endpoint: string }): Promise<PeerDialResult> {
+    return (await this.c._call("daimon.peer.dial", {
+      did: params.did,
+      endpoint: params.endpoint,
+    })) as PeerDialResult;
+  }
+
+  /**
+   * Close an open peer channel.
+   * No-ops and does not throw if the channel is already gone.
+   */
+  async close(channelId: string): Promise<void> {
+    await this.c._call("daimon.peer.close", { channel_id: channelId });
+  }
+
+  /**
+   * List open outbound peer channels.
+   * Returns `[]` when no channels are open.
+   */
+  async list(): Promise<PeerChannel[]> {
+    const result = (await this.c._call(
+      "daimon.peer.list",
+      undefined,
+    )) as { channels?: PeerChannel[] } | null;
+    return result?.channels ?? [];
+  }
+
+  /**
+   * Raw peer verb dispatch — send `method` with `params` over `channelId`
+   * and return the peer's `result` field verbatim.
+   *
+   * Use `echo` and `payRequired` for the common verbs; use this method for
+   * custom verbs or future protocol additions.
+   *
+   * Throws `RPCError` with `CodePeerUnreachable (-32010)` if the channel
+   * was broken (remote closed, network timeout). Broken channels are
+   * automatically removed from the open-channel map.
+   */
+  async invoke(
+    channelId: string,
+    method: string,
+    params?: unknown,
+  ): Promise<unknown> {
+    const wire: JsonObject = { channel_id: channelId, method };
+    if (params !== undefined) wire["params"] = params as JsonObject;
+    const result = (await this.c._call("daimon.peer.invoke", wire)) as {
+      result?: unknown;
+    } | null;
+    return result?.result ?? result;
+  }
+
+  /**
+   * Invoke `peer.echo` on the remote daimon.
+   *
+   * Returns `{message, from_did}` where `from_did` is the remote daimon's
+   * DID. Universally available — the canonical "is this channel alive?"
+   * health-check verb.
+   */
+  async echo(channelId: string, message: string): Promise<JsonObject> {
+    const result = await this.invoke(channelId, "peer.echo", { message });
+    return (result as JsonObject) ?? {};
+  }
+
+  /**
+   * Query the remote daimon's payment requirements for `service`.
+   *
+   * Returns a list of `PaymentRequirement` objects (x402 v2 shape).
+   * Callers pick the (scheme, network, asset) tuple they can satisfy and
+   * construct the EIP-3009 authorization.
+   *
+   * In v0.3 only `service = "peer.ask"` is supported. An empty list means
+   * the remote daimon has no wallet configured.
+   *
+   * Universally available — no address-book authorization required.
+   */
+  async payRequired(
+    channelId: string,
+    service: string,
+  ): Promise<PaymentRequirement[]> {
+    const result = (await this.invoke(channelId, "peer.pay.required", {
+      service,
+    })) as { requirements?: PaymentRequirement[] } | null;
+    return result?.requirements ?? [];
+  }
+}
+
 // --- base64 helpers ---------------------------------------------------------
 // Node's Buffer is the canonical base64 path; using globalThis lookups so
 // the SDK doesn't import @types/node into its surface unconditionally.
@@ -493,6 +769,10 @@ export class Client {
   readonly activity: ActivityNamespace;
   readonly wallet: WalletNamespace;
   readonly payment: PaymentNamespace;
+  /** v0.3: federation introspection (`daimon.federation.config`). */
+  readonly federation: FederationNamespace;
+  /** v0.3: peer channel management + address book (`daimon.peer.*`). */
+  readonly peer: PeerNamespace;
 
   private readonly socket: string;
   private readonly timeoutMs?: number;
@@ -513,6 +793,8 @@ export class Client {
     this.activity = new ActivityNamespace(this);
     this.wallet = new WalletNamespace(this);
     this.payment = new PaymentNamespace(this);
+    this.federation = new FederationNamespace(this);
+    this.peer = new PeerNamespace(this);
   }
 
   /** Resolved Unix-socket path the client dials. */
