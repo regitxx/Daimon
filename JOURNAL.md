@@ -4009,3 +4009,41 @@ All six phases shipped:
 **GA criterion status** (from design/v0.3-federation.md): phases 30–36 all green ✅; cross-daimon smoke runs in Go test suite (`TestPeerEcho_TwoDaemons`, `TestPeerAsk_AuthorizedPeer`, `TestPeerPayRequired_ReturnsRequirements`) ✅; real-world dogfood (one full week between two daimons) — pending huckgod.
 
 **What's next:** v0.2.0 GA gated on phase 40.4 (live Base Sepolia USDC settlement). The `peer.pay.required` response shape is now the correct x402 input — connecting the dots from price discovery → payment authorization → peer.ask settlement lands in phase 40.4.
+
+---
+
+## 2026-05-21 — Session 81: phase 37
+
+### v0.3 phase 37: CLI peer + federation commands
+
+**Commit:** `5133716`
+
+The daemon RPC verbs for the full v0.3 federation arc have been live since phases 30–36, but there was no CLI surface to reach them. Phase 37 fills that gap.
+
+**New file:** `cmd/daimon/cmd_peer.go` (628 lines)
+
+Subcommands added:
+
+| CLI | Wire method | Notes |
+|---|---|---|
+| `daimon federation config` | `daimon.federation.config` | DID, transport pubkey, protocols, endpoint |
+| `daimon peer dial --did <d> --endpoint <ep>` | `daimon.peer.dial` | Opens Noise IK channel; returns channel_id |
+| `daimon peer close <id>` | `daimon.peer.close` | Closes channel; removes from map |
+| `daimon peer list` | `daimon.peer.list` | Tabular channel_id/peer_did/opened_at |
+| `daimon peer echo <id> <msg>` | `daimon.peer.invoke` (peer.echo) | Quick connectivity test |
+| `daimon peer invoke <id> <method>` | `daimon.peer.invoke` | Raw invoke; --params for JSON input |
+| `daimon peer pay-required <id> <svc>` | `daimon.peer.invoke` (peer.pay.required) | Shows x402 payment requirements |
+| `daimon peer address-book list` | `daimon.peer.address_book.list` | Tabular with status/verbs/last-seen |
+| `daimon peer address-book add --did <d>` | `daimon.peer.address_book.add` | Uses `pet_name`/`transport_pubkey_multibase` wire names |
+| `daimon peer address-book pin --did <d> --verbs <...>` | `daimon.peer.address_book.pin` | Comma-separated verb list |
+| `daimon peer address-book block/unblock/remove --did <d>` | `daimon.peer.address_book.{block,unblock,remove}` | |
+
+All subcommands accept `--json` for structured output.
+
+**Wire field note:** The address book server handler uses `pet_name` (not `label`) and `transport_pubkey_multibase` (not `pubkey_multibase`). The CLI uses the server's canonical JSON tags, which is correct. The SDK (phase 36) sends `label`/`pubkey_multibase` — this is a field name mismatch that means the SDK's `add(label=...)` call would be silently ignored by the real server. Flagged for follow-up fix in the SDK.
+
+**`main.go` updated:** added `case "peer"` and `case "federation"` to the dispatch switch + full usage string entries for the new verbs.
+
+**Completion scripts updated:** `cmd_completion.go` — bash, zsh, and fish scripts all updated with `peer` and `federation` in the top-level verb lists and second-level dispatch for `peer address-book`.
+
+**Tests:** 513 Go (no change — CLI commands are client-only, no server-side code changed). The existing 682-test suite passes clean.
