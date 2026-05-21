@@ -66,12 +66,15 @@ _daimon_completion() {
         cword=$COMP_CWORD
     }
 
-    local top_verbs="init unlock identity memory provider chat doctor activity wallet payment rotate-password backup restore completion version help"
+    local top_verbs="init unlock identity memory provider chat doctor activity wallet payment peer federation rotate-password backup restore completion version help"
     local memory_verbs="write read list search delete export import"
     local provider_verbs="list invoke"
     local activity_verbs="query verify"
     local wallet_verbs="list create address derive sign show-mnemonic recover"
     local payment_verbs="pay"
+    local peer_verbs="dial close list echo invoke pay-required address-book"
+    local peer_ab_verbs="list add pin block unblock remove"
+    local federation_verbs="config"
     local memory_kinds="fact preference task observation"
     local shells="bash zsh fish"
 
@@ -119,6 +122,22 @@ _daimon_completion() {
                 return
             fi
             ;;
+        peer)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$peer_verbs" -- "$cur") )
+                return
+            fi
+            if [[ "${words[2]}" == "address-book" && $cword -eq 3 ]]; then
+                COMPREPLY=( $(compgen -W "$peer_ab_verbs" -- "$cur") )
+                return
+            fi
+            ;;
+        federation)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$federation_verbs" -- "$cur") )
+                return
+            fi
+            ;;
         completion)
             if [[ $cword -eq 2 ]]; then
                 COMPREPLY=( $(compgen -W "$shells" -- "$cur") )
@@ -144,7 +163,7 @@ const completionZsh = `#compdef daimon
 # Place on $fpath (e.g. ~/.zsh/completions/_daimon), then ` + "`compinit`" + `.
 
 _daimon() {
-    local -a top_verbs memory_verbs provider_verbs activity_verbs wallet_verbs payment_verbs memory_kinds shells
+    local -a top_verbs memory_verbs provider_verbs activity_verbs wallet_verbs payment_verbs peer_verbs peer_ab_verbs federation_verbs memory_kinds shells
     top_verbs=(
         'init:Provision a fresh keystore in $DAIMON_HOME'
         'unlock:Load the keystore and unlock the daemon'
@@ -156,6 +175,8 @@ _daimon() {
         'activity:Activity-log subcommands (query/verify)'
         'wallet:Wallet subcommands (list/create/address/derive/sign/show-mnemonic/recover)'
         'payment:Payment subcommands (pay)'
+        'peer:Peer federation subcommands (dial/close/list/echo/invoke/pay-required/address-book)'
+        'federation:Federation config subcommands (config)'
         'rotate-password:Change at-rest password for identity+wallet keystores'
         'backup:Snapshot the whole daimon into a single file'
         'restore:Inverse of backup; supports --dry-run for verification'
@@ -168,6 +189,9 @@ _daimon() {
     activity_verbs=(query verify)
     wallet_verbs=(list create address derive sign show-mnemonic recover)
     payment_verbs=(pay)
+    peer_verbs=(dial close list echo invoke pay-required address-book)
+    peer_ab_verbs=(list add pin block unblock remove)
+    federation_verbs=(config)
     memory_kinds=(fact preference task observation)
     shells=(bash zsh fish)
 
@@ -199,6 +223,15 @@ _daimon() {
             ;;
         payment)
             (( CURRENT == 3 )) && { _describe 'payment subcommand' payment_verbs; return }
+            ;;
+        peer)
+            (( CURRENT == 3 )) && { _describe 'peer subcommand' peer_verbs; return }
+            if [[ $words[3] == "address-book" ]] && (( CURRENT == 4 )); then
+                _describe 'address-book subcommand' peer_ab_verbs; return
+            fi
+            ;;
+        federation)
+            (( CURRENT == 3 )) && { _describe 'federation subcommand' federation_verbs; return }
             ;;
         completion)
             (( CURRENT == 3 )) && { _describe 'shell' shells; return }
@@ -232,8 +265,8 @@ function __daimon_using_command
 end
 
 # Top-level subcommands
-complete -c daimon -f -n "not __fish_seen_subcommand_from init unlock identity memory provider chat doctor activity wallet payment rotate-password backup restore completion version help" \
-    -a "init unlock identity memory provider chat doctor activity wallet payment rotate-password backup restore completion version help"
+complete -c daimon -f -n "not __fish_seen_subcommand_from init unlock identity memory provider chat doctor activity wallet payment peer federation rotate-password backup restore completion version help" \
+    -a "init unlock identity memory provider chat doctor activity wallet payment peer federation rotate-password backup restore completion version help"
 
 # Second-level
 complete -c daimon -f -n "__daimon_using_command memory" -a "write read list search delete export import"
@@ -241,6 +274,9 @@ complete -c daimon -f -n "__daimon_using_command provider" -a "list invoke"
 complete -c daimon -f -n "__daimon_using_command activity" -a "query verify"
 complete -c daimon -f -n "__daimon_using_command wallet" -a "list create address derive sign show-mnemonic recover"
 complete -c daimon -f -n "__daimon_using_command payment" -a "pay"
+complete -c daimon -f -n "__daimon_using_command peer" -a "dial close list echo invoke pay-required address-book"
+complete -c daimon -f -n "__daimon_using_command peer address-book" -a "list add pin block unblock remove"
+complete -c daimon -f -n "__daimon_using_command federation" -a "config"
 complete -c daimon -f -n "__daimon_using_command completion" -a "bash zsh fish"
 
 # --kind values for memory write / etc.

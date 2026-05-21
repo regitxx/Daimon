@@ -66,6 +66,10 @@ func main() {
 		exitOnErr(cmdWallet(args))
 	case "payment":
 		exitOnErr(cmdPayment(args))
+	case "peer":
+		exitOnErr(cmdPeer(args))
+	case "federation":
+		exitOnErr(cmdFederation(args))
 	case "rotate-password":
 		exitOnErr(cmdRotatePassword(args))
 	case "backup":
@@ -182,6 +186,45 @@ Usage:
                             file as a "prove you know the password right
                             now" attestation. Use to verify backup, or
                             to import the seed into MetaMask / Phantom.
+
+  daimon federation config  Show this daimon's federation identity: DID,
+              [--json]      Noise IK transport pubkey, supported protocols,
+                            public TCP endpoint (if PeerListen is running),
+                            and federation protocol version.
+
+  daimon peer dial          Open a Noise IK channel to a remote daimon.
+              --did <d>     Remote daimon's DID (did:key only in v0.3).
+              --endpoint <ep> TCP endpoint, e.g. tcp://host:9999 (required).
+              [--json]
+  daimon peer close         Close an open peer channel.
+              [--json] <channel_id>
+  daimon peer list          List all open peer channels.
+              [--json]
+  daimon peer echo          Send a peer.echo request over an open channel and
+              [--json]      print the echoed message. Quick connectivity test.
+              <channel_id> <message>
+  daimon peer invoke        Low-level: invoke any peer.* method over an open
+              [--params <json>] channel and print the result.
+              [--json] <channel_id> <method>
+  daimon peer pay-required  Query the peer's x402 payment requirements for a
+              [--json]      service (e.g. peer.ask). Returns scheme, amount,
+              <channel_id> <service>   payTo address, and asset contract.
+
+  daimon peer address-book list        List the address book.
+              [--json]
+  daimon peer address-book add         Add a peer to the address book
+              --did <d> [--label <l>]  (status: first_seen; no verbs yet).
+              [--pubkey-multibase <pk>] [--json]
+  daimon peer address-book pin         Pin a peer and approve verbs.
+              --did <d>                Peer must already be in the book;
+              --verbs <v1,v2,...>      use add first if not.
+              [--json]
+  daimon peer address-book block       Block a peer (reject all inbound
+              --did <d> [--json]       requests from this DID).
+  daimon peer address-book unblock     Unblock a previously blocked peer.
+              --did <d> [--json]
+  daimon peer address-book remove      Remove a peer from the address book
+              --did <d> [--json]       entirely.
 
   daimon payment pay        Pay an x402-protected URL end-to-end. Buffers
               <url>         the request body if any, dispatches the
