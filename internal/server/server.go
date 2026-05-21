@@ -586,6 +586,19 @@ func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
 		}
 		return successResponse(req.ID, result)
 
+	case "peer.pay.required":
+		// peer.pay.required is universally available — it is price-discovery
+		// only (no funds move, no provider invoked). Requiring authorization
+		// before the caller can check prices would be circular.
+		result, rpcErr := s.handlePeerPayRequired(conn, req.Params)
+		if req.IsNotification() {
+			return nil
+		}
+		if rpcErr != nil {
+			return errorResponse(req.ID, rpcErr)
+		}
+		return successResponse(req.ID, result)
+
 	case "peer.ask":
 		// peer.ask has economic implications (consumes the serving daimon's
 		// provider API credits). Requires an explicit address-book entry with

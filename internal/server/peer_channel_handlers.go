@@ -11,6 +11,7 @@ import (
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
+	"github.com/regitxx/Daimon/internal/payment"
 	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/transport"
 )
@@ -412,6 +413,124 @@ func (s *Server) handlePeerAsk(conn *transport.Conn, entry *addressbook.Entry, p
 	}
 
 	return peerAskResult{Response: resp}, nil
+}
+
+// --- peer.pay.required (inbound, universally available) ----------------------
+
+// peerPayRequiredParams is the inbound wire shape for peer.pay.required.
+// The calling peer names the service it wants to pay for; in v0.3 only
+// "peer.ask" has payment requirements.
+type peerPayRequiredParams struct {
+	Service string `json:"service"` // e.g. "peer.ask"
+}
+
+// peerPayRequiredResult carries the payment requirements back to the calling peer.
+// The requirements slice follows the x402 v2 PaymentRequirements shape so a
+// future SDK can feed it directly into the x402 payment flow without adaptation.
+type peerPayRequiredResult struct {
+	Requirements []payment.PaymentRequirements `json:"requirements"`
+}
+
+// handlePeerPayRequired serves the peer.pay.required verb.
+//
+// Authorization: universally available — no address book gate. Price
+// discovery must be accessible BEFORE a peer can set up payment, so
+// requiring prior authorization would be circular. The handler is
+// read-only from the serving daimon's perspective: it returns what the
+// daimon's wallet address is and how much to pay, without moving any funds.
+//
+// Wallet dependency: the serving daimon must have at least one EVM wallet
+// configured. If s.wstore is nil or contains no EVM wallet, returns
+// CodePeerProtocolUnsupported so the caller knows to configure a wallet
+// first (via daimon.wallet.create).
+//
+// v0.3 hardcodes: USDC on Base Sepolia, 1.00 USDC (1 000 000 units, 6
+// decimals), 300-second payment window. Phase 40.4 will make network,
+// asset, and amount configurable.
+func (s *Server) handlePeerPayRequired(conn *transport.Conn, params json.RawMessage) (any, *RPCError) {
+	var p peerPayRequiredParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Service == "" {
+		return nil, newError(CodeInvalidParams, "service is required")
+	}
+	// Only peer.ask has payment requirements in v0.3. Other verbs (peer.echo,
+	// peer.pay.required itself) are free; peer.ask is the only one that
+	// consumes the serving daimon's provider API credits.
+	if p.Service != "peer.ask" {
+		return nil, newError(CodeInvalidParams,
+			fmt.Sprintf("no payment requirements defined for service %q; only peer.ask is payable in v0.3", p.Service))
+	}
+
+	if s.wstore == nil {
+		return nil, newError(CodePeerProtocolUnsupported,
+			"peer.pay.required: no wallet configured on this daimon; "+
+				"create one with daimon.wallet.create before accepting peer payments")
+	}
+
+	// Resolve the payment address: prefer Base Sepolia (testnet), fall back
+	// to any EVM wallet in the store. Phase 40.4 will expose a multi-chain
+	// requirements list; for v0.3 we advertise exactly one entry.
+	const baseSepolia = "evm:base-sepolia"
+	w, err := s.wstore.FindByChain(baseSepolia)
+	if err != nil {
+		// Fallback: scan for any EVM wallet.
+		for _, candidate := range s.wstore.List() {
+			if strings.HasPrefix(candidate.Chain, "evm:") {
+				w = candidate
+				break
+			}
+		}
+	}
+	if w == nil {
+		return nil, newError(CodePeerProtocolUnsupported,
+			"peer.pay.required: no EVM wallet found; "+
+				"create one with daimon.wallet.create (chain: evm:base-sepolia)")
+	}
+
+	// v0.3 constants: USDC on Base Sepolia.
+	const (
+		// usdcBaseSepolia is the canonical USDC token contract on Base Sepolia
+		// (https://docs.base.org/docs/tokens/usdc). Used as the Asset field.
+		usdcBaseSepolia = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+		// defaultAmount is 1.00 USDC expressed in the 6-decimal smallest unit.
+		defaultAmount = "1000000"
+		// defaultTimeout is the maximum seconds the serving daimon will accept
+		// a payment that was authorised before "now". Matches x402's recommended
+		// 5-minute window for short-lived authorizations.
+		defaultTimeout = 300
+	)
+
+	reqs := []payment.PaymentRequirements{
+		{
+			Scheme:            payment.SchemeExact,
+			Network:           "base-sepolia",
+			MaxAmountRequired: defaultAmount,
+			Resource:          "peer.ask",
+			Description:       "1.00 USDC payment required to invoke peer.ask on this daimon (Base Sepolia testnet)",
+			PayTo:             w.Address,
+			MaxTimeoutSeconds: defaultTimeout,
+			Asset:             usdcBaseSepolia,
+		},
+	}
+
+	// Audit: peer.payment.invoiced — best-effort, async (dispatchPeer
+	// carries no context, and the audit must not block the response).
+	if s.alog != nil {
+		go func() {
+			_, _ = s.alog.Append(context.Background(), activity.KindPeerPaymentInvoiced, map[string]any{
+				"service":     p.Service,
+				"peer_x25519": fmt.Sprintf("%x", conn.PeerX25519),
+				"pay_to":      w.Address,
+				"amount":      defaultAmount,
+				"network":     "base-sepolia",
+				"asset":       usdcBaseSepolia,
+			})
+		}()
+	}
+
+	return peerPayRequiredResult{Requirements: reqs}, nil
 }
 
 // --- helpers -----------------------------------------------------------------

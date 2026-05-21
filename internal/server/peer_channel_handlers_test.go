@@ -785,6 +785,267 @@ func TestPeerDial_SecondDialTouchesExistingEntry(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// Phase 35: peer.pay.required tests
+// =============================================================================
+
+// peerPayFixture extends peerAskFixture with a real wallet store so the
+// serving daimon has a payment address to advertise.
+type peerPayFixture struct {
+	*peerAskFixture
+	wstore  *wallet.Store
+	payAddr string // the EVM address in the Base Sepolia wallet
+}
+
+// newPeerPayFixture builds a fixture with:
+//   - identity + memory + activity + address book + mock provider (from newPeerAskFixture)
+//   - wallet store with one evm:base-sepolia wallet
+//   - TCP peer listener on a random port
+func newPeerPayFixture(t *testing.T) *peerPayFixture {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	dir := t.TempDir()
+
+	store, err := memory.Open(filepath.Join(dir, "memory.db"), id, memory.NullEmbedder{})
+	if err != nil {
+		t.Fatalf("memory.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	alog, err := activity.Open(filepath.Join(dir, "activity.log"), id)
+	if err != nil {
+		t.Fatalf("activity.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = alog.Close() })
+
+	abKey := make([]byte, 32)
+	_, _ = rand.Read(abKey)
+	ab, err := addressbook.Open(filepath.Join(dir, "address_book.enc"), abKey)
+	if err != nil {
+		t.Fatalf("addressbook.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = ab.Close() })
+
+	// Wallet store with an EVM Base Sepolia wallet for payment address.
+	wstore, _, err := wallet.Open(filepath.Join(dir, "wallet.ks"), []byte("testpass"))
+	if err != nil {
+		t.Fatalf("wallet.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = wstore.Close() })
+	w, err := wstore.CreateWallet("evm:base-sepolia")
+	if err != nil {
+		t.Fatalf("wstore.CreateWallet: %v", err)
+	}
+
+	reg := provider.NewRegistry()
+	mock := &mockProvider{
+		name:   "mock",
+		models: []provider.Model{{ID: "mock-1", DisplayName: "Mock Provider"}},
+	}
+	reg.Register(mock)
+
+	srv, err := New(Options{
+		Identity:    id,
+		Store:       store,
+		Log:         alog,
+		AddressBook: ab,
+		Wallet:      wstore,
+		Providers:   reg,
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	sockDir, err := os.MkdirTemp("", "dmn")
+	if err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "s.sock")
+	if err := srv.Listen(sockPath); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Close()
+	})
+	go func() { _ = srv.Serve(ctx) }()
+	waitForSocket(t, sockPath)
+
+	f := &fixture{t: t, id: id, mem: store, alog: alog, srv: srv, addr: sockPath}
+	peerAddr, err := srv.PeerListen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("PeerListen: %v", err)
+	}
+
+	return &peerPayFixture{
+		peerAskFixture: &peerAskFixture{
+			peerFixture: &peerFixture{fixture: f, peerAddr: peerAddr},
+			abook:       ab,
+			mock:        mock,
+		},
+		wstore:  wstore,
+		payAddr: w.Address,
+	}
+}
+
+// --- peer.pay.required: happy path -------------------------------------------
+
+// TestPeerPayRequired_ReturnsRequirements is the happy path for phase 35:
+// a peer calls peer.pay.required on a daimon that has a wallet configured,
+// and receives valid USDC-on-Base-Sepolia payment requirements.
+func TestPeerPayRequired_ReturnsRequirements(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerPayFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.pay.required", map[string]any{
+		"service": "peer.ask",
+	})
+	if resp.Error != nil {
+		t.Fatalf("peer.pay.required error: %+v", resp.Error)
+	}
+
+	var outer peerInvokeResult
+	resultAs(t, resp, &outer)
+
+	var pay peerPayRequiredResult
+	if err := json.Unmarshal(outer.Result, &pay); err != nil {
+		t.Fatalf("unmarshal peerPayRequiredResult: %v (raw=%s)", err, outer.Result)
+	}
+	if len(pay.Requirements) == 0 {
+		t.Fatal("expected at least one payment requirement")
+	}
+	r := pay.Requirements[0]
+	if r.PayTo != b.payAddr {
+		t.Errorf("PayTo: got %q want %q", r.PayTo, b.payAddr)
+	}
+	if r.Scheme != "exact" {
+		t.Errorf("Scheme: got %q want %q", r.Scheme, "exact")
+	}
+	if r.Network != "base-sepolia" {
+		t.Errorf("Network: got %q want %q", r.Network, "base-sepolia")
+	}
+	if r.Resource != "peer.ask" {
+		t.Errorf("Resource: got %q want %q", r.Resource, "peer.ask")
+	}
+	if r.MaxAmountRequired == "" {
+		t.Error("MaxAmountRequired must not be empty")
+	}
+	if r.MaxTimeoutSeconds <= 0 {
+		t.Errorf("MaxTimeoutSeconds: got %d, want > 0", r.MaxTimeoutSeconds)
+	}
+	if r.Asset == "" {
+		t.Error("Asset (USDC contract address) must not be empty")
+	}
+}
+
+// --- peer.pay.required: error paths ------------------------------------------
+
+// TestPeerPayRequired_NoWallet verifies CodePeerProtocolUnsupported (surfaced
+// as CodeInternalError through the invoke wrapper) when the serving daimon
+// has no wallet configured.
+func TestPeerPayRequired_NoWallet(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerFixture(t) // no wallet store
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.pay.required", map[string]any{
+		"service": "peer.ask",
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error when serving daimon has no wallet")
+	}
+	// The peer's CodePeerProtocolUnsupported propagates back as CodeInternalError
+	// through handlePeerInvoke's "peer returned error" wrapping.
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// TestPeerPayRequired_UnknownService verifies CodeInvalidParams for services
+// that have no payment requirements in v0.3 (only peer.ask is payable).
+func TestPeerPayRequired_UnknownService(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerPayFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	// peer.echo is free — asking for its payment requirements is an error.
+	resp := a.callInvoke(t, dial.ChannelID, "peer.pay.required", map[string]any{
+		"service": "peer.echo",
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for non-payable service")
+	}
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// TestPeerPayRequired_MissingService verifies CodeInvalidParams when the
+// service field is omitted from the request.
+func TestPeerPayRequired_MissingService(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerPayFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.pay.required", map[string]any{})
+	if resp.Error == nil {
+		t.Fatal("expected error for missing service field")
+	}
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// --- peer.pay.required: audit ------------------------------------------------
+
+// TestPeerPayRequired_AuditsInvoiced verifies that a successful call to
+// peer.pay.required appends a peer.payment.invoiced row to the SERVING
+// daimon's audit log.
+func TestPeerPayRequired_AuditsInvoiced(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerPayFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.pay.required", map[string]any{
+		"service": "peer.ask",
+	})
+	if resp.Error != nil {
+		t.Fatalf("peer.pay.required error: %+v", resp.Error)
+	}
+
+	// The audit write is async (background goroutine); queryAudit polls
+	// until it arrives or the 2-second timeout fires.
+	queryAudit(t, b.alog, activity.KindPeerPaymentInvoiced, 1)
+}
+
+// --- federation config: peer.pay.required in protocols -----------------------
+
+func TestFederationConfig_IncludesPeerPayRequired(t *testing.T) {
+	f := newPeerFixture(t)
+	resp := f.call(t, "daimon.federation.config", nil)
+	if resp.Error != nil {
+		t.Fatalf("federation.config error: %+v", resp.Error)
+	}
+	var cfg federationConfigResult
+	resultAs(t, resp, &cfg)
+
+	found := false
+	for _, p := range cfg.Protocols {
+		if p == "peer.pay.required" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("peer.pay.required not in protocols list: %v", cfg.Protocols)
+	}
+}
+
 // --- federation config: peer.ask in protocols --------------------------------
 
 func TestFederationConfig_IncludesPeerAsk(t *testing.T) {

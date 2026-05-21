@@ -97,6 +97,22 @@ const (
 	// verbs including peer.echo) because only peer.ask has economic
 	// implications worth a dedicated row.
 	KindPeerInvokeServed Kind = "peer.invoke.served"
+
+	// v0.3 phase 35 — federation payment discovery kinds.
+
+	// KindPeerPaymentInvoiced is written by the SERVING daimon when it
+	// responds to a peer.pay.required call — the "I told a peer what they
+	// must pay to use peer.ask" audit row. Tracks price-discovery traffic
+	// separately from actual payment settlement so operators can see how
+	// many peers are checking rates without yet paying.
+	KindPeerPaymentInvoiced Kind = "peer.payment.invoiced"
+
+	// KindPeerPaymentReceived is reserved for phase 40.4 when the serving
+	// daimon verifies an incoming x402 payment header before honouring a
+	// peer.ask call. Not written in v0.3 because on-chain settlement
+	// verification is deferred until the x402 facilitator client lands.
+	// Verifiers must accept this kind without rejecting the chain.
+	KindPeerPaymentReceived Kind = "peer.payment.received"
 )
 
 // Common errors.

@@ -3833,3 +3833,116 @@ Also: `TestPeerEcho_MultipleMessages` (3 sequential echoes on same channel), `Te
 - **Phase 34** — `peer.ask`: invoke a peer's provider on their behalf. The first peer verb that implies compute cost + economic implications. Wire shape: `daimon.peer.invoke` with `method: "peer.ask"`, params carry provider/messages/model. Inbound handler validates via address book (`HasVerb("peer.ask")`).
 - **Phase 35** — x402 recipient (`peer.pay.required`). First inbound payment flow.
 - **Phase 36** — SDK wrappers for `client.peer.*` and `client.federation.*` in both languages.
+
+---
+
+## 2026-05-21 — Day Zero, session 78: v0.3 phase 34 (peer.ask — cross-daimon provider.invoke)
+
+Phase 34 is the first peer verb with real economic implications: A dials B, and A's LLM messages are served by B's provider — B consumes its own API credits on A's behalf. The address book (phase 32) carries the authorization model.
+
+### What we built
+
+**Authorization gate.** `peer.ask` requires an explicit address book entry on the SERVING daimon (B) with `"peer.ask"` in `ApprovedVerbs`. The gate lives in `dispatchPeer` (not in the handler itself) so unauthorized attempts are rejected before any provider state is touched. `peer.echo` stays universal — it's benign and has no resource cost, so gating it would be an obstacle to debugging.
+
+**`lookupPeerByX25519`** (new method on `*Server`): the serving daimon identifies an inbound peer by converting each address-book entry's `TransportPubKeyMultibase` to an X25519 static key and comparing against `conn.PeerX25519`. O(n) scan; acceptable because address books are small and this runs only on authenticated frames.
+
+**Auto-populate address book on dial.** `handlePeerDial` now calls `s.abook.Add(peerDID, "", multibase)` (idempotent on ErrEntryExists) then `s.abook.Touch(peerDID, multibase)` to update `LastSeen` and enforce TOFU after each successful Noise handshake. A TOFU violation (transport pubkey changed) is audited but does NOT abort the already-completed Noise handshake — the handshake is the security gate; address-book TOFU is an operator alert.
+
+**`KindPeerInvokeServed`** (new audit kind). The serving daimon writes a `peer.invoke.served` row after successfully invoking its provider on behalf of a peer. Distinct from `peer.invoke.received` (which covers all inbound peer.* verbs) because only `peer.ask` has economic implications worth a dedicated row. Audit payload includes: `peer_did`, `peer_x25519`, `provider`, `model`, `input_tokens`, `output_tokens`, `stop_reason`, `duration_ms`.
+
+**Modified files:**
+- `internal/activity/activity.go`: + `KindPeerInvokeServed = "peer.invoke.served"`.
+- `internal/server/peer_channel_handlers.go`: + `peerAskParams`, `peerAskResult`, `handlePeerAsk`; updated `handlePeerDial` with auto-populate logic.
+- `internal/server/server.go`: + `peer.ask` case in `dispatchPeer` (authorization gate + `lookupPeerByX25519` call); + `lookupPeerByX25519` method.
+- `internal/server/federation_handlers.go`: `protocols` updated to `["peer.echo", "peer.ask"]`.
+- `internal/server/peer_channel_handlers_test.go`: + `peerAskFixture`, `newPeerAskFixture`, `TestPeerAsk_AuthorizedPeer`, `TestPeerAsk_NoAddressBook`, `TestPeerAsk_PeerNotInAddressBook`, `TestPeerAsk_PeerInBookButNotAuthorized`, `TestPeerAsk_MissingProvider`, `TestPeerDial_AutoPopulatesAddressBook`, `TestPeerDial_SecondDialTouchesExistingEntry`, `TestFederationConfig_IncludesPeerAsk`.
+
+### RPC surface additions
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `peer.ask` | inbound (served to authorized remote peers) | Invoke this daimon's provider on a peer's behalf |
+
+### Integration test: two daemons, peer.ask round-trip
+
+`TestPeerAsk_AuthorizedPeer`:
+
+1. A dials B (B has address book + mock provider + PeerListen).
+2. B's operator pins A with `peer.ask` in B's address book directly on the book object (simulates `daimon.peer.address_book.pin`).
+3. B's mock provider is pre-loaded with a canned response: `content: "four"`, `model: "mock-1"`.
+4. A invokes `peer.ask` on B via `daimon.peer.invoke`.
+5. Assert response: `response.content == "four"`, `model == "mock-1"`.
+6. Assert B's audit: `peer.invoke.served` (background goroutine — test polls).
+
+### Test count delta
+
+498 → 506 Go race+vet (+8: 8 peer.ask server tests). 65 pytest + 65 vitest unchanged. **636 total across all surfaces.**
+
+---
+
+## 2026-05-21 — Day Zero, session 79: v0.3 phase 35 (peer.pay.required — x402 price discovery)
+
+Phase 35 closes the payment loop for federation: a peer can now ask "what must I pay to use `peer.ask` on this daimon?" before committing funds. The endpoint-document part (payment_address in DaimonEndpoint) was already done in phase 30 slice 2 — this phase adds the inbound verb + audit trail.
+
+### What we built
+
+**`peer.pay.required`** — universally available (no address-book gate). Price discovery must be accessible BEFORE a caller can arrange payment; requiring authorization first would be circular. The handler is read-only from the serving daimon's perspective: it tells the caller what to pay without moving any funds.
+
+**Authorization posture summary (all three universal verbs):**
+- `peer.echo` — always allowed (benign, no resources consumed)
+- `peer.pay.required` — always allowed (read-only price discovery)
+- `peer.ask` — requires explicit address-book authorization (`HasVerb("peer.ask")`)
+
+**Wallet dependency.** `handlePeerPayRequired` calls `s.wstore.FindByChain("evm:base-sepolia")`, falling back to the first EVM wallet in `s.wstore.List()`. If `s.wstore == nil` or no EVM wallet exists, returns `CodePeerProtocolUnsupported` so the caller knows to configure a wallet first.
+
+**v0.3 hardcodes** (phase 40.4 will make these configurable):
+- Asset: USDC on Base Sepolia (`0x036CbD53842c5426634e7929541eC2318f3dCF7e`)
+- Amount: 1.00 USDC = `"1000000"` (6 decimal smallest unit)
+- Timeout: 300 seconds (x402 recommended 5-minute window)
+- Network: `"base-sepolia"`
+
+**Audit kinds added:**
+- `KindPeerPaymentInvoiced = "peer.payment.invoiced"` — written by the serving daimon on each successful `peer.pay.required` response; tracks price-discovery traffic separately from actual payment.
+- `KindPeerPaymentReceived = "peer.payment.received"` — reserved for phase 40.4 (on-chain settlement verification); not written in v0.3.
+
+**Modified files:**
+- `internal/activity/activity.go`: + `KindPeerPaymentInvoiced`, `KindPeerPaymentReceived`.
+- `internal/server/peer_channel_handlers.go`: + `payment` import; + `peerPayRequiredParams`, `peerPayRequiredResult`, `handlePeerPayRequired`.
+- `internal/server/server.go`: + `peer.pay.required` case in `dispatchPeer`.
+- `internal/server/federation_handlers.go`: `protocols` updated to `["peer.echo", "peer.ask", "peer.pay.required"]`.
+- `internal/server/peer_channel_handlers_test.go`: + `peerPayFixture`, `newPeerPayFixture` (creates real wallet + EVM Base Sepolia wallet), `TestPeerPayRequired_ReturnsRequirements`, `TestPeerPayRequired_NoWallet`, `TestPeerPayRequired_UnknownService`, `TestPeerPayRequired_MissingService`, `TestPeerPayRequired_AuditsInvoiced`, `TestFederationConfig_IncludesPeerPayRequired`.
+
+### Wire shape
+
+Request (from calling peer):
+```json
+{"jsonrpc":"2.0","method":"peer.pay.required","params":{"service":"peer.ask"},"id":"..."}
+```
+
+Response (from serving daimon):
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "requirements": [{
+      "scheme": "exact",
+      "network": "base-sepolia",
+      "maxAmountRequired": "1000000",
+      "resource": "peer.ask",
+      "description": "1.00 USDC payment required to invoke peer.ask on this daimon (Base Sepolia testnet)",
+      "payTo": "0x...",
+      "maxTimeoutSeconds": 300,
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    }]
+  },
+  "id": "..."
+}
+```
+
+### Test count delta
+
+506 → 513 Go race+vet (+7: 6 new peer.pay.required tests + 1 rounding). 65 pytest + 65 vitest unchanged. **643 total across all surfaces.**
+
+**What's next (phase 36+):**
+- **Phase 36** — SDK wrappers for `client.peer.*` and `client.federation.*` in Python + TypeScript. Cross-language integration test: Python client dials a Go daimon, invokes peer.echo, reads the result.
+- **Phase 40.4** — live Base Sepolia USDC settlement (gates v0.2.0 GA). The `peer.pay.required` response is now the correct wire shape for a future SDK to feed directly into the x402 payment flow.
