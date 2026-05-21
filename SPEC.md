@@ -1,8 +1,8 @@
 # Daimon Protocol Specification
 
-**Version**: v0.2 (Draft)
-**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.2 pre-release shipped 2026-05-19 (wallet + x402 surface, with `show_mnemonic` re-display + `wallet recover` import on the seed-lifecycle side). v0.2 GA cuts once live Base Sepolia settlement is verified.
-**Date**: 2026-05-19 (originally 2026-05-03 for v0.1)
+**Version**: v0.3 (Draft)
+**Status**: v0.1.0 GA shipped to PyPI + npm 2026-05-12. v0.2.0-dev.2 pre-release shipped 2026-05-19 (wallet + x402 surface). v0.2 GA gated on live Base Sepolia settlement (phase 40.4). v0.3 federation arc (phases 30–38) shipped 2026-05-21 — see §16.
+**Date**: 2026-05-21 (v0.3 draft; v0.2 additions 2026-05-19; originally 2026-05-03 for v0.1)
 
 ---
 
@@ -23,13 +23,27 @@ v0.2 adds two primitives that complete the "your agent acts on your behalf" prom
 
 The two compose: any client that uses `daimon.payment.pay` (or `daimon.provider.invoke` once 40.5b lands) can buy paid resources without ever handling private keys or signing logic itself.
 
-### Out of scope for v0.1 and v0.2
+### 1.3 v0.3 — agent-to-agent federation
 
-- Federation (agent-to-agent communication across machines) → v0.3
+v0.3 adds **federation**: the ability for daimons to find, authenticate, and communicate with each other across machines. The four shipped primitives:
+
+1. **Transport**: Noise IK mutual-auth encrypted channels over TCP. The same Ed25519 keypair used for identity and audit-chain signing authenticates the transport — one key pair for everything (§16.2).
+2. **Channel lifecycle**: `daimon.peer.dial`, `daimon.peer.close`, `daimon.peer.list`, `daimon.peer.listen` — open and manage peer connections (§16.3).
+3. **Address book**: persistent, encrypted record of known peers with per-verb authorization control and TOFU pubkey pinning (§16.4).
+4. **Served verbs**: the first three A2A protocol verbs — `peer.echo` (connectivity test), `peer.ask` (cross-daimon LLM invocation with address-book gate), `peer.pay.required` (x402 price discovery) — plus the generic `daimon.peer.invoke` passthrough (§16.5).
+
+Single-player utility from v0.1 + v0.2 is fully preserved. The federation surface is opt-in: a daimon with no `peer listen` running cannot be dialed in; a daimon that never calls `peer.dial` never opens any outbound channels. v0.3 adds capability without breaking any v0.1/v0.2 invariant.
+
+### Out of scope for v0.1 and v0.2 (updated for v0.3)
+
+- ~~Federation (agent-to-agent communication across machines)~~ → **shipped in v0.3 (§16)**
+- ~~Public DID resolution and verification by third parties~~ → **did:key transport shipped in v0.3; did:web resolution deferred to v0.3.x**
+- ~~The daimon as a payment RECIPIENT~~ → **peer.pay.required price discovery shipped; on-chain settlement deferred to v0.3.x/phase 40.4**
 - Reputation → v0.4
-- Sub-agent delegation → v0.5
-- Public DID resolution and verification by third parties → v0.3
-- The daimon as a payment RECIPIENT (accepts x402 payments from other agents) → v0.3 federation territory; v0.2 is payer-only
+- Sub-agent delegation / Biscuit tokens → v0.4
+- NAT traversal / mobile daimons → v0.3.x (requires relay; v0.3 assumes publicly addressable endpoints)
+- Group encrypted channels (MLS) → v0.3.x
+- Public daimon directory / DHT discovery → v0.4
 
 These are deferred deliberately. They require network primitives that have no value until v0.1 + v0.2 are solid.
 
@@ -47,6 +61,10 @@ These are deferred deliberately. They require network primitives that have no va
 | **Client** | Any program that talks to daimon-core via the Daimon Protocol (CLI, IDE plugin, MCP host, web UI). |
 | **Memory** | A signed, encrypted store of facts, preferences, observations, and task state belonging to the principal. |
 | **Activity log** | An append-only, hash-chained record of every meaningful action the daimon has taken. |
+| **Peer** | A remote daimon running for a different principal, reachable over the network. v0.3+. |
+| **Channel** | An authenticated, encrypted TCP connection between two daimons established via Noise IK. Identified by a UUID `channel_id`. v0.3+. |
+| **Address book** | A local, encrypted registry of peer DIDs with their trust status and per-verb authorization. v0.3+. |
+| **TOFU** | Trust On First Use — the first connection to a DID pins its Ed25519 public key; subsequent connections verify against that pin. v0.3+. |
 
 ---
 
@@ -525,17 +543,19 @@ The following defaults are locked in for v0.1. Each was an open question; each n
 
 ---
 
-## 12. What v0.1 + v0.2 explicitly do NOT solve
+## 12. What v0.1–v0.3 explicitly do NOT solve
 
-- Discovery of other agents
-- Agent-to-agent communication
-- ~~Payments~~ → **Outbound x402 payments shipped in v0.2 (§15).** The daimon as a payment recipient (accepts x402 from other agents) is still v0.3 federation territory.
-- Reputation
-- Capability delegation to sub-agents
-- Public verifiability of memory or activity by third parties
-- Cloud-hosted daimons (a daimon you don't run yourself)
-- Custodial wallet mode (third-party holds keys on the principal's behalf) — v0.2's wallet primitive is strictly non-custodial; custodial integration could land in v0.2.x if there's a concrete user need (see design/v0.2-wallet.md §8.1)
-- Non-EVM payment chains — v0.2 supports EVM (Base, Base Sepolia) only; SVM (Solana) and Stellar are reserved for v0.2.x once their facilitator ecosystems mature
+- ~~Discovery of other agents~~ → **v0.3 shipped `daimon.federation.config` + address book; DHT/public directory deferred to v0.4**
+- ~~Agent-to-agent communication~~ → **shipped in v0.3 (§16): peer.echo, peer.ask, peer.pay.required over Noise IK channels**
+- ~~Payments~~ → **Outbound x402 payments shipped in v0.2 (§15). Price discovery for inbound payments shipped in v0.3 (peer.pay.required). On-chain inbound settlement is phase 40.4.**
+- Reputation → v0.4
+- Capability delegation to sub-agents (Biscuit tokens) → v0.4
+- Public verifiability of memory or activity by third parties → future
+- Cloud-hosted daimons (a daimon you don't run yourself) → future
+- Custodial wallet mode — v0.2's wallet primitive is strictly non-custodial
+- Non-EVM payment chains — v0.2/v0.3 support EVM (Base, Base Sepolia) only; SVM and Stellar reserved for v0.2.x+
+- NAT traversal / mobile endpoints — v0.3 assumes publicly addressable TCP endpoints; relay service is v0.3.x
+- Group encrypted channels (multi-party) — v0.3 is 1:1 only; MLS group channels are v0.3.x
 
 These are by design. v0.1 + v0.2 must stand on their own as useful for one user before any network effects are introduced.
 
@@ -795,3 +815,408 @@ Both rows are chained + Ed25519-signed under the principal's identity key, walka
 ---
 
 **Next milestone for v0.2**: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (phase 40.4 in the project's session log). Until then, v0.2.0-dev.2 is published on PyPI under `--pre` and npm under `@dev` for early adopters who want to experiment against local mock servers. v0.2.0 GA cuts once 40.4 verifies live settlement end-to-end.
+
+---
+
+## 16. Federation (v0.3)
+
+v0.3 ships agent-to-agent federation: authenticated, encrypted channels between daimons with a progressively richer set of peer-served verbs. The entire federation surface is opt-in and backward-compatible — a daimon with no active listener is still a fully functional v0.1 + v0.2 daimon.
+
+### 16.1 Design principles
+
+**Cryptographic continuity.** A daimon's Ed25519 keypair (generated at `daimon init`, stored in the identity keystore) is the static key for BOTH the audit chain AND the Noise IK transport handshake. No separate "network identity" exists. The DID encodes the pubkey; the pubkey IS the transport credential. This is enforced in the reference implementation via `identity.MultibaseFragment(did)` → X25519 conversion for the Noise handshake, making the DID the single source of truth for all cryptographic claims.
+
+**No new trust roots.** Discovery and authentication work entirely with user-owned primitives — manual (DID + endpoint sharing out-of-band), address book (explicit TOFU pinning), or did:web (user-controlled domain). No central directory, no third-party CA.
+
+**Single-player utility preserved.** Every v0.3 verb fails gracefully or is simply absent on a daimon that hasn't been configured to listen. The federation surface is purely additive.
+
+**Wire surface = extend the existing JSON-RPC.** All client-facing federation verbs (`daimon.peer.*`, `daimon.federation.*`) travel over the same JSON-RPC 2.0 Unix-socket protocol as v0.1 + v0.2 verbs. The daimon-to-daimon link uses the Noise-encrypted TCP channel internally; clients never see or speak Noise.
+
+### 16.2 Transport: Noise IK over TCP
+
+**Protocol**: [Noise IK](https://noiseprotocol.org/noise.html#interactive-handshake-patterns-fundamental) over plain TCP. Noise IK provides:
+- Mutual authentication (both sides prove ownership of their static key)
+- Forward secrecy (ephemeral session key generated per handshake)
+- Initiator-authenticates-responder in round one (the initiator already knows the responder's DID → public key)
+
+**Static keys**: the daimon's Ed25519 private key is converted to X25519 via the Bernstein key conversion (`Ed25519PrivateToX25519`). The peer's Ed25519 public key is converted similarly (`Ed25519PublicToX25519`). The conversion is deterministic and reversible at the public-key level — the same DID always produces the same X25519 key.
+
+**Framing**: each JSON-RPC 2.0 message is sent as a length-prefixed frame over the Noise `*transport.Conn`. Frame format: `uint32 big-endian length || JSON payload`. The length field covers only the JSON payload bytes (not itself). Maximum frame size is 16 MiB; implementations MUST reject frames exceeding this limit.
+
+**Handshake**:
+1. Initiator (dialing daimon) derives the responder's X25519 pubkey from the peer's DID.
+2. Initiator sends Noise IK `-> e, es, s, ss` (first handshake message).
+3. Responder sends `<- e, ee, se` (second handshake message).
+4. Both sides enter transport mode; subsequent frames are encrypted with ChaCha20-Poly1305.
+
+**Listener**: started via `daimon.peer.listen`. The listener loop accepts inbound TCP connections, performs the Noise IK responder handshake, and dispatches inbound peer.* verb calls via `dispatchPeer`. The listener is idempotent — calling `daimon.peer.listen` while already listening returns the existing bound address.
+
+**v0.3 constraints**:
+- TCP only (no QUIC in v0.3; QUIC stream multiplexing is v0.3.x).
+- IPv4 and IPv6 are both supported via `net.Listen("tcp", addr)`.
+- NAT traversal is not provided. The listening daimon MUST be reachable at the advertised endpoint address. Daimons behind residential NAT or firewall that block inbound TCP cannot be dialed in.
+
+### 16.3 Channel lifecycle
+
+A channel is an established Noise IK TCP connection between two daimons, identified by a UUID `channel_id` assigned at dial time. The dialing daimon holds the channel in memory for the lifetime of the daemon process (or until `close` is called).
+
+#### 16.3.1 `daimon.peer.listen` — start inbound listener
+
+```
+daimon.peer.listen({
+  addr?: string          // TCP bind address, e.g. "0.0.0.0:9999" or "127.0.0.1:0"
+                         // Scheme prefix "tcp://" is accepted and stripped.
+                         // Default: "0.0.0.0:0" (OS-assigned ephemeral port).
+}) → {
+  endpoint: string       // Actual bound address, e.g. "tcp://0.0.0.0:54321"
+}
+```
+
+Authorization: post-unlock only (the Noise static key is the daimon's identity private key). Idempotent: a second call while already listening returns the existing `endpoint` unchanged.
+
+Audit row: `peer.listen.started { endpoint }`.
+
+After this call, `daimon.federation.config` reflects the bound address in `public_endpoint`.
+
+#### 16.3.2 `daimon.peer.dial` — open outbound channel
+
+```
+daimon.peer.dial({
+  did: string,           // Remote daimon's DID. did:key only in v0.3.
+  endpoint: string       // Remote TCP address, e.g. "tcp://host:port".
+                         // Required: no automatic DID resolution in v0.3.
+}) → {
+  channel_id: string,    // UUID for subsequent peer.* calls
+  peer_did: string,
+  opened_at: string      // RFC3339
+}
+```
+
+On dial, the reference implementation:
+1. Extracts the peer's Ed25519 pubkey from the `did:key` DID fragment.
+2. Converts to X25519 for the Noise IK initiator role.
+3. Performs the Noise IK handshake over TCP.
+4. Auto-populates the address book with the peer as `first_seen` if not already present; records a TOFU `transport_pubkey_multibase` observation.
+
+Audit row: `peer.channel.opened { channel_id, peer_did, endpoint, tofu_warn? }`.
+
+Error codes: `CodePeerUnreachable (-32010)` on network/handshake failure; `CodeInvalidParams (-32602)` for an unresolvable DID.
+
+#### 16.3.3 `daimon.peer.close` — close a channel
+
+```
+daimon.peer.close({
+  channel_id: string
+}) → {}
+```
+
+Closes the underlying TCP connection and removes the channel from the in-memory map. Subsequent calls with the same `channel_id` return `CodeNotFound (-32601)`.
+
+Audit row: `peer.channel.closed { channel_id, peer_did }`.
+
+#### 16.3.4 `daimon.peer.list` — enumerate open channels
+
+```
+daimon.peer.list() → {
+  channels: [
+    { channel_id, peer_did, opened_at: RFC3339 }
+  ]
+}
+```
+
+Read-only. Returns an empty array if no channels are open.
+
+#### 16.3.5 `daimon.peer.invoke` — invoke any peer verb
+
+Low-level passthrough: serialize a JSON-RPC 2.0 request, send it over an open channel, and return the peer's raw JSON result.
+
+```
+daimon.peer.invoke({
+  channel_id: string,
+  method: string,        // e.g. "peer.echo", "peer.ask", "peer.pay.required"
+  params?: object        // forwarded verbatim to the peer
+}) → {
+  result: any            // raw JSON result from the peer, preserved verbatim
+}
+```
+
+If the peer returns a JSON-RPC error, `daimon.peer.invoke` propagates it as `CodeInternalError (-32603)` with the peer's error message embedded.
+
+If the underlying TCP connection is broken during send or receive, the channel is automatically removed from the in-memory map and `CodePeerUnreachable (-32010)` is returned.
+
+Audit row: `peer.invoke.sent { channel_id, peer_did, method }`.
+
+### 16.4 Address book and trust model
+
+The address book is a persistent, encrypted file at `$DAIMON_HOME/address_book.json.enc`, keyed under the identity's HKDF subkey (same pattern as `memory.db` row keys). It records every peer the daimon has talked to or the user has explicitly configured.
+
+#### 16.4.1 Entry schema (wire format)
+
+```json
+{
+  "did": "did:key:z6Mk...",
+  "pet_name": "alice",           // optional human label
+  "status": "first_seen",        // "first_seen" | "pinned" | "blocked"
+  "approved_verbs": ["peer.ask", "peer.pay.required"],
+  "transport_pubkey_multibase": "z6Mk...",  // TOFU-pinned X25519 pubkey (multibase)
+  "first_seen": "2026-05-21T00:00:00Z",
+  "last_seen": "2026-05-21T00:00:00Z"
+}
+```
+
+#### 16.4.2 Status lifecycle
+
+| Status | Meaning | Inbound request handling |
+|---|---|---|
+| `first_seen` | Auto-added on first dial; not yet explicitly trusted | Allowed only for universally-authorized verbs (peer.echo, peer.pay.required) |
+| `pinned` | User has explicitly approved this peer's DID | Allowed for the verbs listed in `approved_verbs` |
+| `blocked` | User has explicitly refused this peer's DID | All inbound requests rejected with `CodePeerUnauthorized (-32013)` |
+
+#### 16.4.3 TOFU pubkey pinning
+
+When a dial succeeds, the peer's X25519 pubkey (as a `z6Mk...` multibase string) is recorded in `transport_pubkey_multibase`. On subsequent dials to the same DID, if the observed pubkey differs, a TOFU warning is included in the `peer.channel.opened` audit row. The connection is NOT aborted (the Noise handshake already authenticated the actual key), but the mismatch is flagged for the user. Full enforcement (abort on TOFU mismatch) is v0.3.x.
+
+#### 16.4.4 RPC verbs
+
+**`daimon.peer.address_book.list`**
+```
+daimon.peer.address_book.list() → {
+  entries: [addressBookEntryWire, ...]
+}
+```
+
+**`daimon.peer.address_book.add`**
+```
+daimon.peer.address_book.add({
+  did: string,                         // required
+  pet_name?: string,
+  transport_pubkey_multibase?: string  // optional TOFU seed
+}) → addressBookEntryWire
+```
+Adds the peer at status `first_seen`. Returns `CodeAlreadyExists` if the DID is already present.
+
+Audit row: `peer.address_book.added { did, pet_name? }`.
+
+**`daimon.peer.address_book.pin`**
+```
+daimon.peer.address_book.pin({
+  did: string,       // must already be in the address book
+  verbs: string[]    // e.g. ["peer.ask", "peer.pay.required"]
+}) → addressBookEntryWire
+```
+Promotes the entry to `pinned` and sets `approved_verbs`. The DID must already exist in the book; use `add` first if not.
+
+Audit row: `peer.address_book.pinned { did, verbs }`.
+
+**`daimon.peer.address_book.block`**
+```
+daimon.peer.address_book.block({
+  did: string
+}) → addressBookEntryWire
+```
+Sets status to `blocked`. All inbound requests from this DID will be rejected. The DID must already be in the book.
+
+Audit row: `peer.address_book.blocked { did }`.
+
+**`daimon.peer.address_book.unblock`**
+```
+daimon.peer.address_book.unblock({
+  did: string
+}) → addressBookEntryWire
+```
+Sets status back to `first_seen` (removes the block). The DID must already be in the book.
+
+Audit row: `peer.address_book.unblocked { did }`.
+
+**`daimon.peer.address_book.remove`**
+```
+daimon.peer.address_book.remove({
+  did: string
+}) → {}
+```
+Removes the entry entirely. Subsequent `add` calls for the same DID start fresh.
+
+Audit row: `peer.address_book.removed { did }`.
+
+### 16.5 Served peer verbs
+
+Peer verbs are served on the **inbound** side: when a remote daimon dials in and sends a JSON-RPC 2.0 request over the Noise channel, the serving daimon's `dispatchPeer` router handles it.
+
+Authorization model:
+- **Universally authorized** (`peer.echo`, `peer.pay.required`): served to any peer that successfully completes the Noise IK handshake, regardless of address book status.
+- **Address-book gated** (`peer.ask`): the calling peer's DID MUST be in the address book with status `pinned` AND the verb MUST appear in `approved_verbs`. A missing or `first_seen` peer, or a pinned peer without the verb, receives `CodePeerUnauthorized (-32013)`.
+- **Blocked peers**: any inbound request from a `blocked` DID receives `CodePeerUnauthorized (-32013)` before reaching the verb handler.
+
+The serving daimon resolves the calling peer's DID by extracting its Ed25519 pubkey from the Noise handshake static key via reverse X25519→Ed25519 lookup (not implemented in v0.3 — the calling peer's X25519 key is recorded in audit rows; full DID resolution from X25519 is v0.3.x; the authorization check uses a direct X25519 pubkey comparison against address book entries).
+
+#### 16.5.1 `peer.echo`
+
+Connectivity test verb. Reflects the caller's message back with the serving daimon's DID attached. Universally authorized.
+
+Wire (sent by calling peer → serving daimon):
+```json
+{ "jsonrpc": "2.0", "method": "peer.echo", "params": { "message": "hello" }, "id": "..." }
+```
+
+Response:
+```json
+{ "jsonrpc": "2.0", "result": { "message": "hello", "from_did": "did:key:z6Mk..." }, "id": "..." }
+```
+
+Audit row on serving side: `peer.invoke.received { method: "peer.echo", peer_x25519: "..." }`.
+
+#### 16.5.2 `peer.ask`
+
+Cross-daimon LLM invocation. The calling peer asks the serving daimon to invoke one of its configured LLM providers. Authorization: address-book `pinned` + `peer.ask` in `approved_verbs`.
+
+Wire (sent by calling peer):
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "peer.ask",
+  "params": {
+    "provider": "claude",
+    "request": {
+      "messages": [{ "role": "user", "content": "Write a haiku." }],
+      "model": "claude-opus-4-5",
+      "max_tokens": 256
+    }
+  },
+  "id": "..."
+}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "response": {
+      "content": "...",
+      "model": "claude-opus-4-5",
+      "stop_reason": "end_turn",
+      "usage": { "input_tokens": 14, "output_tokens": 23 }
+    }
+  },
+  "id": "..."
+}
+```
+
+`inject_context` is NOT supported in `peer.ask` v0.3 — the calling peer builds its own retrieval context before asking.
+
+Audit row on serving side: `peer.invoke.served { peer_did, peer_x25519, provider, model, input_tokens, output_tokens, stop_reason, duration_ms }`.
+
+#### 16.5.3 `peer.pay.required`
+
+Price discovery verb: returns the x402 `PaymentRequirements` for a named service. Universally authorized (price discovery must be available before payment can be set up — requiring authorization would be circular).
+
+Wire (sent by calling peer):
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "peer.pay.required",
+  "params": { "service": "peer.ask" },
+  "id": "..."
+}
+```
+
+Response:
+```json
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "requirements": [{
+      "scheme": "exact",
+      "network": "base-sepolia",
+      "max_amount_required": "1000000",
+      "resource": "peer.ask",
+      "description": "1.00 USDC payment required to invoke peer.ask on this daimon (Base Sepolia testnet)",
+      "pay_to": "0xABCD...",
+      "max_timeout_seconds": 300,
+      "asset": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    }]
+  },
+  "id": "..."
+}
+```
+
+In v0.3: only `"peer.ask"` has payment requirements. All other services return `CodeInvalidParams`. The `pay_to` address is the serving daimon's Base Sepolia wallet address (derived from its BIP-32 HD wallet, chain `evm:base-sepolia`). If the serving daimon has no EVM wallet, returns `CodePeerProtocolUnsupported (-32012)`.
+
+Audit row on serving side: `peer.payment.invoiced { service, peer_x25519, pay_to, amount, network, asset }`.
+
+### 16.6 Federation config
+
+`daimon.federation.config` lets a client introspect the local daimon's federation advertisement — what it can be called as, what it serves, where to reach it.
+
+```
+daimon.federation.config() → {
+  did: string,                          // this daimon's did:key DID
+  transport_pubkey_multibase: string,   // Ed25519 pubkey (z6Mk...), identical to DID fragment
+  did_methods: string[],                // DID methods this daimon resolves; ["did:key"] in v0.3
+  protocols: string[],                  // peer.* verbs served: ["peer.echo","peer.ask","peer.pay.required"]
+  public_endpoint?: string,             // "tcp://host:port" if peer.listen is running; omitted otherwise
+  federation_version: string            // "v0.3-draft" until GA
+}
+```
+
+The `transport_pubkey_multibase` field is always identical to the fragment of `did` after `"did:key:"`. They encode the same key. Both are provided for clients that pre-fetch the pubkey for Noise handshake setup without needing to parse the DID themselves.
+
+No audit row (read-only, non-mutating).
+
+### 16.7 Activity log kinds (v0.3)
+
+New activity kinds added in v0.3. All rows follow the same hash-chain + Ed25519-signature format as v0.1/v0.2 (§8).
+
+| Kind | Written by | When | Payload fields |
+|---|---|---|---|
+| `peer.listen.started` | local daemon | `daimon.peer.listen` succeeds | `endpoint` |
+| `peer.channel.opened` | dialing daemon | `daimon.peer.dial` succeeds | `channel_id`, `peer_did`, `endpoint`, `tofu_warn?` |
+| `peer.channel.closed` | local daemon | `daimon.peer.close` | `channel_id`, `peer_did` |
+| `peer.invoke.sent` | dialing daemon | `daimon.peer.invoke` returns result | `channel_id`, `peer_did`, `method` |
+| `peer.invoke.received` | serving daemon | any inbound peer.* verb dispatch | `method`, `peer_x25519` |
+| `peer.invoke.served` | serving daemon | `peer.ask` completes successfully | `peer_did`, `peer_x25519`, `provider`, `model`, `input_tokens`, `output_tokens`, `stop_reason`, `duration_ms` |
+| `peer.payment.invoiced` | serving daemon | `peer.pay.required` call received | `service`, `peer_x25519`, `pay_to`, `amount`, `network`, `asset` |
+| `peer.payment.received` | serving daemon | inbound x402 settlement confirmed | reserved for phase 40.4 |
+| `peer.address_book.added` | local daemon | `address_book.add` | `did`, `pet_name?` |
+| `peer.address_book.pinned` | local daemon | `address_book.pin` | `did`, `verbs` |
+| `peer.address_book.blocked` | local daemon | `address_book.block` | `did` |
+| `peer.address_book.unblocked` | local daemon | `address_book.unblock` | `did` |
+| `peer.address_book.removed` | local daemon | `address_book.remove` | `did` |
+
+Both the dialing and serving daimon independently write their own audit rows. The two audit chains collectively provide a full log of every cross-daimon interaction without either side depending on the other's audit data.
+
+### 16.8 Typed error codes (v0.3)
+
+New JSON-RPC error codes introduced in v0.3, extending the v0.1/v0.2 table in §6.2:
+
+| Code | Constant | Meaning |
+|---|---|---|
+| `-32010` | `CodePeerUnreachable` | Could not establish a channel — DNS failure, TCP refused, Noise handshake failure, or broken connection during an active call. |
+| `-32011` | `CodePeerAuthFailed` | Noise handshake completed but the peer's static X25519 key did not match the expected DID. Reserved; not yet returned in v0.3 (TOFU mismatch is a warning, not an abort). |
+| `-32012` | `CodePeerProtocolUnsupported` | The peer (or the local daimon, for wallet-gated verbs) does not support the requested method or lacks the prerequisite configuration (e.g., no EVM wallet for `peer.pay.required`). |
+| `-32013` | `CodePeerUnauthorized` | The address book entry for the peer DID does not authorize the requested verb, OR the peer is `blocked`. |
+
+### 16.9 v0.3 constraints and non-goals
+
+The following are explicitly deferred to v0.3.x or later:
+
+- **NAT traversal**: the `peer.listen` endpoint must be publicly reachable. A relay service that lets NAT'd daimons receive inbound connections is v0.3.x.
+- **did:web resolution**: the DID document + endpoint advertisement mechanism. v0.3 uses only `did:key` (offline, manual endpoint sharing). did:web resolution (fetch `https://domain/.well-known/did.json`, verify endpoint signature) is v0.3.x.
+- **QUIC transport**: TCP is the v0.3 transport. QUIC (stream multiplexing, connection migration, 0-RTT) is v0.3.x.
+- **Full TOFU enforcement**: a TOFU mismatch (pubkey changed since first sight) is recorded as a warning but does not abort the dial in v0.3. Hard abort is v0.3.x.
+- **`peer.ask` pay-per-call gating**: the address book authorizes `peer.ask` per-DID with no economic throttle. x402 gating of `peer.ask` (where the calling peer pays per invocation) is v0.3.x.
+- **On-chain inbound settlement**: `peer.pay.required` surfaces price requirements; settlement proof is phase 40.4 (shared with v0.2 GA).
+- **Group channels / MLS**: v0.3 is 1:1 daimon-to-daimon only.
+- **Multi-tenant daimons**: one principal per daemon process, same as v0.1.
+- **Streaming peer.ask responses**: `peer.ask` collects the full LLM response before framing. Streaming is v0.3.x.
+
+### 16.10 v0.3 GA criteria
+
+v0.3.0 GA is gated on:
+
+1. Phases 30–38 all green (shipped 2026-05-21 ✅).
+2. Cross-daimon smoke in CI — two daemon processes on different ephemeral ports, `peer.dial` → `peer.echo` → `peer.ask` in the `x402-smoke` shard (planned).
+3. Real-world dogfood: two daimons on separate machines communicating for one full week without manual intervention.
+4. SPEC §16 review and sign-off (this section).
+
+Current status: **phases 30–38 shipped, CI cross-daimon smoke planned, dogfood pending.**

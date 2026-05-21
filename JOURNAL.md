@@ -4088,3 +4088,35 @@ machine B:  daimon unlock
             daimon peer dial --did <A_DID> --endpoint tcp://A_ip:9999
             daimon peer echo <channel_id> hello
 ```
+
+---
+
+## 2026-05-21 — Session 83: SPEC §16 v0.3 federation formal specification
+
+**Trigger:** "okay, start next dev" after phase 38 shipped. v0.3 implementation arc (phases 30–38) was feature-complete; the gap was the formal protocol specification — SPEC.md still described itself as "v0.2 (Draft)" with federation listed as "out of scope."
+
+**What ships:**
+
+SPEC.md updated 797 → 1,222 lines (+425 lines). Header bumped to "v0.3 (Draft)".
+
+**New content:**
+
+- **§1.3 v0.3 scope** — formal statement of the four federation primitives shipped: Noise IK transport, channel lifecycle, address book, and the three served verbs. Explicitly calls out single-player utility preservation and the additive/opt-in nature of the surface.
+- **§1 out-of-scope update** — struck through the three items now shipped (federation, DID resolution, payment recipient); updated the deferred list with accurate v0.3 constraints (NAT traversal, did:web, QUIC, MLS, full TOFU enforcement).
+- **§2 Terminology** — four new terms: Peer, Channel, Address book, TOFU.
+- **§12 update** — title changed to "v0.1–v0.3 explicitly do NOT solve"; agent-to-agent and payment recipient marked as shipped; deferred items accurately updated.
+- **§16 Federation (v0.3)** — the main body, ten subsections:
+  - §16.1 Design principles (cryptographic continuity, no new trust roots, single-player preserved, JSON-RPC extension)
+  - §16.2 Transport (Noise IK over TCP, static key derivation, frame format, handshake flow, listener, v0.3 TCP-only constraint)
+  - §16.3 Channel lifecycle (§16.3.1–16.3.5: listen, dial, close, list, invoke — full wire shapes for all five verbs)
+  - §16.4 Address book and trust model (entry schema, status lifecycle table, TOFU pinning, all six RPC verbs with wire shapes)
+  - §16.5 Served peer verbs (authorization model, peer.echo wire, peer.ask wire, peer.pay.required wire — all three verbs fully specified)
+  - §16.6 Federation config (daimon.federation.config wire shape + field semantics)
+  - §16.7 Activity kinds table (13 new kinds with payload fields and "who writes" column)
+  - §16.8 Error codes (4 new codes: -32010–-32013, matching the shipped constants)
+  - §16.9 v0.3 constraints and non-goals (9 deferred items with v0.x target for each)
+  - §16.10 GA criteria (4 gates; phases 30–38 ✅, CI smoke + dogfood pending)
+
+**Design principle enforced:** every wire shape in §16 was verified against the actual shipped Go handler code (`internal/server/federation_handlers.go`, `internal/server/peer_channel_handlers.go`, `internal/server/address_book_handlers.go`). No spec/implementation drift introduced.
+
+**No code changes.** SPEC.md and CHECKPOINT.md/JOURNAL.md only.

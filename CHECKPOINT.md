@@ -3,7 +3,7 @@
 > **Read this first at conversation start.** Full chronological detail is in [JOURNAL.md](./JOURNAL.md).
 
 **Last updated:** 2026-05-21
-**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–35 shipped.
+**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**.
 
 ---
 
@@ -61,7 +61,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 |---|---|---|---|
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
-| v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
+| v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). **SPEC §16 written 2026-05-21.** Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
 | v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | not started |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
@@ -173,3 +173,4 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 80 | 2026-05-21 | **v0.3 phase 36**: SDK wrappers — `client.federation.*` + `client.peer.*` (dial/close/list/invoke/echo/pay_required + addressBook.*) in Python + TypeScript (+19 pytest, +20 vitest; 65 → 84 pytest, 65 → 85 vitest) |
 | 81 | 2026-05-21 | **v0.3 phase 37**: CLI peer + federation commands — `daimon federation config`, `daimon peer dial/close/list/echo/invoke/pay-required`, `daimon peer address-book list/add/pin/block/unblock/remove`. bash/zsh/fish completion updated. 513 Go tests still green. |
 | 82 | 2026-05-21 | **v0.3 phase 38**: `daimon.peer.listen` RPC + `daimon peer listen` CLI — starts inbound Noise IK TCP listener post-unlock. `KindPeerListenStarted` audit kind. +5 tests (federation_handlers_test.go). 518 Go total. |
+| 83 | 2026-05-21 | **SPEC §16 v0.3 federation** — formal protocol specification for all phases 30–38: transport (Noise IK/TCP), channel lifecycle, address book + trust model, served verbs (peer.echo / peer.ask / peer.pay.required), federation config wire format, 13 activity kinds, 4 error codes, v0.3 constraints + GA criteria. SPEC grows 797 → 1,222 lines. Version header bumped to v0.3 (Draft). |
