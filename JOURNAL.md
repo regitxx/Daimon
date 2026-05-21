@@ -4155,3 +4155,27 @@ Public API parameter names unchanged (`label`, `pubkeyMultibase`) — no breakin
 **Audit accounting discovered:** `peer.invoke.sent` is only written on success (error path returns before the row); `KindPeerInvokeReceived` is only written by `handlePeerEcho`, not by ask/pay.required handlers.
 
 +1 Go test (519 total, up from 518). Runs under `go test -race ./...` as part of CI shard 0. Two of the four §16.10 GA gates are now green: phases shipped ✅, cross-daimon CI smoke ✅.
+
+---
+
+## 2026-05-21 — Session 86: daimon unlock --peer-addr + design doc housekeeping
+
+**`daimon unlock --peer-addr`**
+
+Adds a `--peer-addr` flag to `daimon unlock` that auto-starts the inbound Noise IK TCP listener immediately after unlock. Before: two-step setup (unlock, then separate `daimon peer listen`). After: single command.
+
+```
+daimon unlock --peer-addr tcp://0.0.0.0:9999
+→ Unlocked.
+→   DID: did:key:z6Mk...
+→   Daemon: /path/to/daimon.sock
+→   Peer listener: tcp://0.0.0.0:9999
+```
+
+Non-fatal design: if `PeerListen` fails (e.g. port already bound), a warning is printed but the identity is still unlocked. This avoids the foot-gun of "my daimon failed to unlock because the port was busy."
+
+Impl: after the existing unlock RPC succeeds, `daemonCall("daimon.peer.listen", {addr: *peerAddr}, &result)` fires a second RPC on a fresh connection. The deferred `conn.Close()` on the unlock connection runs after. Fish completion updated with `--peer-addr` for the `unlock` subcommand.
+
+**`design/v0.3-federation.md` — marked IMPLEMENTED**
+
+The DRAFT status header was misleading — "Read with skepticism; reply with edits" on a doc that was fully implemented. Updated to IMPLEMENTED, pointing to SPEC.md §16 as the authoritative reference. Original DRAFT text struck-through (not deleted, preserved as historical rationale).
