@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
+	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/wallet"
 )
 
@@ -446,5 +449,360 @@ func TestPeerListen_RequiresIdentity(t *testing.T) {
 	_, listenErr := srv.PeerListen("127.0.0.1:0")
 	if listenErr == nil {
 		t.Fatal("PeerListen should fail without an identity")
+	}
+}
+
+// =============================================================================
+// Phase 34: peer.ask tests
+// =============================================================================
+
+// peerAskFixture extends peerFixture with an address book and a mock provider
+// registry. B-side daemons that serve peer.ask need both.
+type peerAskFixture struct {
+	*peerFixture
+	abook *addressbook.Book
+	mock  *mockProvider
+}
+
+// newPeerAskFixture builds a fixture with:
+//   - identity + memory + activity log (from newFixture)
+//   - address book (random encryption key, in-memory)
+//   - mock provider registry (provider name "mock", model "mock-1")
+//   - TCP peer listener on a random port
+func newPeerAskFixture(t *testing.T) *peerAskFixture {
+	t.Helper()
+	id, err := identity.Generate()
+	if err != nil {
+		t.Fatalf("identity.Generate: %v", err)
+	}
+	dir := t.TempDir()
+	store, err := memory.Open(filepath.Join(dir, "memory.db"), id, memory.NullEmbedder{})
+	if err != nil {
+		t.Fatalf("memory.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	alog, err := activity.Open(filepath.Join(dir, "activity.log"), id)
+	if err != nil {
+		t.Fatalf("activity.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = alog.Close() })
+
+	abKey := make([]byte, 32)
+	_, _ = rand.Read(abKey)
+	ab, err := addressbook.Open(filepath.Join(dir, "address_book.enc"), abKey)
+	if err != nil {
+		t.Fatalf("addressbook.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = ab.Close() })
+
+	reg := provider.NewRegistry()
+	mock := &mockProvider{
+		name:   "mock",
+		models: []provider.Model{{ID: "mock-1", DisplayName: "Mock Provider"}},
+	}
+	reg.Register(mock)
+
+	srv, err := New(Options{
+		Identity:    id,
+		Store:       store,
+		Log:         alog,
+		AddressBook: ab,
+		Providers:   reg,
+	})
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+
+	sockDir, err := os.MkdirTemp("", "dmn")
+	if err != nil {
+		t.Fatalf("mkdir socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	sockPath := filepath.Join(sockDir, "s.sock")
+	if err := srv.Listen(sockPath); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		cancel()
+		_ = srv.Close()
+	})
+	go func() { _ = srv.Serve(ctx) }()
+	waitForSocket(t, sockPath)
+
+	f := &fixture{t: t, id: id, mem: store, alog: alog, srv: srv, addr: sockPath}
+	peerAddr, err := srv.PeerListen("127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("PeerListen: %v", err)
+	}
+
+	return &peerAskFixture{
+		peerFixture: &peerFixture{fixture: f, peerAddr: peerAddr},
+		abook:       ab,
+		mock:        mock,
+	}
+}
+
+// --- peer.ask: happy path -----------------------------------------------------
+
+// TestPeerAsk_AuthorizedPeer is the cross-daimon smoke for phase 34:
+//   - A dials B (B has address book + mock provider + PeerListen)
+//   - B's operator pins A with peer.ask in B's address book
+//   - A invokes peer.ask on B via daimon.peer.invoke
+//   - B calls its mock provider and returns the response to A
+//   - A's outer result wraps B's response
+//   - B's audit log has peer.invoke.served row
+func TestPeerAsk_AuthorizedPeer(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerAskFixture(t)
+
+	// A dials B: this auto-adds B to A's address book (best-effort, no book on A).
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	channelID := dial.ChannelID
+
+	// B's operator pins A with peer.ask authorization in B's address book.
+	// We do this directly on the book (simulates `daimon.peer.address_book.pin`).
+	// A's DID + its TransportPubKeyMultibase (from the did:key fragment).
+	aMultibase := identity.MultibaseFragment(a.id.DID())
+	if err := b.abook.Add(a.id.DID(), "Daemon A", aMultibase); err != nil && err.Error() != "address book: entry already exists" {
+		t.Fatalf("abook.Add(A): %v", err)
+	}
+	if err := b.abook.Pin(a.id.DID(), []string{"peer.ask"}); err != nil {
+		t.Fatalf("abook.Pin(A, peer.ask): %v", err)
+	}
+	if err := b.abook.Save(); err != nil {
+		t.Fatalf("abook.Save: %v", err)
+	}
+
+	// Set a canned response on B's mock provider.
+	b.mock.resp = &provider.Response{
+		Model:      "mock-1",
+		Content:    "four",
+		StopReason: provider.StopReasonEndTurn,
+		Usage:      provider.Usage{InputTokens: 10, OutputTokens: 1},
+	}
+
+	// A invokes peer.ask on B.
+	invokeResp := a.callInvoke(t, channelID, "peer.ask", map[string]any{
+		"provider": "mock",
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "what is 2+2?"}},
+		},
+	})
+	if invokeResp.Error != nil {
+		t.Fatalf("peer.ask invoke error: %+v", invokeResp.Error)
+	}
+
+	// A's result is the peerInvokeResult envelope wrapping B's peerAskResult.
+	var outer peerInvokeResult
+	resultAs(t, invokeResp, &outer)
+
+	var ask peerAskResult
+	if err := json.Unmarshal(outer.Result, &ask); err != nil {
+		t.Fatalf("unmarshal peerAskResult: %v (raw=%s)", err, outer.Result)
+	}
+	if ask.Response == nil {
+		t.Fatal("peerAskResult.Response is nil")
+	}
+	if ask.Response.Content != "four" {
+		t.Errorf("content: got %q want %q", ask.Response.Content, "four")
+	}
+	if ask.Response.Model != "mock-1" {
+		t.Errorf("model: got %q want %q", ask.Response.Model, "mock-1")
+	}
+
+	// Verify the request that reached B's mock provider.
+	if len(b.mock.lastReq.Messages) != 1 {
+		t.Fatalf("mock received %d messages, want 1", len(b.mock.lastReq.Messages))
+	}
+	if b.mock.lastReq.Messages[0].Content != "what is 2+2?" {
+		t.Errorf("mock message content: got %q", b.mock.lastReq.Messages[0].Content)
+	}
+
+	// B must audit peer.invoke.served (background goroutine — poll).
+	queryAudit(t, b.alog, activity.KindPeerInvokeServed, 1)
+}
+
+// --- peer.ask: authorization failures ----------------------------------------
+
+// TestPeerAsk_NoAddressBook verifies that a daemon with no address book
+// returns CodePeerProtocolUnsupported for peer.ask.
+func TestPeerAsk_NoAddressBook(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerFixture(t) // no address book
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.ask", map[string]any{
+		"provider": "mock",
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "ping"}},
+		},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error when server has no address book")
+	}
+	// peer.ask is not supported (address book not configured).
+	if resp.Error.Code != CodePeerProtocolUnsupported && resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodePeerProtocolUnsupported (%d) or CodeInternalError (%d)",
+			resp.Error.Code, CodePeerProtocolUnsupported, CodeInternalError)
+	}
+}
+
+// TestPeerAsk_PeerNotInAddressBook verifies that a peer who is not in B's
+// address book receives CodePeerUnauthorized.
+func TestPeerAsk_PeerNotInAddressBook(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerAskFixture(t) // has address book, but A is not in it
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	resp := a.callInvoke(t, dial.ChannelID, "peer.ask", map[string]any{
+		"provider": "mock",
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "ping"}},
+		},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error when peer not in address book")
+	}
+	if resp.Error.Code != CodeInternalError {
+		// The error propagates through peerInvokeResult as CodeInternalError
+		// (peer returned error → we wrap it).
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// TestPeerAsk_PeerInBookButNotAuthorized verifies CodePeerUnauthorized when
+// the peer IS in the address book but "peer.ask" is not in ApprovedVerbs.
+func TestPeerAsk_PeerInBookButNotAuthorized(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerAskFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+
+	// Add A to B's book but only authorize peer.echo — NOT peer.ask.
+	aMultibase := identity.MultibaseFragment(a.id.DID())
+	_ = b.abook.Add(a.id.DID(), "", aMultibase)
+	_ = b.abook.Pin(a.id.DID(), []string{"peer.echo"})
+	_ = b.abook.Save()
+
+	resp := a.callInvoke(t, dial.ChannelID, "peer.ask", map[string]any{
+		"provider": "mock",
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "ping"}},
+		},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error when peer.ask not in ApprovedVerbs")
+	}
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// --- peer.ask: param validation ----------------------------------------------
+
+// TestPeerAsk_MissingProvider verifies CodeInvalidParams when provider is omitted.
+func TestPeerAsk_MissingProvider(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerAskFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+	aMultibase := identity.MultibaseFragment(a.id.DID())
+	_ = b.abook.Add(a.id.DID(), "", aMultibase)
+	_ = b.abook.Pin(a.id.DID(), []string{"peer.ask"})
+	_ = b.abook.Save()
+
+	resp := a.callInvoke(t, dial.ChannelID, "peer.ask", map[string]any{
+		"request": map[string]any{
+			"model":    "mock-1",
+			"messages": []map[string]any{{"role": "user", "content": "ping"}},
+		},
+	})
+	if resp.Error == nil {
+		t.Fatal("expected error for missing provider")
+	}
+	// Error propagates as CodeInternalError (peer's error wrapped by handlePeerInvoke).
+	if resp.Error.Code != CodeInternalError {
+		t.Errorf("code: got %d want CodeInternalError (%d)", resp.Error.Code, CodeInternalError)
+	}
+}
+
+// --- address book auto-populate on dial -------------------------------------
+
+// TestPeerDial_AutoPopulatesAddressBook verifies that a successful dial
+// adds the peer to the dialing daimon's address book as FirstSeen.
+func TestPeerDial_AutoPopulatesAddressBook(t *testing.T) {
+	a := newPeerAskFixture(t) // A has an address book
+	b := newPeerFixture(t)
+
+	// Before dial: A's book is empty.
+	if n := a.abook.Len(); n != 0 {
+		t.Fatalf("expected empty book before dial, got %d entries", n)
+	}
+
+	// A dials B.
+	a.callDial(t, b.id.DID(), b.peerAddr)
+
+	// After dial: B's DID should be in A's book as FirstSeen.
+	entry, ok := a.abook.Lookup(b.id.DID())
+	if !ok {
+		t.Fatal("expected B's DID in A's address book after dial")
+	}
+	if entry.Status != addressbook.FirstSeen {
+		t.Errorf("entry status: got %v want FirstSeen", entry.Status)
+	}
+	want := identity.MultibaseFragment(b.id.DID())
+	if entry.TransportPubKeyMultibase != want {
+		t.Errorf("TransportPubKeyMultibase: got %q want %q", entry.TransportPubKeyMultibase, want)
+	}
+}
+
+// TestPeerDial_SecondDialTouchesExistingEntry verifies that a second dial to
+// the same peer updates LastSeen without error (Touch idempotent on same key).
+func TestPeerDial_SecondDialTouchesExistingEntry(t *testing.T) {
+	a := newPeerAskFixture(t)
+	b := newPeerFixture(t)
+
+	a.callDial(t, b.id.DID(), b.peerAddr)
+	first, _ := a.abook.Lookup(b.id.DID())
+	firstSeen := first.LastSeen
+
+	// Brief sleep to ensure LastSeen changes (nanosecond precision).
+	time.Sleep(2 * time.Millisecond)
+	a.callDial(t, b.id.DID(), b.peerAddr)
+
+	second, ok := a.abook.Lookup(b.id.DID())
+	if !ok {
+		t.Fatal("entry disappeared after second dial")
+	}
+	if second.LastSeen.Before(firstSeen) {
+		t.Errorf("LastSeen went backwards: first=%v second=%v", firstSeen, second.LastSeen)
+	}
+}
+
+// --- federation config: peer.ask in protocols --------------------------------
+
+func TestFederationConfig_IncludesPeerAsk(t *testing.T) {
+	f := newPeerFixture(t)
+	resp := f.call(t, "daimon.federation.config", nil)
+	if resp.Error != nil {
+		t.Fatalf("federation.config error: %+v", resp.Error)
+	}
+	var cfg federationConfigResult
+	resultAs(t, resp, &cfg)
+
+	found := false
+	for _, p := range cfg.Protocols {
+		if p == "peer.ask" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("peer.ask not in protocols: %v", cfg.Protocols)
 	}
 }

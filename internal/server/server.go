@@ -576,6 +576,7 @@ func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
 
 	switch req.Method {
 	case "peer.echo":
+		// peer.echo is universally available — benign verb, no resource cost.
 		result, rpcErr := s.handlePeerEcho(conn, req.Params)
 		if req.IsNotification() {
 			return nil
@@ -584,12 +585,83 @@ func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
 			return errorResponse(req.ID, rpcErr)
 		}
 		return successResponse(req.ID, result)
+
+	case "peer.ask":
+		// peer.ask has economic implications (consumes the serving daimon's
+		// provider API credits). Requires an explicit address-book entry with
+		// "peer.ask" in ApprovedVerbs. When the address book is not configured
+		// (abook == nil), the verb is unavailable rather than silently-open.
+		if s.abook == nil {
+			if req.IsNotification() {
+				return nil
+			}
+			return errorResponse(req.ID, newError(CodePeerProtocolUnsupported,
+				"peer.ask: address book not configured on this daimon"))
+		}
+		entry := s.lookupPeerByX25519(conn.PeerX25519)
+		if entry == nil {
+			if req.IsNotification() {
+				return nil
+			}
+			return errorResponse(req.ID, newError(CodePeerUnauthorized,
+				"peer.ask: peer not found in address book"))
+		}
+		if !entry.HasVerb("peer.ask") {
+			if req.IsNotification() {
+				return nil
+			}
+			return errorResponse(req.ID, newError(CodePeerUnauthorized,
+				"peer.ask: verb not authorized for this peer (use daimon.peer.address_book.pin)"))
+		}
+		result, rpcErr := s.handlePeerAsk(conn, entry, req.Params)
+		if req.IsNotification() {
+			return nil
+		}
+		if rpcErr != nil {
+			return errorResponse(req.ID, rpcErr)
+		}
+		return successResponse(req.ID, result)
+
 	default:
 		if req.IsNotification() {
 			return nil
 		}
 		return errorResponse(req.ID, newError(CodeMethodNotFound, "Method not found", req.Method))
 	}
+}
+
+// lookupPeerByX25519 searches the address book for an entry whose
+// TransportPubKeyMultibase decodes to an Ed25519 public key that maps
+// to the given X25519 static key via the birational Edwards→Montgomery map.
+//
+// Returns nil when the address book is not loaded, the peer is not found, or
+// any key decoding step fails. O(n) in address book size — acceptable because
+// address books are small and this is called only on authenticated inbound frames.
+func (s *Server) lookupPeerByX25519(peerPub [transport.X25519KeySize]byte) *addressbook.Entry {
+	if s.abook == nil {
+		return nil
+	}
+	entries := s.abook.List()
+	for _, e := range entries {
+		if e.TransportPubKeyMultibase == "" {
+			continue
+		}
+		// TransportPubKeyMultibase is the multibase fragment of a did:key DID,
+		// i.e. base58btc(0xed01 || ed25519_pubkey). Reconstruct the full DID
+		// to reuse the standard DecodeDIDKey path.
+		edPub, err := identity.PublicKeyFromDID("did:key:" + e.TransportPubKeyMultibase)
+		if err != nil {
+			continue
+		}
+		x25519Pub, err := transport.Ed25519PublicToX25519(edPub)
+		if err != nil {
+			continue
+		}
+		if x25519Pub == peerPub {
+			return e // already a defensive copy from List()
+		}
+	}
+	return nil
 }
 
 // newChannelID generates a fresh ULID string for a peer channel.

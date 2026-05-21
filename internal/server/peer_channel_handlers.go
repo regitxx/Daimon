@@ -9,7 +9,9 @@ import (
 	"time"
 
 	"github.com/regitxx/Daimon/internal/activity"
+	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
+	"github.com/regitxx/Daimon/internal/provider"
 	"github.com/regitxx/Daimon/internal/transport"
 )
 
@@ -107,12 +109,42 @@ func (s *Server) handlePeerDial(ctx context.Context, params json.RawMessage) (an
 	s.peerChannels[channelID] = ch
 	s.peerMu.Unlock()
 
-	// Audit: peer.channel.opened
-	s.auditPeer(ctx, activity.KindPeerChannelOpened, map[string]any{
-		"channel_id": channelID,
-		"peer_did":   p.DID,
-		"endpoint":   p.Endpoint,
-	})
+	// Auto-populate address book: record this peer as FirstSeen if not already
+	// present, then Touch to update LastSeen and enforce TOFU on subsequent dials.
+	// Best-effort: a nil or closed address book is silently skipped.
+	if s.abook != nil {
+		multibase := identity.MultibaseFragment(p.DID)
+		// Add the peer as FirstSeen; ignore ErrEntryExists (already in book).
+		_ = s.abook.Add(p.DID, "", multibase)
+		// Touch records the pubkey and updates LastSeen. A TOFU violation (pubkey
+		// changed since first sight) is surfaced as an audit warning but does NOT
+		// abort the dial — the Noise handshake already authenticated the key; this
+		// is a bookkeeping concern, not a security gate.
+		if err := s.abook.Touch(p.DID, multibase); err != nil {
+			s.auditPeer(ctx, activity.KindPeerChannelOpened, map[string]any{
+				"channel_id": channelID,
+				"peer_did":   p.DID,
+				"endpoint":   p.Endpoint,
+				"tofu_warn":  err.Error(),
+			})
+		} else {
+			s.auditPeer(ctx, activity.KindPeerChannelOpened, map[string]any{
+				"channel_id": channelID,
+				"peer_did":   p.DID,
+				"endpoint":   p.Endpoint,
+			})
+		}
+		if err := s.abook.Save(); err != nil && s.logger != nil {
+			s.logger.Printf("address book save after dial: %v", err)
+		}
+	} else {
+		// Audit: peer.channel.opened (no address book)
+		s.auditPeer(ctx, activity.KindPeerChannelOpened, map[string]any{
+			"channel_id": channelID,
+			"peer_did":   p.DID,
+			"endpoint":   p.Endpoint,
+		})
+	}
 
 	return peerDialResult{
 		ChannelID: channelID,
@@ -306,6 +338,80 @@ func (s *Server) handlePeerEcho(conn *transport.Conn, params json.RawMessage) (a
 		Message: p.Message,
 		FromDID: s.id.DID(),
 	}, nil
+}
+
+// --- peer.ask (inbound, served to authorized remote peers) ------------------
+
+// peerAskParams is the inbound wire shape for peer.ask.
+// The remote peer identifies which of OUR providers to call and passes a
+// normalized provider.Request. inject_context is deliberately NOT supported
+// in peer.ask v0.3 — the peer should build its own retrieval context before
+// asking us to invoke the LLM.
+type peerAskParams struct {
+	Provider string           `json:"provider"`
+	Request  provider.Request `json:"request"`
+}
+
+// peerAskResult carries the provider response back to the calling peer.
+type peerAskResult struct {
+	Response *provider.Response `json:"response"`
+}
+
+// handlePeerAsk serves the peer.ask verb from inbound authorized peer connections.
+// Called by dispatchPeer AFTER it has confirmed the peer is in the address book
+// with HasVerb("peer.ask") — this handler does NOT re-check authorization.
+//
+// entry is the address book entry for the calling peer (already looked up and
+// verified by the dispatcher); it is used for the audit payload.
+func (s *Server) handlePeerAsk(conn *transport.Conn, entry *addressbook.Entry, params json.RawMessage) (any, *RPCError) {
+	var p peerAskParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	if p.Provider == "" {
+		return nil, newError(CodeInvalidParams, "provider is required")
+	}
+	if len(p.Request.Messages) == 0 {
+		return nil, newError(CodeInvalidParams, "request.messages is required")
+	}
+	if s.providers == nil {
+		return nil, newError(CodeNotFound, "no provider registry on this daimon")
+	}
+	prov, err := s.providers.Get(p.Provider)
+	if err != nil {
+		return nil, newError(CodeNotFound, fmt.Sprintf("provider %q not found: %v", p.Provider, err))
+	}
+
+	start := time.Now()
+	resp, err := prov.Invoke(context.Background(), p.Request)
+	elapsed := time.Since(start)
+	if err != nil {
+		return nil, newError(CodeInternalError, fmt.Sprintf("peer.ask: provider %s: %v", p.Provider, err))
+	}
+
+	// Audit: peer.invoke.served — the "I consumed my provider on behalf of a peer" row.
+	// Logged asynchronously (same pattern as peer.invoke.received) because
+	// dispatchPeer doesn't carry a context.
+	if s.alog != nil {
+		peerDID := ""
+		if entry != nil {
+			peerDID = entry.DID
+		}
+		go func() {
+			_, _ = s.alog.Append(context.Background(), activity.KindPeerInvokeServed, map[string]any{
+				"peer_did":      peerDID,
+				"peer_x25519":   fmt.Sprintf("%x", conn.PeerX25519),
+				"provider":      p.Provider,
+				"model":         resp.Model,
+				"input_tokens":  resp.Usage.InputTokens,
+				"output_tokens": resp.Usage.OutputTokens,
+				"stop_reason":   string(resp.StopReason),
+				"duration_ms":   elapsed.Milliseconds(),
+			})
+		}()
+	}
+
+	return peerAskResult{Response: resp}, nil
 }
 
 // --- helpers -----------------------------------------------------------------

@@ -104,8 +104,10 @@ func (s *Server) handleFederationConfig(_ context.Context, _ json.RawMessage) (a
 	}
 
 	// Protocols: list the peer.* verbs this daimon serves over inbound
-	// Noise channels. Phase 33 introduces peer.echo as the first verb.
-	protocols := []string{"peer.echo"}
+	// Noise channels. Phase 33 introduced peer.echo; phase 34 adds peer.ask.
+	// peer.ask requires an address book entry with HasVerb("peer.ask") — its
+	// presence in this list signals capability, not open access.
+	protocols := []string{"peer.echo", "peer.ask"}
 
 	return federationConfigResult{
 		DID:                      did,

@@ -90,6 +90,13 @@ const (
 	KindPeerChannelClosed   Kind = "peer.channel.closed"
 	KindPeerInvokeSent      Kind = "peer.invoke.sent"
 	KindPeerInvokeReceived  Kind = "peer.invoke.received"
+	// KindPeerInvokeServed is written by the SERVING daimon when it
+	// successfully handles an inbound peer.ask call — the "I consumed
+	// MY provider's credits on behalf of a peer" audit row. Distinct
+	// from KindPeerInvokeReceived (which covers ALL inbound peer.*
+	// verbs including peer.echo) because only peer.ask has economic
+	// implications worth a dedicated row.
+	KindPeerInvokeServed Kind = "peer.invoke.served"
 )
 
 // Common errors.
