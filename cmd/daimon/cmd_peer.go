@@ -12,6 +12,7 @@ import (
 //
 // Subcommand tree:
 //
+//	daimon peer listen [--addr tcp://0.0.0.0:9999]    Start inbound TCP listener
 //	daimon peer dial --did <did> --endpoint <ep>       Open a Noise IK channel
 //	daimon peer close <channel_id>                     Close an open channel
 //	daimon peer list                                   List open channels
@@ -34,6 +35,8 @@ func cmdPeer(args []string) error {
 		return cmdPeerList(rest)
 	case "echo":
 		return cmdPeerEcho(rest)
+	case "listen":
+		return cmdPeerListen(rest)
 	case "invoke":
 		return cmdPeerInvoke(rest)
 	case "pay-required":
@@ -106,6 +109,47 @@ func cmdFederationConfig(args []string) error {
 	} else {
 		fmt.Printf("Public endpoint:  (not listening)\n")
 	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// daimon peer listen
+// ---------------------------------------------------------------------------
+
+// cmdPeerListen starts the daemon's inbound Noise IK TCP listener. The
+// daemon must be unlocked (daimon unlock) before calling this — the
+// Noise IK static key is derived from the unlocked identity.
+//
+// The listener stays running until the daemon exits. Call
+// `daimon federation config` at any time to read the bound endpoint back.
+func cmdPeerListen(args []string) error {
+	fs := flag.NewFlagSet("daimon peer listen", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	addr := fs.String("addr", "", `TCP bind address, e.g. "0.0.0.0:9999" or "tcp://0.0.0.0:9999" (default: 0.0.0.0:0, OS-assigned port)`)
+	asJSON := fs.Bool("json", false, "emit the result as JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: daimon peer listen [--addr <addr>] [--json]")
+	}
+
+	var params map[string]any
+	if *addr != "" {
+		params = map[string]any{"addr": *addr}
+	}
+	var result struct {
+		Endpoint string `json:"endpoint"`
+	}
+	if err := daemonCall("daimon.peer.listen", params, &result); err != nil {
+		return err
+	}
+	if *asJSON {
+		return printJSON(result)
+	}
+	fmt.Printf("Listening on: %s\n", result.Endpoint)
+	fmt.Fprintln(os.Stderr, "Remote peers can dial you at this address. Share it alongside your DID:")
+	fmt.Fprintf(os.Stderr, "  daimon federation config\n")
 	return nil
 }
 

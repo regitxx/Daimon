@@ -192,6 +192,13 @@ Usage:
                             public TCP endpoint (if PeerListen is running),
                             and federation protocol version.
 
+  daimon peer listen        Start accepting inbound peer connections over
+              [--addr <a>]  Noise IK TCP. Daemon must be unlocked first.
+              [--json]      --addr defaults to "0.0.0.0:0" (OS-assigned
+                            port). Prints the bound endpoint. Stays running
+                            until the daemon exits. Run "daimon federation
+                            config" to read the endpoint back later.
+
   daimon peer dial          Open a Noise IK channel to a remote daimon.
               --did <d>     Remote daimon's DID (did:key only in v0.3).
               --endpoint <ep> TCP endpoint, e.g. tcp://host:9999 (required).

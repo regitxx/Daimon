@@ -113,6 +113,12 @@ const (
 	// verification is deferred until the x402 facilitator client lands.
 	// Verifiers must accept this kind without rejecting the chain.
 	KindPeerPaymentReceived Kind = "peer.payment.received"
+
+	// KindPeerListenStarted is written when the daemon successfully starts
+	// its Noise IK TCP listener via daimon.peer.listen. Records the bound
+	// endpoint so operators can audit when federation listening was activated
+	// and on which address/port.
+	KindPeerListenStarted Kind = "peer.listen.started"
 )
 
 // Common errors.

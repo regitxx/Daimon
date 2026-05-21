@@ -72,7 +72,7 @@ _daimon_completion() {
     local activity_verbs="query verify"
     local wallet_verbs="list create address derive sign show-mnemonic recover"
     local payment_verbs="pay"
-    local peer_verbs="dial close list echo invoke pay-required address-book"
+    local peer_verbs="listen dial close list echo invoke pay-required address-book"
     local peer_ab_verbs="list add pin block unblock remove"
     local federation_verbs="config"
     local memory_kinds="fact preference task observation"
@@ -189,7 +189,7 @@ _daimon() {
     activity_verbs=(query verify)
     wallet_verbs=(list create address derive sign show-mnemonic recover)
     payment_verbs=(pay)
-    peer_verbs=(dial close list echo invoke pay-required address-book)
+    peer_verbs=(listen dial close list echo invoke pay-required address-book)
     peer_ab_verbs=(list add pin block unblock remove)
     federation_verbs=(config)
     memory_kinds=(fact preference task observation)
@@ -274,7 +274,7 @@ complete -c daimon -f -n "__daimon_using_command provider" -a "list invoke"
 complete -c daimon -f -n "__daimon_using_command activity" -a "query verify"
 complete -c daimon -f -n "__daimon_using_command wallet" -a "list create address derive sign show-mnemonic recover"
 complete -c daimon -f -n "__daimon_using_command payment" -a "pay"
-complete -c daimon -f -n "__daimon_using_command peer" -a "dial close list echo invoke pay-required address-book"
+complete -c daimon -f -n "__daimon_using_command peer" -a "listen dial close list echo invoke pay-required address-book"
 complete -c daimon -f -n "__daimon_using_command peer address-book" -a "list add pin block unblock remove"
 complete -c daimon -f -n "__daimon_using_command federation" -a "config"
 complete -c daimon -f -n "__daimon_using_command completion" -a "bash zsh fish"

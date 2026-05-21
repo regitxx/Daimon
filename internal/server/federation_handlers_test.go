@@ -5,6 +5,9 @@ import (
 	"testing"
 )
 
+// --- daimon.peer.listen -------------------------------------------------------
+
+
 // daimon.federation.config introspects the daimon's federation-
 // layer advertisement. The verb is read-only, lives outside the
 // wallet/payment path, and is the foundation phase 30 of v0.3
@@ -85,5 +88,95 @@ func TestHandleFederationConfig_NotInWalletNotReadyTable(t *testing.T) {
 	resp := f.call(t, "daimon.federation.config", nil)
 	if resp.Error != nil {
 		t.Errorf("federation.config with nil wstore: got error %v, want nil", resp.Error)
+	}
+}
+
+// --- daimon.peer.listen tests -----------------------------------------------
+
+func TestPeerListen_DefaultAddr_BindsAndReturnsTCPEndpoint(t *testing.T) {
+	// daimon.peer.listen with no params → binds on 0.0.0.0:0 (OS-assigned
+	// port) and returns the actual endpoint as "tcp://host:port".
+	f := newFixture(t)
+	resp := f.call(t, "daimon.peer.listen", nil)
+	var out peerListenStartResult
+	resultAs(t, resp, &out)
+
+	if !strings.HasPrefix(out.Endpoint, "tcp://") {
+		t.Errorf("endpoint prefix: got %q, want tcp://...", out.Endpoint)
+	}
+	// Should contain a colon (host:port) after the scheme.
+	hostPort := strings.TrimPrefix(out.Endpoint, "tcp://")
+	if !strings.Contains(hostPort, ":") {
+		t.Errorf("endpoint missing port: got %q", out.Endpoint)
+	}
+}
+
+func TestPeerListen_ExplicitAddr_BindsOnThatAddr(t *testing.T) {
+	// daimon.peer.listen with addr "127.0.0.1:0" → binds on loopback
+	// with an OS-assigned port, endpoint starts with "tcp://127.0.0.1:".
+	f := newFixture(t)
+	resp := f.call(t, "daimon.peer.listen", map[string]any{"addr": "127.0.0.1:0"})
+	var out peerListenStartResult
+	resultAs(t, resp, &out)
+
+	if !strings.HasPrefix(out.Endpoint, "tcp://127.0.0.1:") {
+		t.Errorf("endpoint: got %q, want tcp://127.0.0.1:...", out.Endpoint)
+	}
+}
+
+func TestPeerListen_TCPSchemePrefix_IsStripped(t *testing.T) {
+	// Convenience: if the caller passes "tcp://127.0.0.1:0" (with scheme
+	// prefix), the handler strips the prefix before binding — same result
+	// as "127.0.0.1:0" without a prefix.
+	f := newFixture(t)
+	resp := f.call(t, "daimon.peer.listen", map[string]any{"addr": "tcp://127.0.0.1:0"})
+	var out peerListenStartResult
+	resultAs(t, resp, &out)
+
+	if !strings.HasPrefix(out.Endpoint, "tcp://127.0.0.1:") {
+		t.Errorf("endpoint: got %q, want tcp://127.0.0.1:...", out.Endpoint)
+	}
+}
+
+func TestPeerListen_Idempotent_ReturnsSameEndpoint(t *testing.T) {
+	// Calling daimon.peer.listen a second time while already listening
+	// must return the SAME bound endpoint (not try to bind again, which
+	// would error on a port conflict). PeerListen is idempotent at the
+	// Go level; the RPC handler must propagate that property.
+	f := newFixture(t)
+
+	resp1 := f.call(t, "daimon.peer.listen", nil)
+	var out1 peerListenStartResult
+	resultAs(t, resp1, &out1)
+
+	resp2 := f.call(t, "daimon.peer.listen", nil)
+	var out2 peerListenStartResult
+	resultAs(t, resp2, &out2)
+
+	if out1.Endpoint != out2.Endpoint {
+		t.Errorf("idempotent: first=%q second=%q (must be equal)", out1.Endpoint, out2.Endpoint)
+	}
+}
+
+func TestPeerListen_FederationConfigReflectsEndpoint(t *testing.T) {
+	// After daimon.peer.listen succeeds, daimon.federation.config must
+	// report the bound address in public_endpoint. This tests the full
+	// observability loop: listen → config shows endpoint → peers can dial.
+	f := newFixture(t)
+
+	listenResp := f.call(t, "daimon.peer.listen", nil)
+	var listenOut peerListenStartResult
+	resultAs(t, listenResp, &listenOut)
+
+	configResp := f.call(t, "daimon.federation.config", nil)
+	var configOut federationConfigResult
+	resultAs(t, configResp, &configOut)
+
+	if configOut.PublicEndpoint != listenOut.Endpoint {
+		t.Errorf("federation.config public_endpoint: got %q, want %q",
+			configOut.PublicEndpoint, listenOut.Endpoint)
+	}
+	if !strings.HasPrefix(configOut.PublicEndpoint, "tcp://") {
+		t.Errorf("public_endpoint prefix: got %q, want tcp://...", configOut.PublicEndpoint)
 	}
 }

@@ -3,7 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
+	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/identity"
 )
 
@@ -76,6 +79,62 @@ type federationConfigResult struct {
 	// than they require. Currently "v0.3-draft" for the
 	// design-doc-implementation pre-GA phase.
 	FederationVersion string `json:"federation_version"`
+}
+
+// ---------------------------------------------------------------------------
+// daimon.peer.listen
+// ---------------------------------------------------------------------------
+
+// peerListenStartParams carries the optional bind address for the inbound
+// Noise IK TCP listener.
+type peerListenStartParams struct {
+	// Addr is the TCP address to listen on, e.g. "0.0.0.0:9999" or
+	// "tcp://0.0.0.0:9999". An empty string or omitted field defaults to
+	// "0.0.0.0:0" (OS-assigned ephemeral port). The caller learns the
+	// actual bound address from the returned endpoint field.
+	Addr string `json:"addr,omitempty"`
+}
+
+// peerListenStartResult carries the actual bound TCP address.
+type peerListenStartResult struct {
+	// Endpoint is the URL where this daimon is now accepting inbound Noise IK
+	// connections from remote daimons, in "tcp://host:port" form.
+	Endpoint string `json:"endpoint"`
+}
+
+// handlePeerListenStart serves daimon.peer.listen. It calls s.PeerListen
+// which is idempotent — calling it a second time while the listener is already
+// running returns the existing bound address rather than binding again.
+//
+// Authorization: post-unlock only (s.id required by PeerListen — the daemon
+// needs its Ed25519 private key to set up the Noise IK static key pair).
+// The standard CodeIdentityLocked gate in dispatch covers the locked case.
+func (s *Server) handlePeerListenStart(ctx context.Context, params json.RawMessage) (any, *RPCError) {
+	var p peerListenStartParams
+	if rpcErr := decodeParams(params, &p); rpcErr != nil {
+		return nil, rpcErr
+	}
+	addr := strings.TrimPrefix(p.Addr, "tcp://")
+	if addr == "" {
+		addr = "0.0.0.0:0"
+	}
+
+	bound, err := s.PeerListen(addr)
+	if err != nil {
+		return nil, newError(CodeInvalidRequest, fmt.Sprintf("peer.listen: %v", err))
+	}
+	endpoint := "tcp://" + bound
+
+	// Audit: peer.listen.started — best-effort; never fails the RPC.
+	if s.alog != nil {
+		if _, aerr := s.alog.Append(ctx, activity.KindPeerListenStarted, map[string]any{
+			"endpoint": endpoint,
+		}); aerr != nil {
+			s.logf("activity append (peer.listen.started): %v", aerr)
+		}
+	}
+
+	return peerListenStartResult{Endpoint: endpoint}, nil
 }
 
 // handleFederationConfig answers daimon.federation.config. Pure
