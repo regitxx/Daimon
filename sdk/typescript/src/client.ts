@@ -187,8 +187,12 @@ export interface PeerDialResult extends PeerChannel {}
 /** One entry in the local address book. */
 export interface AddressBookEntry {
   did: string;
-  label: string;
-  /** `"FirstSeen"` | `"Pinned"` | `"Blocked"` */
+  /**
+   * Optional human-readable label for the peer. Wire field name: `pet_name`
+   * (matches the daemon's address book schema). Absent when no label was set.
+   */
+  pet_name?: string;
+  /** `"first_seen"` | `"pinned"` | `"blocked"` */
   status: string;
   approved_verbs: string[];
   transport_pubkey_multibase: string;
@@ -575,13 +579,16 @@ class AddressBookNamespace {
    */
   async add(params: {
     did: string;
+    /** Human-readable label; sent as `pet_name` on the wire. */
     label?: string;
+    /** Multibase pubkey fragment; sent as `transport_pubkey_multibase` on the wire. */
     pubkeyMultibase?: string;
   }): Promise<JsonObject> {
     const wire: JsonObject = { did: params.did };
-    if (params.label !== undefined) wire["label"] = params.label;
+    // Map SDK-friendly parameter names to the server's wire field names.
+    if (params.label !== undefined) wire["pet_name"] = params.label;
     if (params.pubkeyMultibase !== undefined)
-      wire["pubkey_multibase"] = params.pubkeyMultibase;
+      wire["transport_pubkey_multibase"] = params.pubkeyMultibase;
     return (await this.c._call(
       "daimon.peer.address_book.add",
       wire,

@@ -273,12 +273,13 @@ describe("client.peer.addressBook", () => {
   });
 
   it("list returns entries", async () => {
+    // Server wire format uses pet_name (not label) — verify the SDK passes it through.
     daemon.handle("daimon.peer.address_book.list", {
       entries: [
         {
           did: "did:key:z6MkPeer",
-          label: "Alice",
-          status: "Pinned",
+          pet_name: "Alice",  // wire field name is pet_name, not label
+          status: "pinned",
           approved_verbs: ["peer.ask"],
           transport_pubkey_multibase: "z6MkPeer",
           first_seen: "2026-05-21T00:00:00Z",
@@ -291,7 +292,8 @@ describe("client.peer.addressBook", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]!.did).toBe("did:key:z6MkPeer");
-    expect(entries[0]!.status).toBe("Pinned");
+    expect(entries[0]!.pet_name).toBe("Alice");
+    expect(entries[0]!.status).toBe("pinned");
     expect(entries[0]!.approved_verbs).toContain("peer.ask");
   });
 
@@ -309,11 +311,12 @@ describe("client.peer.addressBook", () => {
     expect(last.method).toBe("daimon.peer.address_book.add");
     const p = last.params as Record<string, unknown>;
     expect(p["did"]).toBe("did:key:z6MkNew");
-    expect(Object.prototype.hasOwnProperty.call(p, "label")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(p, "pubkey_multibase")).toBe(false);
+    // Optional fields omitted; verify using the correct wire key names
+    expect(Object.prototype.hasOwnProperty.call(p, "pet_name")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(p, "transport_pubkey_multibase")).toBe(false);
   });
 
-  it("add sends label and pubkeyMultibase when supplied", async () => {
+  it("add maps label→pet_name and pubkeyMultibase→transport_pubkey_multibase on the wire", async () => {
     daemon.handle("daimon.peer.address_book.add", { ok: true });
 
     await client.peer.addressBook.add({
@@ -324,8 +327,12 @@ describe("client.peer.addressBook", () => {
 
     const last = daemon.calls[daemon.calls.length - 1]!;
     const p = last.params as Record<string, unknown>;
-    expect(p["label"]).toBe("Bob");
-    expect(p["pubkey_multibase"]).toBe("z6MkNew");
+    // SDK parameter names are user-friendly; wire names must match the server schema
+    expect(p["pet_name"]).toBe("Bob");
+    expect(p["transport_pubkey_multibase"]).toBe("z6MkNew");
+    // Old (wrong) key names must NOT appear on the wire
+    expect(Object.prototype.hasOwnProperty.call(p, "label")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(p, "pubkey_multibase")).toBe(false);
   });
 
   it("pin sends {did, verbs}", async () => {

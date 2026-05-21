@@ -573,17 +573,21 @@ class _PeerAddressBookNamespace:
         did:
             The peer's DID (``did:key:z6Mk...``).
         label:
-            Optional human-readable name shown in ``daimon peer list``.
+            Optional human-readable name (sent as ``pet_name`` on the
+            wire, stored that way in the daemon; returned as ``pet_name``
+            in list results).
         pubkey_multibase:
             The multibase fragment of the peer's did:key DID
-            (the ``z6Mk…`` portion). Required for Noise IK authentication;
-            can be left empty and populated by ``daimon.peer.dial``.
+            (the ``z6Mk…`` portion). Sent as
+            ``transport_pubkey_multibase`` on the wire. Required for Noise
+            IK authentication; can be left empty and populated by
+            ``daimon.peer.dial``.
         """
         params: dict[str, Any] = {"did": did}
         if label:
-            params["label"] = label
+            params["pet_name"] = label
         if pubkey_multibase:
-            params["pubkey_multibase"] = pubkey_multibase
+            params["transport_pubkey_multibase"] = pubkey_multibase
         return self._c._call("daimon.peer.address_book.add", params)
 
     def pin(self, *, did: str, verbs: list[str]) -> dict:

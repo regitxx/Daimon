@@ -231,11 +231,14 @@ def test_peer_pay_required_empty_when_no_wallet(stub_daemon: StubDaemon) -> None
 # ---------------------------------------------------------------------------
 
 def test_peer_address_book_list(stub_daemon: StubDaemon) -> None:
-    """address_book.list returns the entries list."""
+    """address_book.list returns the entries list.
+
+    The server uses 'pet_name' (not 'label') as the wire field name.
+    """
     entry = {
         "did": "did:key:z6MkPeer",
-        "label": "Alice",
-        "status": "Pinned",
+        "pet_name": "Alice",  # wire field is pet_name, not label
+        "status": "pinned",
         "approved_verbs": ["peer.ask"],
         "transport_pubkey_multibase": "z6MkPeer",
         "first_seen": "2026-05-21T00:00:00Z",
@@ -251,7 +254,8 @@ def test_peer_address_book_list(stub_daemon: StubDaemon) -> None:
 
     assert len(entries) == 1
     assert entries[0]["did"] == "did:key:z6MkPeer"
-    assert entries[0]["status"] == "Pinned"
+    assert entries[0]["pet_name"] == "Alice"
+    assert entries[0]["status"] == "pinned"
     assert "peer.ask" in entries[0]["approved_verbs"]
 
 
@@ -272,13 +276,13 @@ def test_peer_address_book_add_sends_did(stub_daemon: StubDaemon) -> None:
 
     _, params = stub_daemon.calls[-1]
     assert params["did"] == "did:key:z6MkNew"
-    # Optional fields omitted when not passed
-    assert "label" not in params
-    assert "pubkey_multibase" not in params
+    # Optional fields omitted when not passed (using the correct wire key names)
+    assert "pet_name" not in params
+    assert "transport_pubkey_multibase" not in params
 
 
 def test_peer_address_book_add_with_label(stub_daemon: StubDaemon) -> None:
-    """address_book.add includes label and pubkey_multibase when supplied."""
+    """address_book.add maps label→pet_name and pubkey_multibase→transport_pubkey_multibase on the wire."""
     stub_daemon.handle("daimon.peer.address_book.add", {"ok": True})
     client = Client(socket_path=stub_daemon.socket_path)
 
@@ -289,8 +293,12 @@ def test_peer_address_book_add_with_label(stub_daemon: StubDaemon) -> None:
     )
 
     _, params = stub_daemon.calls[-1]
-    assert params["label"] == "Bob"
-    assert params["pubkey_multibase"] == "z6MkNew"
+    # SDK parameter names are user-friendly; wire names match the server schema.
+    assert params["pet_name"] == "Bob"
+    assert params["transport_pubkey_multibase"] == "z6MkNew"
+    # Old (wrong) key names must NOT appear on the wire
+    assert "label" not in params
+    assert "pubkey_multibase" not in params
 
 
 def test_peer_address_book_pin_sends_verbs(stub_daemon: StubDaemon) -> None:
