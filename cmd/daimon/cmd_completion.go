@@ -144,6 +144,12 @@ _daimon_completion() {
                 return
             fi
             ;;
+        unlock)
+            if [[ "$prev" == "--peer-addr" ]]; then
+                # No meaningful value completion; fall through to default.
+                :
+            fi
+            ;;
         backup|restore|identity)
             # Path-completion is the natural fall-through for --to / <path>.
             ;;
@@ -283,4 +289,7 @@ complete -c daimon -f -n "__daimon_using_command completion" -a "bash zsh fish"
 complete -c daimon -f -l kind -n "__daimon_using_command memory write" -a "fact preference task observation"
 complete -c daimon -f -l kind -n "__daimon_using_command memory list" -a "fact preference task observation"
 complete -c daimon -f -l kind -n "__daimon_using_command memory search" -a "fact preference task observation"
+
+# --peer-addr for unlock (value is a TCP address string, no enum to complete)
+complete -c daimon -r -l peer-addr -n "__fish_seen_subcommand_from unlock" -d "TCP address for the peer listener (e.g. tcp://0.0.0.0:9999)"
 `

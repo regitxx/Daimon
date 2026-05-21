@@ -21,6 +21,10 @@ import (
 func cmdUnlock(args []string) error {
 	fs := flag.NewFlagSet("daimon unlock", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	peerAddr := fs.String("peer-addr", "", `TCP address to start the inbound peer listener on after
+unlock, e.g. "tcp://0.0.0.0:9999" or "127.0.0.1:0". Equivalent
+to running 'daimon peer listen --addr <a>' as a separate step.
+Omit to skip starting the listener (default behaviour).`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,6 +105,24 @@ func cmdUnlock(args []string) error {
 		fmt.Fprintf(os.Stderr, "  DID: %s\n", result.DID)
 	}
 	fmt.Fprintf(os.Stderr, "  Daemon: %s\n", socket)
+
+	// --peer-addr: auto-start the inbound Noise IK TCP listener right after
+	// unlock. Convenience shortcut for users who always want their daimon
+	// reachable by peers (e.g. when running two daimons for the v0.3 dogfood).
+	// Non-fatal: a listener failure prints a warning but the daimon is still
+	// unlocked — nothing the unlock itself did is rolled back.
+	if *peerAddr != "" {
+		var listenResult struct {
+			Endpoint string `json:"endpoint"`
+		}
+		params := map[string]any{"addr": *peerAddr}
+		if lerr := daemonCall("daimon.peer.listen", params, &listenResult); lerr != nil {
+			fmt.Fprintf(os.Stderr, "  Warning: could not start peer listener: %v\n", lerr)
+			fmt.Fprintln(os.Stderr, "  Identity is still unlocked. Run 'daimon peer listen' manually.")
+		} else {
+			fmt.Fprintf(os.Stderr, "  Peer listener: %s\n", listenResult.Endpoint)
+		}
+	}
 
 	// Mnemonic surfaces ONLY on the first unlock that auto-created the
 	// wallet keystore. The daemon never keeps a copy after this RPC
