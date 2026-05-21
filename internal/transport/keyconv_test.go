@@ -170,6 +170,64 @@ func TestX25519SharedSecret_RejectsLowOrderPeerPubkey(t *testing.T) {
 	}
 }
 
+// --- Ed25519PublicToX25519 ---------------------------------------------------
+
+// TestEd25519PublicToX25519_RoundTrip is the primary correctness check: for
+// any Ed25519 key pair, deriving the X25519 pubkey from the private key (via
+// SHA-512 + scalar-mult-basepoint) must equal deriving it from the public key
+// (via the Edwards→Montgomery birational map). Both are representations of the
+// same group element; the algebraic identity guarantees they coincide.
+func TestEd25519PublicToX25519_RoundTrip(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		_, edPriv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			t.Fatalf("iter %d: GenerateKey: %v", i, err)
+		}
+		edPub := edPriv.Public().(ed25519.PublicKey)
+
+		// Derive from private key (via seed → SHA-512 → X25519 private → X25519 public)
+		_, xPubFromPriv, err := Ed25519ToX25519Keypair(edPriv)
+		if err != nil {
+			t.Fatalf("iter %d: Ed25519ToX25519Keypair: %v", i, err)
+		}
+		// Derive from public key (birational map)
+		xPubFromPub, err := Ed25519PublicToX25519(edPub)
+		if err != nil {
+			t.Fatalf("iter %d: Ed25519PublicToX25519: %v", i, err)
+		}
+		if xPubFromPriv != xPubFromPub {
+			t.Errorf("iter %d: round-trip mismatch:\n  from priv: %x\n  from pub:  %x", i, xPubFromPriv, xPubFromPub)
+		}
+	}
+}
+
+func TestEd25519PublicToX25519_Deterministic(t *testing.T) {
+	_, edPriv, _ := ed25519.GenerateKey(rand.Reader)
+	edPub := edPriv.Public().(ed25519.PublicKey)
+	a, err := Ed25519PublicToX25519(edPub)
+	if err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		b, err := Ed25519PublicToX25519(edPub)
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		if a != b {
+			t.Errorf("iter %d: non-deterministic output", i)
+		}
+	}
+}
+
+func TestEd25519PublicToX25519_RejectsWrongSize(t *testing.T) {
+	if _, err := Ed25519PublicToX25519(make([]byte, 10)); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("short key: got %v, want ErrInvalidKey", err)
+	}
+	if _, err := Ed25519PublicToX25519(make([]byte, 64)); !errors.Is(err, ErrInvalidKey) {
+		t.Errorf("long key: got %v, want ErrInvalidKey", err)
+	}
+}
+
 // --- X25519PublicFromPrivate matches Ed25519ToX25519Keypair ---------------
 
 func TestX25519PublicFromPrivate_MatchesKeypairHelper(t *testing.T) {

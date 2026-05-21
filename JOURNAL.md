@@ -3708,3 +3708,128 @@ Subsequent phases from design/v0.3-federation.md:
 - **Phase 36** — SDK wrappers for `client.peer.*` + `client.federation.*` in both languages. Cross-language tests.
 
 Phase 30 is the foundation everything else builds on: a daimon now has a way to resolve another daimon's DID + verify the endpoint document's authenticity. The next directional decision is whether to push into phase 31 (transport) — a much bigger lift — or pause for huckgod's review of phase 30's artifacts.
+
+---
+
+## 2026-05-20 — Day Zero, sessions 73–75: v0.3 phases 31–32 (TCP+Noise transport + address book)
+
+### Phase 31 — TCP + Noise IK transport
+
+Two focused slices. No QUIC — after review, the quic-go dependency footprint (~200K LoC indirect, GCC/CGO on some platforms) was out of proportion for the v0.3 target of "two daimons on different machines can talk." TCP with Noise IK gives the same security guarantees (mutual auth, forward secrecy) at a fraction of the dependency surface. QUIC's connection-migration and multiplexing are deferred to v0.4+ when real P2P routing becomes the target.
+
+#### Session 73 — Slice 31.0: Ed25519 → X25519 key conversion ([831af58](https://github.com/regitxx/Daimon/commit/831af58))
+
+`internal/transport/keyconv.go` (~110 LoC, no new deps). The foundational cryptographic primitive: derive the X25519 Diffie-Hellman scalar from an Ed25519 identity key. Design Decision 1 names "cryptographic continuity via did:key" — one keypair for both identity signing AND transport — but Noise IK requires X25519 (Curve25519) while the daimon signs with Ed25519. The standard libsodium/Signal/age derivation bridges them: SHA-512(ed25519_seed)[0:32] + RFC 7748 clamping. One-way property is by design: a compromised transport scalar cannot recover the Ed25519 signing key.
+
+Four primitives: `Ed25519PrivateToX25519` (seed→scalar), `X25519PublicFromPrivate` (scalar→point), `X25519SharedSecret` (DH with low-order-point rejection), `Ed25519ToX25519Keypair` (convenience).
+
+**+8 tests** (418 → 426): clamping correctness across 100 random keys, determinism, DH correctness (Alice/Bob match), distinct seeds → distinct outputs, one-way property (output ≠ seed), input validation, low-order-point rejection, two-step vs convenience-helper parity.
+
+#### Session 74 — Slice 31.1: Noise IK handshake wrapper ([3efcc50](https://github.com/regitxx/Daimon/commit/3efcc50))
+
+New dep: `github.com/flynn/noise v1.1.0` (MIT, used by Lightning's Go client + Status + Threefold; no transitive deps beyond golang.org/x/crypto already in tree). `internal/transport/noise.go` (~250 LoC): thin Daimon-flavoured wrapper pinning Noise_IK_25519_ChaChaPoly_SHA256.
+
+**Key architectural decisions:**
+- Suite pinned by constant: no negotiation, no downgrade path.
+- Prologue `"daimon-noise-ik-v0.3-draft"` mixed into both sides' symmetric state; version mismatch fails cleanly at handshake time.
+- `NewInitiator(edPriv, responderX25519Pub)` + `NewResponder(edPriv)` take Ed25519 keys (what the daimon has), derive X25519 internally.
+- `PeerStatic()` exposes the authenticated counterparty static key after handshake — how the responder learns the initiator's identity (IK is mutual-auth).
+- Failed decrypt does NOT advance the nonce counter — anti-regression for a DoS that could desynchronise the channel.
+
+**+12 tests** (426 → 438): handshake completes + both sides report IsComplete, channel round-trip (both directions), 100-message stream, PeerStatic mutual-auth property, tampered ciphertext rejected, reordered messages fail WITHOUT advancing nonce, wrong responder pubkey fails, encrypt/decrypt before handshake complete → error, write/read after handshake complete → error, wrong-size key input validation.
+
+### Phase 32 — Address book + TOFU pinning
+
+#### Session 75 — Slice 32.1: address book persistence layer ([b05663c](https://github.com/regitxx/Daimon/commit/b05663c))
+
+`internal/addressbook/` (new package, ~400 LoC). Mirrors the established encrypted-at-rest pattern: AES-256-GCM under HKDF subkey label `"daimon-address-book-key-v1"`, atomic-rename save, future-format refusal.
+
+**Trust model (design Decision 5 — TOFU + pinning):**
+- **FirstSeen**: peer was dialed, no trust granted. peer.* verbs require explicit pinning.
+- **Pinned**: user trust confirmed. `Touch()` enforces TOFU — a different transport pubkey from the locked one trips a violation and surfaces it to the caller rather than silently updating.
+- **Blocked**: explicit refusal. Dial fails immediately; per-verb authorization cleared.
+
+Per-verb authorization (`ApprovedVerbs`) sits on top of status: even a Pinned peer can only invoke verbs in its approved list.
+
+**+18 tests** (438 → 456).
+
+#### Slice 32.2: address book RPC verbs + audit integration ([45c24de](https://github.com/regitxx/Daimon/commit/45c24de))
+
+Six new methods: `daimon.peer.address_book.{list, add, pin, block, unblock, remove}`. New activity-log kinds: `peer.address_book.{added, pinned, blocked, unblocked, removed}` — every trust-state change lands in the audit chain. `Options` and `UnlockFunc` gain the `*addressbook.Book` field; `cmd/daimond/main.go`'s unlock closure derives the key and opens the book at `$DAIMON_HOME/address_book.enc`.
+
+**+13 tests** (456 → 469).
+
+### Phase 31–32 complete
+
+| Slice | Commit | Tests |
+|---|---|---|
+| 31.0 | 831af58 | 418 → 426 (+8) |
+| 31.1 | 3efcc50 | 426 → 438 (+12) |
+| 32.1 | b05663c | 438 → 456 (+18) |
+| 32.2 | 45c24de | 456 → 469 (+13) |
+
+**Test count delta:** 418 → 469 Go race+vet (+51 across 4 slices). 65 pytest + 65 vitest unchanged.
+
+---
+
+## 2026-05-21 — Day Zero, sessions 76–77: v0.3 phase 33 (peer.echo — first A2A verb)
+
+Phase 33 is the payoff of phases 30–32: dial → Noise IK handshake → invoke a peer.* verb → response → audit. The full federation stack in a single round-trip.
+
+### What we built
+
+**Architectural decision: TCP not QUIC.** The design doc named "QUIC+Noise" but we sliced the transport down to raw TCP+Noise. Noise IK over TCP gives identical security (mutual auth, forward secrecy) with a fraction of the dependency footprint. The TCP framing is: 2-byte big-endian length prefix for handshake messages, 4-byte for application frames. Max frame body 65,519 bytes (fits one Noise message). `ErrConnClosed` is the sentinel for closed-connection errors.
+
+**Key conversion addition: Ed25519 PUBLIC → X25519 PUBLIC.** Phase 31.0 added the private-key path; phase 33 adds `Ed25519PublicToX25519(edPub)` via the birational Edwards→Montgomery map `u = (1+y)/(1-y) mod p`. This lets `handlePeerDial` derive the responder's X25519 static from their DID alone — no separate transport-pubkey publication needed. The math: clear the x-sign bit, reverse bytes (little-endian), lift to big.Int, apply the map mod 2²⁵⁵−19. Implemented with stdlib `math/big`.
+
+**New files:**
+- `internal/transport/tcp.go` (~240 LoC): `Listener`, `Conn`, `Dial`, `ListenTCP`, `SendFrame`, `RecvFrame`, `PeerX25519`.
+- `internal/transport/tcp_test.go` (~200 LoC): 8 tests covering the full stack.
+- `internal/server/peer_channel_handlers.go` (~280 LoC): `handlePeerDial`, `handlePeerClose`, `handlePeerList`, `handlePeerInvoke`, `handlePeerEcho`, `auditPeer`, `mapPeerError`.
+- `internal/server/peer_channel_handlers_test.go` (~350 LoC): 15 tests including the two-daemon integration smoke.
+
+**Modified files:**
+- `internal/transport/keyconv.go`: + `Ed25519PublicToX25519`.
+- `internal/transport/keyconv_test.go`: + 3 public-key-conversion tests.
+- `internal/activity/activity.go`: + 4 kinds (`peer.channel.opened`, `peer.channel.closed`, `peer.invoke.sent`, `peer.invoke.received`).
+- `internal/identity/identity.go`: + `PrivateKey()` method for transport layer.
+- `internal/identity/did.go`: + `PublicKeyFromDID` as alias for `DecodeDIDKey`.
+- `internal/server/server.go`: + `peerChannel` struct, `peerLn *transport.Listener`, `peerChannels map[string]*peerChannel`, `peerMu sync.Mutex`, `peerConns sync.WaitGroup`, `PeerListen`, `PeerAddr`, `servePeerListener`, `handleInboundPeerConn`, `dispatchPeer`, `newChannelID`.
+- `internal/server/handlers.go`: registered `daimon.peer.{dial,close,list,invoke}`.
+- `internal/server/jsonrpc.go`: + 4 peer error codes (`CodePeerUnreachable`, `CodePeerAuthFailed`, `CodePeerProtocolUnsupported`, `CodePeerUnauthorized`).
+- `internal/server/federation_handlers.go`: `handleFederationConfig` now populates `PublicEndpoint = "tcp://"+s.PeerAddr()` and `Protocols = ["peer.echo"]`.
+- `internal/server/federation_handlers_test.go`: updated phase-30 baseline test to reflect phase-33 reality (peer.echo in protocols, endpoint when PeerListen active).
+
+### RPC surface
+
+| Method | Direction | Purpose |
+|---|---|---|
+| `daimon.peer.dial` | outbound (client→local daemon) | Open a Noise IK channel to a remote daimon |
+| `daimon.peer.close` | outbound | Close an open channel |
+| `daimon.peer.list` | outbound | Enumerate open channels |
+| `daimon.peer.invoke` | outbound | Invoke a peer.* verb on a remote daimon |
+| `peer.echo` | inbound (served to remote peers) | Echo back the message with our DID |
+
+### Integration test: two daemons, one round-trip
+
+`TestPeerEcho_TwoDaemons` is the phase 33 CI smoke:
+
+1. Spin up daemons A and B, each with `PeerListen("127.0.0.1:0")`.
+2. A calls `daimon.peer.dial` with B's DID + `"tcp://"+b.peerAddr`.
+3. The dial resolves B's Ed25519 pubkey from the DID, converts to X25519, performs Noise IK, stores the channel.
+4. A calls `daimon.peer.invoke` with `method: "peer.echo"`, `params: {message: "hello from A"}`.
+5. Assert echo response: `{message: "hello from A", from_did: B.DID}`.
+6. Assert A's audit: `peer.channel.opened` + `peer.invoke.sent`.
+7. Assert B's audit: `peer.invoke.received` (background goroutine — test polls with 2s deadline).
+8. A closes the channel; `peer.channel.closed` appended; channel absent from list.
+
+Also: `TestPeerEcho_MultipleMessages` (3 sequential echoes on same channel), `TestFederationConfig_WithPeerListener`, `TestPeerDial_WrongKey` (right address, wrong DID → Noise handshake fails → `CodePeerUnreachable`), 9 parameter-validation and not-found tests.
+
+### Test count delta
+
+469 → 498 Go race+vet (+29: 3 keyconv + 8 tcp + 15 server + 3 other-adjusted). 65 pytest + 65 vitest unchanged. **598 total across all surfaces.**
+
+**What's next (phase 34+):**
+- **Phase 34** — `peer.ask`: invoke a peer's provider on their behalf. The first peer verb that implies compute cost + economic implications. Wire shape: `daimon.peer.invoke` with `method: "peer.ask"`, params carry provider/messages/model. Inbound handler validates via address book (`HasVerb("peer.ask")`).
+- **Phase 35** — x402 recipient (`peer.pay.required`). First inbound payment flow.
+- **Phase 36** — SDK wrappers for `client.peer.*` and `client.federation.*` in both languages.

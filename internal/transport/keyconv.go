@@ -21,6 +21,7 @@ import (
 	"crypto/sha512"
 	"errors"
 	"fmt"
+	"math/big"
 
 	"golang.org/x/crypto/curve25519"
 )
@@ -128,6 +129,83 @@ func Ed25519ToX25519Keypair(edPriv ed25519.PrivateKey) (xPriv, xPub [X25519KeySi
 	}
 	xPub, err = X25519PublicFromPrivate(xPriv)
 	return xPriv, xPub, err
+}
+
+// Ed25519PublicToX25519 derives the X25519 Diffie-Hellman public key
+// that corresponds to an Ed25519 public key, using the standard birational
+// equivalence between the Edwards curve (Ed25519) and the Montgomery curve
+// (Curve25519):
+//
+//	u = (1 + y) / (1 - y)  (mod p),  where p = 2^255 − 19
+//
+// y is the Edwards curve y-coordinate encoded in edPub (bits 0..254,
+// little-endian), per RFC 8032 §5.1.
+//
+// This is the same conversion used by libsodium (crypto_sign_ed25519_pk_to_curve25519),
+// age, and ssh-keyscan. It allows a daimon to derive a peer's Noise IK static
+// key from only the peer's DID (which encodes the Ed25519 public key) without
+// the peer needing to separately publish their Curve25519 key.
+//
+// The round-trip property holds: for any Ed25519 key pair (priv, pub),
+// Ed25519PublicToX25519(pub) == Ed25519ToX25519Keypair(priv).xPub.
+//
+// Returns ErrInvalidKey if edPub is not exactly ed25519.PublicKeySize bytes.
+// Returns an error on the degenerate case y == 1 (the Edwards neutral element,
+// which has no defined Montgomery image).
+func Ed25519PublicToX25519(edPub ed25519.PublicKey) ([X25519KeySize]byte, error) {
+	var out [X25519KeySize]byte
+	if len(edPub) != ed25519.PublicKeySize {
+		return out, fmt.Errorf("%w: got %d bytes, want %d", ErrInvalidKey, len(edPub), ed25519.PublicKeySize)
+	}
+
+	// p = 2^255 − 19 in big-endian byte representation.
+	p := new(big.Int).SetBytes([]byte{
+		0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xed,
+	})
+
+	// Decode y from the RFC 8032 compressed Edwards point:
+	//   32 little-endian bytes, bit 255 = sign(x) (cleared for the y value).
+	yBytes := make([]byte, 32)
+	copy(yBytes, edPub)
+	yBytes[31] &= 0x7F // clear x-sign bit to isolate y
+
+	// big.Int.SetBytes expects big-endian; reverse the little-endian bytes.
+	for i, j := 0, 31; i < j; i, j = i+1, j-1 {
+		yBytes[i], yBytes[j] = yBytes[j], yBytes[i]
+	}
+	y := new(big.Int).SetBytes(yBytes)
+
+	// u = (1 + y) * modular_inverse(1 − y)  (mod p)
+	one := big.NewInt(1)
+
+	numer := new(big.Int).Add(one, y)
+	numer.Mod(numer, p)
+
+	denom := new(big.Int).Sub(one, y)
+	denom.Mod(denom, p) // ensures non-negative result even if 1-y < 0
+
+	if denom.Sign() == 0 {
+		// y == 1 is the Ed25519 neutral element; its Montgomery image is at
+		// infinity. This cannot arise from a properly-generated Ed25519 key.
+		return out, errors.New("transport: Ed25519 public key is the neutral element")
+	}
+
+	// Modular inverse via Fermat's little theorem: inv(a) = a^(p−2) mod p.
+	pm2 := new(big.Int).Sub(p, big.NewInt(2))
+	denomInv := new(big.Int).Exp(denom, pm2, p)
+
+	u := new(big.Int).Mul(numer, denomInv)
+	u.Mod(u, p)
+
+	// Encode u as 32 little-endian bytes (big.Bytes is big-endian, ≤ 32 bytes).
+	uBE := u.Bytes()
+	for i := range uBE {
+		out[i] = uBE[len(uBE)-1-i] // big-endian index i → little-endian index i
+	}
+	return out, nil
 }
 
 // ErrInvalidKey is returned by the key-conversion functions when the

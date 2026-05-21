@@ -11,12 +11,15 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/addressbook"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
+	"github.com/regitxx/Daimon/internal/transport"
 	"github.com/regitxx/Daimon/internal/wallet"
 )
 
@@ -82,6 +85,15 @@ type UnlockFunc func(ctx context.Context, password string) (
 	err error,
 )
 
+// peerChannel is an open, authenticated Noise IK channel to a remote daimon.
+// Stored in Server.peerChannels by channel ID (a ULID string).
+type peerChannel struct {
+	id       string
+	conn     *transport.Conn
+	peerDID  string // DID of the remote daimon, supplied by the dialing call
+	openedAt time.Time
+}
+
 // Server is a JSON-RPC 2.0 endpoint that exposes the Daimon Protocol surface
 // from SPEC §6.1.
 //
@@ -132,6 +144,21 @@ type Server struct {
 
 	// conns tracks live connections so Close can drain them.
 	conns sync.WaitGroup
+
+	// --- Peer federation (v0.3 phase 33+) ---
+
+	// peerLn is the TCP listener for inbound Noise IK connections from
+	// remote daimons. Nil until PeerListen is called. Closed by Close.
+	peerLn *transport.Listener
+
+	// peerChannels holds open outbound channels keyed by channel ID (ULID).
+	// Protected by peerMu. Written by handlePeerDial; read by handlePeer*.
+	peerChannels map[string]*peerChannel
+	peerMu       sync.Mutex
+
+	// peerConns tracks live peer-accept goroutines so PeerListen's cleanup
+	// can wait for them before returning.
+	peerConns sync.WaitGroup
 }
 
 // methodHandler is the per-method dispatch signature. params is the raw JSON
@@ -152,9 +179,10 @@ type methodHandler func(ctx context.Context, params json.RawMessage) (any, *RPCE
 // construction time rather than at first request.
 func New(opts Options) (*Server, error) {
 	s := &Server{
-		providers: opts.Providers,
-		creds:     opts.Credentials,
-		logger:    opts.Logger,
+		providers:    opts.Providers,
+		creds:        opts.Credentials,
+		logger:       opts.Logger,
+		peerChannels: make(map[string]*peerChannel),
 	}
 	if opts.Unlock != nil {
 		// Serve mode: trio + wallet may be nil; unlock callback populates them.
@@ -276,8 +304,8 @@ func (s *Server) Serve(ctx context.Context) error {
 }
 
 // Close stops accepting new connections, cancels in-flight handler contexts,
-// and removes the socket file. Safe to call from any goroutine; safe to call
-// multiple times.
+// removes the socket file, and shuts down the TCP peer listener (if started).
+// Safe to call from any goroutine; safe to call multiple times.
 func (s *Server) Close() error {
 	var rerr error
 	s.closeOnce.Do(func() {
@@ -286,6 +314,7 @@ func (s *Server) Close() error {
 		ln := s.listener
 		path := s.socketPath
 		cancel := s.serveCancel
+		peerLn := s.peerLn
 		s.mu.Unlock()
 
 		if cancel != nil {
@@ -300,6 +329,17 @@ func (s *Server) Close() error {
 		if path != "" {
 			_ = os.Remove(path)
 		}
+		// Shut down the TCP peer listener; this causes servePeerListener to
+		// return, which eventually unblocks peerConns.Wait.
+		if peerLn != nil {
+			_ = peerLn.Close()
+		}
+		// Close all open outbound peer channels so remote peers get EOF.
+		s.peerMu.Lock()
+		for _, ch := range s.peerChannels {
+			_ = ch.conn.Close()
+		}
+		s.peerMu.Unlock()
 	})
 	return rerr
 }
@@ -420,6 +460,141 @@ func (s *Server) logf(format string, args ...any) {
 	if s.logger != nil {
 		s.logger.Printf(format, args...)
 	}
+}
+
+// PeerListen starts a TCP peer server on addr (e.g. "127.0.0.1:0" for an
+// OS-assigned ephemeral port). Returns the actual bound address string so
+// callers can discover the port when ":0" is supplied. The peer server
+// accepts inbound Noise IK connections from remote daimons and dispatches
+// peer.* verbs over each authenticated channel.
+//
+// PeerListen must be called after New and before Serve; it is idempotent
+// if the same listener is already running. Close shuts down the peer listener
+// alongside the Unix socket.
+func (s *Server) PeerListen(addr string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.peerLn != nil {
+		return s.peerLn.Addr().String(), nil
+	}
+	if s.id == nil {
+		// Serve mode: identity not loaded yet. The daemon must be unlocked
+		// before dialing or accepting peer connections makes sense.
+		return "", errors.New("server: PeerListen requires the identity to be loaded (unlock first or use demo mode)")
+	}
+	tln, err := transport.ListenTCP(addr, s.id.PrivateKey())
+	if err != nil {
+		return "", fmt.Errorf("server: peer listen: %w", err)
+	}
+	s.peerLn = tln
+	// Spin up the accept loop. It terminates when the listener is closed
+	// (by Close), at which point peerConns.Wait in Close unblocks.
+	s.peerConns.Add(1)
+	go func() {
+		defer s.peerConns.Done()
+		s.servePeerListener(tln)
+	}()
+	return tln.Addr().String(), nil
+}
+
+// PeerAddr returns the bound peer TCP address string (e.g. "127.0.0.1:42424"),
+// or "" if PeerListen has not been called. Safe to call from any goroutine.
+func (s *Server) PeerAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.peerLn == nil {
+		return ""
+	}
+	return s.peerLn.Addr().String()
+}
+
+// servePeerListener runs the accept loop for the TCP peer server. Each
+// accepted connection is handled in its own goroutine.
+func (s *Server) servePeerListener(ln *transport.Listener) {
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			// Listener was closed (by Close) — exit cleanly.
+			return
+		}
+		s.peerConns.Add(1)
+		go func(c *transport.Conn) {
+			defer s.peerConns.Done()
+			s.handleInboundPeerConn(c)
+		}(conn)
+	}
+}
+
+// handleInboundPeerConn serves peer.* method calls over an already-handshaked
+// inbound Noise IK connection. Each frame is one JSON-RPC request; we send
+// one response frame per request. The connection is closed when the loop exits
+// (on read error, context cancel, or explicit close).
+func (s *Server) handleInboundPeerConn(conn *transport.Conn) {
+	defer conn.Close()
+	for {
+		frame, err := conn.RecvFrame()
+		if err != nil {
+			return
+		}
+		resp := s.dispatchPeer(conn, frame)
+		if resp == nil {
+			continue
+		}
+		b, err := json.Marshal(resp)
+		if err != nil {
+			return
+		}
+		if err := conn.SendFrame(b); err != nil {
+			return
+		}
+	}
+}
+
+// dispatchPeer parses one raw JSON-RPC frame from a remote peer and routes
+// it to a peer.* handler. Returns nil for notifications (no id field).
+// The conn is passed for handlers that need to identify the caller via
+// conn.PeerX25519.
+func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
+	var req Request
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return invalidRequestResponse(err.Error(), nil)
+	}
+	if req.JSONRPC != JSONRPCVersion {
+		if req.IsNotification() {
+			return nil
+		}
+		return invalidRequestResponse(
+			fmt.Sprintf("unsupported jsonrpc version %q", req.JSONRPC), req.ID)
+	}
+	// Locked guard — a locked daemon rejects even peer calls.
+	if !s.unlocked.Load() {
+		if req.IsNotification() {
+			return nil
+		}
+		return errorResponse(req.ID, newError(CodeIdentityLocked, "identity is locked"))
+	}
+
+	switch req.Method {
+	case "peer.echo":
+		result, rpcErr := s.handlePeerEcho(conn, req.Params)
+		if req.IsNotification() {
+			return nil
+		}
+		if rpcErr != nil {
+			return errorResponse(req.ID, rpcErr)
+		}
+		return successResponse(req.ID, result)
+	default:
+		if req.IsNotification() {
+			return nil
+		}
+		return errorResponse(req.ID, newError(CodeMethodNotFound, "Method not found", req.Method))
+	}
+}
+
+// newChannelID generates a fresh ULID string for a peer channel.
+func newChannelID() string {
+	return ulid.Make().String()
 }
 
 // removeStaleSocket clears a leftover socket file if no process is listening.

@@ -72,6 +72,11 @@ func (s *Server) registerMethods() {
 		"daimon.peer.address_book.block":   s.handleAddressBookBlock,
 		"daimon.peer.address_book.unblock": s.handleAddressBookUnblock,
 		"daimon.peer.address_book.remove":  s.handleAddressBookRemove,
+		// v0.3 phase 33 — peer channel management
+		"daimon.peer.dial":   s.handlePeerDial,
+		"daimon.peer.close":  s.handlePeerClose,
+		"daimon.peer.list":   s.handlePeerList,
+		"daimon.peer.invoke": s.handlePeerInvoke,
 	}
 }
 

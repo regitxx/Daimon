@@ -2,7 +2,7 @@
 
 > **Read this first at conversation start.** Full chronological detail is in [JOURNAL.md](./JOURNAL.md).
 
-**Last updated:** 2026-05-20
+**Last updated:** 2026-05-21
 **Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement).
 
 ---
@@ -47,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 418 Go race+vet + 65 pytest + 65 vitest = **548 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**Tests:** 498 Go race+vet + 65 pytest + 65 vitest = **628 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -59,7 +59,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 |---|---|---|---|
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
-| v0.3 | months 4–6 | A2A discovery, federation across machines, MLS/Noise encrypted channels, did:ion anchor, daimon as payment recipient | **phase 30 (discovery primitive) shipped 2026-05-20**; phases 31–36 pending. Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
+| v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–33 shipped 2026-05-20/21** (discovery, TCP+Noise transport, address book, peer.echo); phases 34–36 pending. Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
 | v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | not started |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
@@ -161,3 +161,8 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 70 | 2026-05-20 | **v0.3 phase 30 slice 1**: W3C did:web resolver (`internal/did/web/{parse,document,resolve}.go`, +19 tests) |
 | 71 | 2026-05-20 | **v0.3 phase 30 slice 2**: DaimonEndpoint + Ed25519 sign/verify (`internal/did/web/endpoint.go`, +12 tests) |
 | 72 | 2026-05-20 | **v0.3 phase 30 slice 3**: `daimon.federation.config` RPC verb (`internal/server/federation_handlers.go`, +2 tests) |
+| 73 | 2026-05-20 | **v0.3 phase 31 slice 0**: Ed25519→X25519 private-key derivation (`internal/transport/keyconv.go`, +8 tests) |
+| 74 | 2026-05-20 | **v0.3 phase 31 slice 1**: Noise IK handshake wrapper (`internal/transport/noise.go`, +12 tests, +github.com/flynn/noise dep) |
+| 75 | 2026-05-20 | **v0.3 phase 32**: address book persistence + RPC verbs + audit integration (`internal/addressbook/`, `internal/server/address_book_handlers.go`, +31 tests) |
+| 76 | 2026-05-21 | **v0.3 phase 33 slice 0**: TCP+Noise transport + Ed25519 public→X25519 conversion (`internal/transport/tcp.go`, +11 transport tests) |
+| 77 | 2026-05-21 | **v0.3 phase 33 slice 1**: peer.echo full stack — dial/close/list/invoke RPCs + two-daemon integration test (`internal/server/peer_channel_handlers{.go,_test.go}`, +18 server tests, 469 → 498 Go total) |

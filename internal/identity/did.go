@@ -60,3 +60,10 @@ func DecodeDIDKey(did string) (ed25519.PublicKey, error) {
 func MultibaseFragment(did string) string {
 	return strings.TrimPrefix(did, didKeyPrefix)
 }
+
+// PublicKeyFromDID extracts the Ed25519 public key from a did:key DID.
+// It is a convenience alias for DecodeDIDKey.
+// Returns ErrInvalidDIDKey if the DID is not a valid did:key.
+func PublicKeyFromDID(did string) (ed25519.PublicKey, error) {
+	return DecodeDIDKey(did)
+}

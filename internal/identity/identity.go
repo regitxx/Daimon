@@ -57,6 +57,14 @@ func (i *Identity) PublicKey() ed25519.PublicKey {
 	return i.priv.Public().(ed25519.PublicKey)
 }
 
+// PrivateKey returns the Ed25519 private key. Used by the transport layer
+// (Noise IK) to derive the X25519 static key for authenticated peer channels.
+// The caller MUST NOT export or persist this value; it is provided only for
+// in-process use within the daemon's lifetime.
+func (i *Identity) PrivateKey() ed25519.PrivateKey {
+	return i.priv
+}
+
 // Sign produces an Ed25519 signature over msg.
 func (i *Identity) Sign(msg []byte) ([]byte, error) {
 	if i.priv == nil {

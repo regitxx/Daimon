@@ -47,12 +47,22 @@ func TestHandleFederationConfig_ReturnsBaseline(t *testing.T) {
 		t.Errorf("did_methods: got %v, want [did:key]", out.DIDMethods)
 	}
 
-	// Phase 30 baseline: no peer.* verbs yet, no public endpoint.
-	if len(out.Protocols) != 0 {
-		t.Errorf("protocols at baseline: got %v, want empty", out.Protocols)
+	// Phase 33: peer.echo is the first served verb. Protocols must contain it.
+	if len(out.Protocols) == 0 {
+		t.Error("protocols must not be empty at phase 33+")
 	}
+	found := false
+	for _, p := range out.Protocols {
+		if p == "peer.echo" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("peer.echo missing from protocols: got %v", out.Protocols)
+	}
+	// No PeerListen called → no public endpoint.
 	if out.PublicEndpoint != "" {
-		t.Errorf("public_endpoint at baseline: got %q, want empty", out.PublicEndpoint)
+		t.Errorf("public_endpoint without PeerListen: got %q, want empty", out.PublicEndpoint)
 	}
 
 	// Federation version tag — pinned to "v0.3-draft" until

@@ -93,12 +93,26 @@ type federationConfigResult struct {
 // jsonrpc.go. For now, post-unlock is the consistent posture.
 func (s *Server) handleFederationConfig(_ context.Context, _ json.RawMessage) (any, *RPCError) {
 	did := s.id.DID()
+
+	// PublicEndpoint: report the peer server's TCP address if one is
+	// running, formatted as "tcp://host:port". Empty string means "not
+	// listening" which is a valid state (the daimon can dial peers but
+	// cannot be dialed in this configuration).
+	pubEndpoint := ""
+	if addr := s.PeerAddr(); addr != "" {
+		pubEndpoint = "tcp://" + addr
+	}
+
+	// Protocols: list the peer.* verbs this daimon serves over inbound
+	// Noise channels. Phase 33 introduces peer.echo as the first verb.
+	protocols := []string{"peer.echo"}
+
 	return federationConfigResult{
 		DID:                      did,
 		TransportPubKeyMultibase: identity.MultibaseFragment(did),
 		DIDMethods:               []string{"did:key"},
-		Protocols:                []string{},
-		PublicEndpoint:           "",
+		Protocols:                protocols,
+		PublicEndpoint:           pubEndpoint,
 		FederationVersion:        "v0.3-draft",
 	}, nil
 }

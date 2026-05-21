@@ -80,6 +80,16 @@ const (
 	KindPeerAddressBookBlocked   Kind = "peer.address_book.blocked"
 	KindPeerAddressBookUnblocked Kind = "peer.address_book.unblocked"
 	KindPeerAddressBookRemoved   Kind = "peer.address_book.removed"
+
+	// v0.3 — federation channel + invocation kinds. Logged on peer dial,
+	// close, and every cross-daimon RPC in both directions. The sending
+	// daimon writes KindPeerInvokeSent; the receiving daimon independently
+	// writes KindPeerInvokeReceived with its own identity context — two
+	// separate audit chains, both capturing the same cross-daimon event.
+	KindPeerChannelOpened   Kind = "peer.channel.opened"
+	KindPeerChannelClosed   Kind = "peer.channel.closed"
+	KindPeerInvokeSent      Kind = "peer.invoke.sent"
+	KindPeerInvokeReceived  Kind = "peer.invoke.received"
 )
 
 // Common errors.

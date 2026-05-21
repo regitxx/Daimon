@@ -135,6 +135,30 @@ const (
 	// suggest "run daimon unlock first" — that won't help; the password
 	// was just typed wrong. v0.2 (phase 40.6.x).
 	CodeWrongPassword = -32008
+
+	// v0.3 — federation peer-channel error codes.
+
+	// CodePeerUnreachable — the daimon could not establish a channel with
+	// the peer (DNS failure, TCP refused, Noise handshake failed). The
+	// endpoint string in the request was syntactically valid but not
+	// reachable or not a daimon.
+	CodePeerUnreachable = -32010
+
+	// CodePeerAuthFailed — the Noise handshake completed but the peer's
+	// X25519 static key did not match the expected value derived from the
+	// supplied DID. Strong evidence the endpoint is not owned by the claimed
+	// DID; the client should not retry without fresh endpoint information.
+	CodePeerAuthFailed = -32011
+
+	// CodePeerProtocolUnsupported — the peer does not serve the requested
+	// method (returned peer.* method not in its protocol list). Analogous to
+	// CodeMethodNotFound but for cross-daimon calls.
+	CodePeerProtocolUnsupported = -32012
+
+	// CodePeerUnauthorized — the address book entry for the peer DID does
+	// not grant the requested verb. The user must pin the peer with the
+	// required verb before this call is permitted.
+	CodePeerUnauthorized = -32013
 )
 
 // nullID is the JSON-RPC null id, used in responses where no client id could
