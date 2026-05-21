@@ -47,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 513 Go race+vet + 84 pytest + 85 vitest = **682 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**Tests:** 519 Go race+vet + 84 pytest + 85 vitest = **688 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **CLI peer + federation surface (phases 37–38):** `daimon federation config` + `daimon peer listen/dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated. `daimon peer listen` starts the inbound Noise IK TCP listener after unlock.
 
@@ -174,3 +174,5 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 81 | 2026-05-21 | **v0.3 phase 37**: CLI peer + federation commands — `daimon federation config`, `daimon peer dial/close/list/echo/invoke/pay-required`, `daimon peer address-book list/add/pin/block/unblock/remove`. bash/zsh/fish completion updated. 513 Go tests still green. |
 | 82 | 2026-05-21 | **v0.3 phase 38**: `daimon.peer.listen` RPC + `daimon peer listen` CLI — starts inbound Noise IK TCP listener post-unlock. `KindPeerListenStarted` audit kind. +5 tests (federation_handlers_test.go). 518 Go total. |
 | 83 | 2026-05-21 | **SPEC §16 v0.3 federation** — formal protocol specification for all phases 30–38: transport (Noise IK/TCP), channel lifecycle, address book + trust model, served verbs (peer.echo / peer.ask / peer.pay.required), federation config wire format, 13 activity kinds, 4 error codes, v0.3 constraints + GA criteria. SPEC grows 797 → 1,222 lines. Version header bumped to v0.3 (Draft). |
+| 84 | 2026-05-21 | **SDK wire fix**: `address_book.add` sent `label`/`pubkey_multibase` but server expects `pet_name`/`transport_pubkey_multibase`; optional fields were silently dropped. Fixed in Python + TypeScript SDKs; `AddressBookEntry.label` → `pet_name` in TS interface. Tests updated to assert correct wire names + absence of old ones. |
+| 85 | 2026-05-21 | **§16.10 GA gate 2**: `TestFederationSmoke_EndToEnd` — 9-step narrative integration test in `internal/server/federation_smoke_test.go`. Two real daemons (Noise IK TCP), covers: federation.config, peer.dial, peer.list, peer.echo, peer.ask (mock provider), peer.pay.required error path, dual-side audit, channel close + empty list check. +1 Go test (519 total). |

@@ -4120,3 +4120,38 @@ SPEC.md updated 797 → 1,222 lines (+425 lines). Header bumped to "v0.3 (Draft)
 **Design principle enforced:** every wire shape in §16 was verified against the actual shipped Go handler code (`internal/server/federation_handlers.go`, `internal/server/peer_channel_handlers.go`, `internal/server/address_book_handlers.go`). No spec/implementation drift introduced.
 
 **No code changes.** SPEC.md and CHECKPOINT.md/JOURNAL.md only.
+
+---
+
+## 2026-05-21 — Sessions 84–85: SDK wire fix + §16.10 GA gate 2
+
+### Session 84: SDK address_book.add wire field names
+
+**Bug:** `client.peer.address_book.add(label="alice", pubkey_multibase="z6Mk...")` in both Python and TypeScript SDKs was sending the wrong JSON field names to the daemon. The server expects `pet_name` and `transport_pubkey_multibase`; the SDKs sent `label` and `pubkey_multibase`. Optional fields were silently dropped by the server — the entry was created as if only `{did}` was passed.
+
+**Fix (4 files):**
+- `sdk/python/daimon/client.py`: `params["pet_name"] = label`, `params["transport_pubkey_multibase"] = pubkey_multibase`
+- `sdk/typescript/src/client.ts`: same wire mapping; `AddressBookEntry.label → pet_name?: string` in the interface
+- `sdk/python/tests/test_peer.py`: mock fixtures use `pet_name` (not `label`); add/with-label test now asserts the NEW keys are present and the OLD keys are absent
+- `sdk/typescript/test/peer.test.ts`: same, plus status string corrected to lowercase (`"pinned"` not `"Pinned"`)
+
+Public API parameter names unchanged (`label`, `pubkeyMultibase`) — no breaking change for SDK users.
+
+### Session 85: §16.10 GA gate 2 — TestFederationSmoke_EndToEnd
+
+**What ships:** `internal/server/federation_smoke_test.go` — a single 9-step narrative integration test that satisfies SPEC §16.10 GA criterion #2 ("cross-daimon smoke in CI").
+
+**Flow:**
+1. B's `daimon.federation.config` → verifies DID, `tcp://` endpoint, peer.echo + peer.ask in protocols
+2. A dials B (real Noise IK TCP handshake)
+3. Channel appears in A's `daimon.peer.list`
+4. A → B: `peer.echo` — verifies channel is up
+5. B's operator pins A in B's address book with peer.ask
+6. A → B: `peer.ask` (mock provider returns "forty-two") — verifies cross-daimon LLM invocation
+7. A → B: `peer.pay.required` (no wallet on B) → verifies `CodeInternalError` with "peer returned error" message
+8. Audit: A=channel.opened(1) + invoke.sent(2); B=invoke.received(1) + invoke.served(1)
+9. A closes channel → `KindPeerChannelClosed` logged; `peer.list` returns empty
+
+**Audit accounting discovered:** `peer.invoke.sent` is only written on success (error path returns before the row); `KindPeerInvokeReceived` is only written by `handlePeerEcho`, not by ask/pay.required handlers.
+
++1 Go test (519 total, up from 518). Runs under `go test -race ./...` as part of CI shard 0. Two of the four §16.10 GA gates are now green: phases shipped ✅, cross-daimon CI smoke ✅.
