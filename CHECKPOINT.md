@@ -49,7 +49,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 
 **Tests:** 513 Go race+vet + 84 pytest + 85 vitest = **682 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
-**CLI peer + federation surface (phase 37):** `daimon federation config` + `daimon peer dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated.
+**CLI peer + federation surface (phases 37–38):** `daimon federation config` + `daimon peer listen/dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated. `daimon peer listen` starts the inbound Noise IK TCP listener after unlock.
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -61,7 +61,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 |---|---|---|---|
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
-| v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–37 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands). Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
+| v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
 | v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | not started |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
@@ -172,3 +172,4 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 79 | 2026-05-21 | **v0.3 phase 35**: peer.pay.required — x402 price discovery verb, KindPeerPaymentInvoiced audit kind, universally authorized (+7 tests, 506 → 513 Go total) |
 | 80 | 2026-05-21 | **v0.3 phase 36**: SDK wrappers — `client.federation.*` + `client.peer.*` (dial/close/list/invoke/echo/pay_required + addressBook.*) in Python + TypeScript (+19 pytest, +20 vitest; 65 → 84 pytest, 65 → 85 vitest) |
 | 81 | 2026-05-21 | **v0.3 phase 37**: CLI peer + federation commands — `daimon federation config`, `daimon peer dial/close/list/echo/invoke/pay-required`, `daimon peer address-book list/add/pin/block/unblock/remove`. bash/zsh/fish completion updated. 513 Go tests still green. |
+| 82 | 2026-05-21 | **v0.3 phase 38**: `daimon.peer.listen` RPC + `daimon peer listen` CLI — starts inbound Noise IK TCP listener post-unlock. `KindPeerListenStarted` audit kind. +5 tests (federation_handlers_test.go). 518 Go total. |

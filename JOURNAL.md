@@ -4047,3 +4047,44 @@ All subcommands accept `--json` for structured output.
 **Completion scripts updated:** `cmd_completion.go` — bash, zsh, and fish scripts all updated with `peer` and `federation` in the top-level verb lists and second-level dispatch for `peer address-book`.
 
 **Tests:** 513 Go (no change — CLI commands are client-only, no server-side code changed). The existing 682-test suite passes clean.
+
+---
+
+## 2026-05-21 — Session 82: phase 38
+
+### v0.3 phase 38: daimon.peer.listen — start inbound peer connections
+
+**Commit:** `0705ab5`
+
+The federation CLI (phase 37) covered all the outbound verbs but left one critical gap: there was no way to start accepting inbound peer connections after unlock. `PeerListen` existed as a Go method on the server but was never exposed via JSON-RPC. This phase adds that bridge.
+
+**What ships:**
+
+- `KindPeerListenStarted = "peer.listen.started"` in `internal/activity/activity.go`
+- `handlePeerListenStart` in `internal/server/federation_handlers.go`:
+  - Params: `{addr: string}` — optional, defaults to `"0.0.0.0:0"`
+  - Strips `"tcp://"` prefix as a user convenience
+  - Calls `s.PeerListen(addr)` — idempotent at the Go level, propagated to RPC
+  - Audits `KindPeerListenStarted` with the bound endpoint
+  - Returns `{endpoint: "tcp://host:port"}`
+- Registered as `"daimon.peer.listen"` in `handlers.go`
+- `cmdPeerListen` in `cmd/daimon/cmd_peer.go` — added to `cmdPeer` switch
+- Usage string + bash/zsh/fish completion updated
+
+**Tests added (+5, now 518 Go total):**
+- `TestPeerListen_DefaultAddr_BindsAndReturnsTCPEndpoint`
+- `TestPeerListen_ExplicitAddr_BindsOnThatAddr`
+- `TestPeerListen_TCPSchemePrefix_IsStripped`
+- `TestPeerListen_Idempotent_ReturnsSameEndpoint`
+- `TestPeerListen_FederationConfigReflectsEndpoint` ← full observability loop
+
+**Full two-daimon flow (now unblocked):**
+```
+machine A:  daimon unlock
+            daimon peer listen --addr tcp://0.0.0.0:9999
+            daimon federation config   # → shows DID + endpoint to share with B
+
+machine B:  daimon unlock
+            daimon peer dial --did <A_DID> --endpoint tcp://A_ip:9999
+            daimon peer echo <channel_id> hello
+```
