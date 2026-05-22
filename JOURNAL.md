@@ -4220,3 +4220,28 @@ The DRAFT status header was misleading — "Read with skepticism; reply with edi
 **Test matrix:** 15/15 green. Full suite: 534 Go + 84 pytest + 85 vitest = 703 total, all green.
 
 **Next (phase 41):** `capability.db` schema — issued tokens table, received tokens table, receipts table, `calls_used` counter table. SQLite in `$DAIMON_HOME/capability.db`.
+
+---
+
+## 2026-05-22 — Session 89: v0.4 phase 41 — capability.db schema
+
+**Trigger:** Continuation of phase 40 session.
+
+**What ships:** `internal/capability/db.go` — `DB` type (SQLite at `$DAIMON_HOME/capability.db`) with four tables:
+
+| Table | Purpose |
+|---|---|
+| `issued_tokens` | Tokens this daimon has issued. Supports list, lookup, revoke (idempotent), is_revoked. ValidUntil stored as nullable Unix integer. Indexed on `issued_at` and `revoked`. |
+| `received_tokens` | Tokens received from remote daimons (caller-side storage). Upserts on token_id. |
+| `receipts` | Signed proof-of-service records. `direction` column (CHECK IN ('issued','received')) separates receipts we issued vs. received. Upserts on receipt_id. |
+| `token_calls` | Per-token call counter. `IncrementCalls` is a single-statement upsert (INSERT ... ON CONFLICT ... DO UPDATE SET calls_used=calls_used+1). `CallsUsed` returns 0 for unknown tokens. The returned count feeds into `VerifyContext.CallsUsed` to make the `check if calls_used($n), $n < N` Datalog check stateful. |
+
+**Design choices:**
+- No encryption on capability.db rows: Biscuit tokens are public cryptographic objects; receipts are informational metadata. No private key material here. Seam preserved if this ever changes.
+- `RevokeToken` distinguishes "already revoked" (idempotent, no error) vs. "not found" (returns error) by checking row existence after UPDATE rowcount = 0.
+- `ListReceipts("") ` returns all; direction filter is optional.
+- Integration test `TestVerify_WithCallsUsedFromDB`: Issue token with MaxCalls=3, call IncrementCalls three times, verify calls_used passes on calls 1–2 and fails at call 3 (ceiling).
+
+**Test count:** 15 DB tests + 1 integration test. 534 → 549 Go total.
+
+**Next (phase 42):** `daimon.capability.issue`, `daimon.capability.list`, `daimon.capability.revoke`, `daimon.capability.attenuate` RPC verbs in `internal/server/`.

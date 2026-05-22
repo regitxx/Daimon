@@ -3,7 +3,7 @@
 > **Read this first at conversation start.** Full chronological detail is in [JOURNAL.md](./JOURNAL.md).
 
 **Last updated:** 2026-05-22
-**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phase 40 shipped: `internal/capability/` package (Issue/Attenuate/Verify) + 15 unit tests.**
+**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phases 40–41 shipped: `internal/capability/` (Issue/Attenuate/Verify + capability.db schema).**
 
 ---
 
@@ -47,7 +47,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 534 Go race+vet + 84 pytest + 85 vitest = **703 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**Tests:** 549 Go race+vet + 84 pytest + 85 vitest = **718 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **CLI peer + federation surface (phases 37–38):** `daimon federation config` + `daimon peer listen/dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated. `daimon peer listen` starts the inbound Noise IK TCP listener after unlock.
 
@@ -62,7 +62,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
 | v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). **SPEC §16 written 2026-05-21.** Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
-| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **Design doc written 2026-05-21** — [`design/v0.4-delegation.md`](./design/v0.4-delegation.md). 8 phases sketched (40–47). **Phase 40 shipped 2026-05-22**: `internal/capability/` (Issue/Attenuate/Verify + 15 unit tests), biscuit-go v2.2.0 vendored. |
+| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **Design doc written 2026-05-21** — [`design/v0.4-delegation.md`](./design/v0.4-delegation.md). **Phase 40**: `internal/capability/` (Issue/Attenuate/Verify, 15 tests). **Phase 41**: `capability.db` schema (4 tables: issued_tokens, received_tokens, receipts, token_calls; 15 tests; calls_used integration test). 534 → 549 Go total. |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
 
@@ -179,3 +179,4 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 86 | 2026-05-21 | `daimon unlock --peer-addr tcp://...` — starts inbound peer listener immediately post-unlock (no separate `daimon peer listen` step needed). Non-fatal on failure. Usage string + fish completion updated. `design/v0.3-federation.md` status updated to IMPLEMENTED → points to SPEC.md §16. |
 | 87 | 2026-05-21 | **v0.4 design**: [`design/v0.4-delegation.md`](./design/v0.4-delegation.md) — 342-line proposal for Biscuit-token capability delegation + reputation receipts. Covers: why Biscuit (vs JWT/Macaroon), capability model (root facts + Datalog constraints), token lifecycle (issue/attenuate/verify/revoke), address book integration, receipt format, 2 new error codes, 8 open questions, 8-phase implementation sketch. |
 | 88 | 2026-05-22 | **v0.4 phase 40**: `internal/capability/` package — Issue (root Biscuit token with right facts + optional time/model/call-count Datalog checks), Attenuate (offline block append, no issuer contact), Verify (Authorizer with ambient facts + allow-specific/any policies), Encode/Decode helpers. `github.com/biscuit-auth/biscuit-go/v2 v2.2.0` added as direct dep. 15 unit tests, all green. 519 → 534 Go total. |
+| 89 | 2026-05-22 | **v0.4 phase 41**: `internal/capability/db.go` — `DB` type backed by SQLite (`capability.db`). Four tables: `issued_tokens` (RecordIssued/RevokeToken/IsRevoked/LookupIssued/ListIssued), `received_tokens` (RecordReceived/ListReceived), `receipts` (RecordReceipt/ListReceipts; direction=issued|received), `token_calls` (IncrementCalls/CallsUsed — feeds calls_used Datalog fact for MaxCalls enforcement). 15 DB tests + 1 end-to-end integration test (Issue → IncrementCalls × 3 → Verify at ceiling fails). 534 → 549 Go total. |
