@@ -4179,3 +4179,23 @@ Impl: after the existing unlock RPC succeeds, `daemonCall("daimon.peer.listen", 
 **`design/v0.3-federation.md` — marked IMPLEMENTED**
 
 The DRAFT status header was misleading — "Read with skepticism; reply with edits" on a doc that was fully implemented. Updated to IMPLEMENTED, pointing to SPEC.md §16 as the authoritative reference. Original DRAFT text struck-through (not deleted, preserved as historical rationale).
+
+---
+
+## 2026-05-21 — Session 87: v0.4 design — capability delegation + reputation
+
+**Trigger:** "continue" after v0.3 feature-complete. v0.3 GA gated on live dogfood only (not code); started v0.4 arc.
+
+**What ships:** `design/v0.4-delegation.md` (342 lines) — pre-implementation design proposal for v0.4 Biscuit-token capability delegation + reputation primitive.
+
+**Key decisions proposed:**
+
+- **Biscuit v3** over JWT/Macaroons: Ed25519 root matches Daimon's existing identity keypair (zero new key infra); offline attenuation + Datalog constraints are exactly what agent delegation needs. `github.com/biscuit-auth/biscuit-go` (Apache 2.0) is the implementation.
+- **Capability model**: root Biscuit block asserts `right("peer.ask", serving_did)` facts; Datalog checks enforce constraints (time window, call ceiling, model allowlist). Holders attenuate downstream without contacting the issuer.
+- **Composing with address book**: tokens don't replace v0.3 pinning — they're an opt-in layer above it. Blocked peers cannot override a block with a token. Check order: blocked? → token present + valid? → pinned + verb approved? → reject.
+- **Reputation receipts**: serving daimon issues an Ed25519-signed receipt after a successful peer.ask call (opt-in, `"request_receipt": true` in params). Caller accumulates receipts; any third party can verify offline against the serving daimon's DID key. No central authority. Informational in v0.4; gates labor-market bids in v0.5.
+- **New RPC surface**: `daimon.capability.issue/list/revoke/attenuate`, `daimon.reputation.receipts`. `peer.ask` gains optional `capability_token` param.
+- **Two new error codes**: `CodeCapabilityDenied (-32014)`, `CodeCapabilityRequired (-32015)`.
+- **8-phase sketch** (phases 40–47): `biscuit-go` + `internal/capability/` → capability.db schema → RPC verbs → peer.ask integration → reputation receipts → CLI → SDK wrappers → SPEC §17.
+
+**Open questions flagged:** spend-tracking statefulness for max_calls Datalog check; biscuit-go stability (spec is v3-stable; Go bindings lag); whether `daimon.federation.config` should advertise `"capability_tokens": true`; receipt + issued-token storage schema details.
