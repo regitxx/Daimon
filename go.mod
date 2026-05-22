@@ -3,6 +3,7 @@ module github.com/regitxx/Daimon
 go 1.25.0
 
 require (
+	github.com/biscuit-auth/biscuit-go/v2 v2.2.0
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1
 	github.com/flynn/noise v1.1.0
 	github.com/mr-tron/base58 v1.3.0
@@ -18,6 +19,7 @@ require (
 require (
 	github.com/FactomProject/basen v0.0.0-20150613233007-fe3947df716e // indirect
 	github.com/FactomProject/btcutilecc v0.0.0-20130527213604-d3a63a5752ec // indirect
+	github.com/alecthomas/participle/v2 v2.0.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.9 // indirect
@@ -25,6 +27,7 @@ require (
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	golang.org/x/sys v0.43.0 // indirect
+	google.golang.org/protobuf v1.31.0 // indirect
 	modernc.org/libc v1.72.0 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
 	modernc.org/memory v1.11.0 // indirect

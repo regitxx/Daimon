@@ -4199,3 +4199,24 @@ The DRAFT status header was misleading — "Read with skepticism; reply with edi
 - **8-phase sketch** (phases 40–47): `biscuit-go` + `internal/capability/` → capability.db schema → RPC verbs → peer.ask integration → reputation receipts → CLI → SDK wrappers → SPEC §17.
 
 **Open questions flagged:** spend-tracking statefulness for max_calls Datalog check; biscuit-go stability (spec is v3-stable; Go bindings lag); whether `daimon.federation.config` should advertise `"capability_tokens": true`; receipt + issued-token storage schema details.
+
+---
+
+## 2026-05-22 — Session 88: v0.4 phase 40 — internal/capability package
+
+**Trigger:** Session 87 closed with design/v0.4-delegation.md committed. Natural next step is phase 40 implementation.
+
+**What ships:**
+- `internal/capability/capability.go` — three public functions:
+  - `Issue(privKey, IssueOptions) ([]byte, error)`: mints a root Biscuit token. Authority block contains `right("verb", "targetDID")` facts + optional Datalog checks for time expiry (`check if time($t), $t <= RFC3339`), model constraint (`check if peer_ask_model($m), $m == "model"`), call-count ceiling (`check if calls_used($n), $n < N`). Empty `TargetDID` → `"any"` target.
+  - `Attenuate(token []byte, AttenuateOptions) ([]byte, error)`: appends a new block offline (no issuer contact) with additional restrictive checks. No-op if no options provided. Attenuated token is strictly larger than original.
+  - `Verify(token []byte, rootPubKey, VerifyContext) error`: creates an Authorizer, injects ambient facts (`time(now)`, `peer_ask_model(model)`, `calls_used(n)`), adds allow-specific + allow-any policies, runs Biscuit authorization. Returns `ErrDenied` on failure.
+  - `Encode/Decode` helpers: base64url round-trip for wire transport.
+- `internal/capability/capability_test.go` — 15 unit tests covering all failure + success paths.
+- `go.mod`/`go.sum`: `github.com/biscuit-auth/biscuit-go/v2 v2.2.0` added as direct dep (Apache 2.0); `google.golang.org/protobuf v1.31.0` + `github.com/alecthomas/participle/v2 v2.0.0` as indirect deps.
+
+**Biscuit-go audit:** One new direct dep (`google.golang.org/protobuf`, already pervasive in Go ecosystem), one transitive dep (`github.com/alecthomas/participle/v2`, pure Go parsing library, well-maintained). No C dependencies. Biscuit spec is formally specified (v3); Go library implements it faithfully. Supply-chain risk: low.
+
+**Test matrix:** 15/15 green. Full suite: 534 Go + 84 pytest + 85 vitest = 703 total, all green.
+
+**Next (phase 41):** `capability.db` schema — issued tokens table, received tokens table, receipts table, `calls_used` counter table. SQLite in `$DAIMON_HOME/capability.db`.
