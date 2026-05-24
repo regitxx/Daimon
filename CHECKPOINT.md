@@ -2,8 +2,8 @@
 
 > **Read this first at conversation start.** Full chronological detail is in [JOURNAL.md](./JOURNAL.md).
 
-**Last updated:** 2026-05-22
-**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phases 40–42 shipped: `internal/capability/` (Issue/Attenuate/Verify + DB + 4 RPC verbs).**
+**Last updated:** 2026-05-24
+**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phases 40–47 shipped: Biscuit capability delegation, reputation receipts, full CLI surface, SPEC §17. v0.4.0-dev.1 binary pre-release live.**
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Channel | Command | Version |
 |---|---|---|
-| Binary one-liner | `curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh \| sh` | v0.2.0-dev.3 (binary) |
+| Binary one-liner | `curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh \| sh` | v0.4.0-dev.1 (binary) |
 | PyPI (pre-release) | `pip install --pre daimon-protocol` | 0.2.0.dev2 |
 | npm (pre-release) | `npm install @daimon-protocol/sdk@dev` | 0.2.0-dev.2 |
 | PyPI (stable) | `pip install daimon-protocol` | 0.1.0 |
@@ -47,9 +47,21 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 - Binary version via ldflags injection (`-X main.version=...`); SDK versions via `gen_version.py` (Python) + `gen-version.mjs` (TS), both CI-drift-checked
 - 10 CI shards (Go race+vet, Python 3.10/3.11/3.12/3.13, Node 18/20/22, x402 cross-language smoke, install.sh on ubuntu + macOS)
 
-**Tests:** 567 Go race+vet + 84 pytest + 85 vitest = **736 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**v0.4 surface (pre-release, 2026-05-24):**
+- **Biscuit v3 capability tokens**: `internal/capability/` — `Issue` (root token: verb rights + optional time/model/call-count Datalog checks), `Attenuate` (offline block append, strictly tighter), `Verify` (ambient facts: time, peer_ask_model, calls_used)
+- **capability.db**: 4 SQLite tables — `issued_tokens`, `received_tokens`, `receipts`, `token_calls` (stateful `calls_used` counter for MaxCalls enforcement)
+- **RPC verbs**: `daimon.capability.issue/list/revoke/attenuate`
+- **peer.ask capability gate**: check order blocked → token valid → pinned → reject. Blocked DIDs cannot bypass via token. Biscuit token accepted in lieu of address-book pin.
+- **Reputation receipts**: Ed25519-signed `reputation.Receipt` returned from `peer.ask` when `request_receipt=true`. Canonical signing payload: all fields except Signature, declaration-order JSON. Stored async in `capability.db receipts`.
+- **`daimon.reputation.receipts` RPC**: query issued/received receipts by direction
+- **CLI**: `daimon capability issue/list/revoke/attenuate` + `daimon reputation receipts`
+- **SPEC §17**: formal specification for the complete v0.4 delegation + reputation surface
+- **6 new activity kinds**: KindCapabilityIssued/Revoked/Verified/Denied + KindReputationReceiptIssued/Received
+- **2 new error codes**: CodeCapabilityDenied (-32014), CodeCapabilityRequired (-32015)
 
 **CLI peer + federation surface (phases 37–38):** `daimon federation config` + `daimon peer listen/dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated. `daimon peer listen` starts the inbound Noise IK TCP listener after unlock.
+
+**Tests:** 580 Go race+vet + 84 pytest + 85 vitest = **749 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -62,7 +74,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
 | v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). **SPEC §16 written 2026-05-21.** Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
-| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **Design doc written 2026-05-21** — [`design/v0.4-delegation.md`](./design/v0.4-delegation.md). **Phase 40**: `internal/capability/` (Issue/Attenuate/Verify, 15 tests). **Phase 41**: capability.db schema (4 tables, 16 tests). **Phase 42**: `daimon.capability.issue/list/revoke/attenuate` RPCs + `CodeCapabilityDenied/Required` + 4 activity kinds + 18 server tests. 549 → 567 Go total. |
+| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **✅ phases 40–47 shipped 2026-05-24.** Issue/Attenuate/Verify (Biscuit v3), capability.db (4 tables), 4 capability RPCs, peer.ask capability gate (blocked→token→pinned→reject), Ed25519 reputation receipts, daimon.reputation.receipts RPC, CLI surface, SPEC §17. **v0.4.0-dev.1 pre-release binary live.** 567 → 580 Go total. |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
 
@@ -181,3 +193,8 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 88 | 2026-05-22 | **v0.4 phase 40**: `internal/capability/` package — Issue (root Biscuit token with right facts + optional time/model/call-count Datalog checks), Attenuate (offline block append, no issuer contact), Verify (Authorizer with ambient facts + allow-specific/any policies), Encode/Decode helpers. `github.com/biscuit-auth/biscuit-go/v2 v2.2.0` added as direct dep. 15 unit tests, all green. 519 → 534 Go total. |
 | 89 | 2026-05-22 | **v0.4 phase 41**: `internal/capability/db.go` — `DB` type backed by SQLite (`capability.db`). Four tables: `issued_tokens` (RecordIssued/RevokeToken/IsRevoked/LookupIssued/ListIssued), `received_tokens` (RecordReceived/ListReceived), `receipts` (RecordReceipt/ListReceipts; direction=issued|received), `token_calls` (IncrementCalls/CallsUsed — feeds calls_used Datalog fact for MaxCalls enforcement). 15 DB tests + 1 end-to-end integration test (Issue → IncrementCalls × 3 → Verify at ceiling fails). 534 → 549 Go total. |
 | 90 | 2026-05-22 | **v0.4 phase 42**: `daimon.capability.issue/list/revoke/attenuate` RPC verbs. New error codes CodeCapabilityDenied (-32014) + CodeCapabilityRequired (-32015) in jsonrpc.go. Four activity Kind constants (capability.issued/revoked/verified/denied) in activity.go. `CapabilityDB *capability.DB` threaded into server.Options + Server struct. 18 handler tests covering all success + error paths + audit log integration. 549 → 567 Go total. |
+| 91 | 2026-05-24 | **v0.4 phase 43**: wire `capability_token` into `peer.ask`. Fixed `calls_used` injection bug (always inject, even when 0). Check order: blocked→token→pinned→reject. `verifyCapabilityToken()` helper. `peer_ask_capability_test.go` with 8 tests. 567 → 575 Go total. |
+| 92 | 2026-05-24 | **v0.4 phase 44**: reputation receipts. `internal/reputation/receipt.go` (Sign/Verify, canonical JSON payload). `handleReputationReceipts` RPC. `handlePeerAsk` signs + returns receipt when `request_receipt=true`; async DB write; audits KindReputationReceiptIssued. 2 new activity kinds. 7 tests including full E2E sig verification. 575 → 580 Go total. |
+| 93 | 2026-05-24 | **v0.4 phase 45**: CLI — `cmd/daimon/cmd_capability.go` (issue/list/revoke/attenuate, multiVerb flag) + `cmd_reputation.go` (receipts). `main.go` dispatch + usage extended. No new tests. |
+| 94 | 2026-05-24 | **v0.4 phase 47**: SPEC §17 — formal specification for capability delegation + reputation (330 lines). Token anatomy, right facts, optional checks, lifecycle, peer.ask check order, revocation, receipt format+signing, RPC surface, activity kinds, error codes, security considerations. |
+| 95 | 2026-05-24 | **v0.4.0-dev.1 pre-release**: pushed tag, GitHub Actions release.yml succeeded. 4 platform tarballs (darwin/linux × amd64/arm64) + checksums.txt on GitHub Releases. `install.sh` one-liner live. 580 Go + 84 pytest + 85 vitest = 749 tests total. |

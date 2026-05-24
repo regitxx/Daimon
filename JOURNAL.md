@@ -4279,3 +4279,191 @@ Also adds `auditCapability()` helper (same pattern as `auditPeer`).
 **Test count:** 549 → 567 Go total.
 
 **Next (phase 43):** `peer.ask` updated to accept optional `capability_token` param; serving-side verification with capDB.IsRevoked() + capability.Verify() + `CodeCapabilityDenied`; check order: blocked → token valid → pinned → reject.
+
+---
+
+## 2026-05-24 — Session 91: v0.4 phase 43 — wire capability_token into peer.ask
+
+**Trigger:** Natural continuation of phase 42.
+
+**What ships:**
+
+**`internal/capability/capability.go`** — bug fixed in `Verify`: previously `calls_used` fact was only injected when `ctx.CallsUsed > 0`. This caused the `check if calls_used($n), $n < N` Datalog check to fail on the very first invocation (no tuple to match against). Changed to unconditionally inject `calls_used(N)` regardless of value. Without this, `TestPeerAsk_CapabilityToken_MaxCallsEnforced` failed on call 1 of a 2-call ceiling.
+
+**`internal/server/peer_channel_handlers.go`** — extended with:
+- `peerAskParams.CapabilityToken`, `.CapabilityTokenID`, `.RequestReceipt` fields
+- `peerAskResult.Receipt *reputation.Receipt` (nil unless `request_receipt=true`)
+
+**`internal/server/capability_handlers.go`** — added `verifyCapabilityToken(token, tokenID, model string) *RPCError` helper: decodes base64url token, optionally checks revocation + fetches `calls_used` from capDB if `tokenID` provided, builds `VerifyContext`, runs `capability.Verify`, increments call counter on success, audits `KindCapabilityVerified` or `KindCapabilityDenied`.
+
+**`internal/server/server.go`** — rewrote `"peer.ask"` case in `dispatchPeer` with enforced check order:
+1. Blocked guard: if address-book entry exists and `!HasVerb("peer.ask")` → `CodePeerUnauthorized` (cannot be bypassed by token)
+2. Peek at `capability_token` field in raw params
+3. If token present → `verifyCapabilityToken()`; on success, fall through to `handlePeerAsk`
+4. If no token and no address-book entry → `CodePeerUnauthorized`
+5. (If address-book entry and no token → fall through to `handlePeerAsk` as before)
+
+**`internal/server/peer_ask_capability_test.go`** (new) — 8 tests:
+- `TestPeerAsk_CapabilityToken_OK`
+- `TestPeerAsk_CapabilityToken_Revoked`
+- `TestPeerAsk_CapabilityToken_Expired`
+- `TestPeerAsk_CapabilityToken_WrongVerb`
+- `TestPeerAsk_CapabilityToken_BlockedCannotBypass`
+- `TestPeerAsk_CapabilityToken_NoDB`
+- `TestPeerAsk_CapabilityToken_MaxCallsEnforced`
+- `TestPeerAsk_PinnedPeerStillWorksWithoutToken`
+
+**Test count:** 567 → 575 Go total.
+
+**Design decision (check order):** Explicit address-book blocks take priority over capability tokens. An operator who has blocked a DID cannot have that block circumvented by presenting a valid token — the block is authoritative. This prevents a compromised/leaked token from being used against a peer who has specifically opted out.
+
+**Next (phase 44):** Ed25519-signed reputation receipts — `internal/reputation/receipt.go`, `handleReputationReceipts` RPC, receipt signing in `handlePeerAsk`, `capability.db receipts` persistence, `daimon.reputation.receipts` dispatch.
+
+---
+
+## 2026-05-24 — Session 92: v0.4 phase 44 — reputation receipts
+
+**Trigger:** Continuation of phase 43 session.
+
+**What ships:**
+
+**`internal/reputation/receipt.go`** (new package) — defines:
+- `Receipt` struct: `ReceiptID`, `Direction`, `ServedAt`, `Verb`, `ServerDID`, `CallerDID`, `Provider`, `Model`, `InputTokens`, `OutputTokens`, `DurationMS`, `Signature`
+- `payload` struct (same minus `Signature`) for canonical Ed25519 signing: declaration-order JSON marshal; deterministic without needing field sorting
+- `Sign(privKey ed25519.PrivateKey, r *Receipt) error`
+- `Verify(pubKey ed25519.PublicKey, r *Receipt) error`
+- `FormatTime(t time.Time) string` — RFC3339 UTC
+
+**`internal/activity/activity.go`** — two new Kind constants:
+- `KindReputationReceiptIssued` — written by the serving daimon when it issues a signed receipt
+- `KindReputationReceiptReceived` — reserved for the calling daimon (not yet wired; placeholder for Phase 46)
+
+**`internal/server/reputation_handlers.go`** (new) — `handleReputationReceipts`:
+- Validates optional `direction` param (must be `"issued"`, `"received"`, or `""`)
+- Calls `capDB.ListReceipts(direction)`
+- Converts `capability.ReceiptRecord` → wire `reputationReceiptItem`
+- Returns `CodeInvalidRequest` if capDB not configured
+
+**`internal/server/peer_channel_handlers.go`** — `handlePeerAsk` extended: when `p.RequestReceipt && s.id != nil`:
+1. Build `reputation.Receipt` from response metadata (ULID receipt_id, RFC3339 served_at, verb/provider/model/tokens/duration)
+2. Call `reputation.Sign(s.id.PrivateKey(), receipt)` → embedded in `peerAskResult.Receipt`
+3. Goroutine: `capDB.RecordReceipt(...)` (async, so DB latency doesn't block the response)
+4. `s.auditActivity(KindReputationReceiptIssued, ...)` with receipt_id
+
+**`internal/server/handlers.go`** — added `"daimon.reputation.receipts": s.handleReputationReceipts`
+
+**`internal/server/reputation_handlers_test.go`** (new) — 7 tests:
+- `TestReputation_Receipts_Empty`
+- `TestReputation_Receipts_NoDB`
+- `TestReputation_Receipts_BadDirection`
+- `TestPeerAsk_RequestReceipt_OK` — full E2E: dial, pin, peer.ask with `request_receipt=true`, verify Ed25519 signature under B's public key, assert B audited `KindReputationReceiptIssued`
+- `TestPeerAsk_RequestReceipt_FalseNoReceipt` — omitting `request_receipt` returns nil receipt
+- `TestPeerAsk_RequestReceipt_StoredInDB` — issued receipt appears in `daimon.reputation.receipts` list (polls because DB write is async)
+- `TestPeerAsk_RequestReceipt_CapabilityTokenPath` — receipt also signed when authorization came from Biscuit token rather than address-book pin
+
+**Test count:** 575 → 580 Go total.
+
+**Design decision (async DB write):** `capDB.RecordReceipt` runs in a goroutine so that SQLite latency does not block the `peer.ask` JSON-RPC response. The receipt is already in the response payload when the goroutine starts; a slow disk write doesn't delay the caller. The DB write failure is logged but not returned as an error (the caller has their receipt; losing the local DB copy is recoverable from the receipt itself).
+
+**Design decision (canonical signing payload):** The signed payload is a separate `payload` struct (all fields except `Signature`) marshaled to JSON in declaration order. Go's `encoding/json` marshals struct fields in declaration order when there are no custom sort keys, making this deterministic across platforms without needing explicit field sorting or a canonical encoding library.
+
+**Next (phase 45):** CLI subcommands `daimon capability issue/list/revoke/attenuate` and `daimon reputation receipts`.
+
+---
+
+## 2026-05-24 — Session 93: v0.4 phase 45 — CLI capability + reputation commands
+
+**Trigger:** Continuation of phase 44 session.
+
+**What ships:**
+
+**`cmd/daimon/cmd_capability.go`** (new) — four subcommands:
+- `daimon capability issue --verb <v> [--verb …] [--valid-until T] [--max-calls N] [--model M] [--grantee D] [--json]` — mints a root Biscuit token, prints token_id + token (base64url) + expires_at
+- `daimon capability list [--all] [--json]` — table with TOKEN_ID / VERBS / GRANTEE / EXPIRES / MAX_CALLS / ISSUED / STATUS columns; `--all` includes revoked
+- `daimon capability revoke <token_id>` — idempotent revoke, prints confirmation
+- `daimon capability attenuate <base64url-token> [--valid-until T] [--max-calls N] [--model M] [--json]` — offline operation, prints tighter base64url token
+- `multiVerb` type implements `flag.Value` for repeatable `--verb` flags
+- Client-side RFC3339 validation on `--valid-until` before sending RPC (friendlier error than server-side rejection)
+
+**`cmd/daimon/cmd_reputation.go`** (new):
+- `daimon reputation receipts [--direction issued|received] [--json]` — table with RECEIPT_ID / DIR / SERVED_AT / VERB / MODEL / IN / OUT / MS / SERVER columns
+
+**`cmd/daimon/main.go`** — added `case "capability"` and `case "reputation"` dispatch; `usage()` extended with all new subcommands
+
+No new tests (CLI layer is a thin RPC wrapper; covered by server-side tests).
+
+**Next (phase 47):** SPEC §17 formal specification for v0.4 capability delegation + reputation.
+
+---
+
+## 2026-05-24 — Session 94: v0.4 phase 47 — SPEC §17 capability + reputation
+
+**Trigger:** Continuation of phase 45 session.
+
+**What ships:**
+
+**`SPEC.md`** — appended §17 "Capability Delegation and Reputation" (~330 lines). Covers:
+
+| Section | Content |
+|---|---|
+| §17.1 Motivation | Why address-book pins alone are insufficient; why Biscuit over JWT/Macaroon |
+| §17.2 Biscuit token anatomy | Authority block, attenuation blocks, Ed25519 root, Datalog constraint language |
+| §17.3 Right facts | `right("verb", "targetDID")` for specific targets; `right("verb", "any")` for wildcard grants |
+| §17.4 Optional checks | Time expiry (`check if time($t), $t <= RFC3339`), model constraint, call-count ceiling (`check if calls_used($n), $n < N`) |
+| §17.5 Token lifecycle | issue → distribute → verify → [attenuate] → revoke |
+| §17.6 Attenuation | Offline block append; attenuated token strictly more restrictive than parent |
+| §17.7 peer.ask authorization | Check order: blocked → token valid → pinned → reject |
+| §17.8 Revocation | Token ID indexed in `capability.db`; `IsRevoked()` checked before `Verify()` |
+| §17.9 Receipt format | Full wire schema for `reputation.Receipt`; canonical signing payload (all fields except Signature, declaration order, JSON) |
+| §17.10 Receipt signing | Ed25519 over canonical JSON payload; `Sign` / `Verify` |
+| §17.11 Receipt storage | `capability.db receipts` table, direction=issued|received |
+| §17.12 RPC surface | `daimon.capability.issue/list/revoke/attenuate`, `daimon.reputation.receipts` |
+| §17.13 Activity kinds | KindCapabilityIssued/Revoked/Verified/Denied + KindReputationReceiptIssued/Received |
+| §17.14 Error codes | CodeCapabilityDenied (-32014), CodeCapabilityRequired (-32015) |
+| §17.15 Security considerations | Token leakage, revocation lag, blocking-beats-token invariant |
+| §17.16 v0.4 constraints | What is and is not in scope for v0.4 |
+
+SPEC version header bumped to v0.4 (Draft). Previous §1–16 untouched.
+
+---
+
+## 2026-05-24 — Session 95: v0.4.0-dev.1 pre-release
+
+**Trigger:** v0.4 phases 43–47 complete and green; user authorized release.
+
+**What happened:**
+- Pushed annotated tag `v0.4.0-dev.1`
+- GitHub Actions release.yml triggered; completed in ~2 min
+- 4 platform tarballs published to GitHub Releases:
+  - `daimon-v0.4.0-dev.1-darwin-arm64.tar.gz` (12.0 MB)
+  - `daimon-v0.4.0-dev.1-darwin-amd64.tar.gz` (12.8 MB)
+  - `daimon-v0.4.0-dev.1-linux-arm64.tar.gz` (11.7 MB)
+  - `daimon-v0.4.0-dev.1-linux-amd64.tar.gz` (12.7 MB)
+  - `checksums.txt` (SHA-256 of all 4 tarballs)
+- Marked as pre-release (SemVer pre-release pattern detected)
+- `install.sh` one-liner is live; users can `curl … | sh` on any supported platform
+
+**Install:**
+```
+curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
+```
+or download directly from https://github.com/regitxx/Daimon/releases/tag/v0.4.0-dev.1
+
+**v0.4 surface shipped:**
+- `internal/capability/` — Issue/Attenuate/Verify (Biscuit v3, Ed25519-rooted Datalog) + `capability.db` schema (4 tables)
+- 4 RPC verbs: `daimon.capability.issue/list/revoke/attenuate`
+- `peer.ask` with capability token authorization gate (check order: blocked → token → pinned → reject)
+- Ed25519-signed reputation receipts (`internal/reputation/receipt.go`; `request_receipt` param on `peer.ask`)
+- `daimon.reputation.receipts` RPC
+- CLI: `daimon capability issue/list/revoke/attenuate` + `daimon reputation receipts`
+- SPEC §17 formal specification
+
+**Test count at release:** 580 Go + 84 pytest + 85 vitest = **749 tests, all green**.
+
+**What's next (not started):**
+- Phase 40.4: live Base Sepolia USDC settlement (needs test USDC from faucet.circle.com + Base Sepolia ETH)
+- Phase 46: Python + TypeScript SDK wrappers for `client.capability.*` + `client.reputation.*`
+- v0.4 CI cross-daimon capability smoke test
+- Dogfood: two daimons on separate machines
+
+---
