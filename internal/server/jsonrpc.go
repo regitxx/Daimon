@@ -159,6 +159,16 @@ const (
 	// not grant the requested verb. The user must pin the peer with the
 	// required verb before this call is permitted.
 	CodePeerUnauthorized = -32013
+
+	// CodeCapabilityDenied — a Biscuit capability token was presented but
+	// verification failed: expired, wrong right, revoked, or invalid
+	// signature chain.  The caller must obtain a fresh or valid token.
+	CodeCapabilityDenied = -32014
+
+	// CodeCapabilityRequired — the serving daimon requires a capability
+	// token for this verb but none was presented.  Reserved; not used in
+	// v0.4 where both token-based and address-book authorization are accepted.
+	CodeCapabilityRequired = -32015
 )
 
 // nullID is the JSON-RPC null id, used in responses where no client id could

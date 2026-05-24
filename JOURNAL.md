@@ -4245,3 +4245,37 @@ The DRAFT status header was misleading — "Read with skepticism; reply with edi
 **Test count:** 15 DB tests + 1 integration test. 534 → 549 Go total.
 
 **Next (phase 42):** `daimon.capability.issue`, `daimon.capability.list`, `daimon.capability.revoke`, `daimon.capability.attenuate` RPC verbs in `internal/server/`.
+
+---
+
+## 2026-05-22 — Session 90: v0.4 phase 42 — capability RPC verbs
+
+**Trigger:** "go next" after phase 41.
+
+**What ships:**
+
+**`internal/server/jsonrpc.go`** — two new error codes:
+- `CodeCapabilityDenied = -32014`: Biscuit token presented but verification failed (expired, wrong right, revoked, invalid sig)
+- `CodeCapabilityRequired = -32015`: reserved; not used in v0.4 (token + pin-based auth both accepted)
+
+**`internal/activity/activity.go`** — four new Kind constants:
+- `KindCapabilityIssued`, `KindCapabilityRevoked` (written by local daimon)
+- `KindCapabilityVerified`, `KindCapabilityDenied` (written by serving daimon in phase 43)
+
+**`internal/server/server.go`** — `CapabilityDB *capability.DB` added to Options + `capDB` field to Server struct; wired in both New() code paths.
+
+**`internal/server/capability_handlers.go`** — four handlers:
+- `daimon.capability.issue`: parses verbs/grantee_did/valid_until/max_calls/model_constraint, calls capability.Issue() with the identity's private key, persists to capDB.RecordIssued(), audits KindCapabilityIssued, returns {token_id, token (base64url), expires_at}.
+- `daimon.capability.list`: calls capDB.ListIssued(include_revoked), serializes tokens to wire shape (timestamps as RFC3339, token_bytes omitted from wire).
+- `daimon.capability.revoke`: calls capDB.RevokeToken(), returns error CodeNotFound if token unknown, audits KindCapabilityRevoked, returns empty object `{}`.
+- `daimon.capability.attenuate`: decodes base64url input token, calls capability.Attenuate(), returns new base64url-encoded attenuated token. No audit (local-only operation, offline — analogous to not auditing address book reads).
+
+Also adds `auditCapability()` helper (same pattern as `auditPeer`).
+
+**`internal/server/capability_handlers_test.go`** — 18 tests covering all four verbs, error paths, and audit log integration (`TestCapability_Audit_IssueAndRevoke`).
+
+**Design note on TargetDID vs GranteeDID**: The RPC wire field is `grantee_did` (who the token is for) which maps to TargetDID in the Biscuit `right()` fact. If grantee_did is empty, TargetDID="any" (wildcard). Both are stored in the DB record.
+
+**Test count:** 549 → 567 Go total.
+
+**Next (phase 43):** `peer.ask` updated to accept optional `capability_token` param; serving-side verification with capDB.IsRevoked() + capability.Verify() + `CodeCapabilityDenied`; check order: blocked → token valid → pinned → reject.

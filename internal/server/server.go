@@ -16,6 +16,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/addressbook"
+	"github.com/regitxx/Daimon/internal/capability"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/memory"
 	"github.com/regitxx/Daimon/internal/provider"
@@ -48,7 +49,8 @@ type Options struct {
 	Store       *memory.Store
 	Log         *activity.Log
 	Wallet      *wallet.Store
-	AddressBook *addressbook.Book
+	AddressBook  *addressbook.Book
+	CapabilityDB *capability.DB
 	Providers   *provider.Registry
 	Credentials *provider.CredentialStore
 
@@ -114,6 +116,7 @@ type Server struct {
 	alog      *activity.Log
 	wstore    *wallet.Store
 	abook     *addressbook.Book
+	capDB     *capability.DB
 	providers *provider.Registry
 	creds     *provider.CredentialStore
 
@@ -192,6 +195,7 @@ func New(opts Options) (*Server, error) {
 		s.alog = opts.Log
 		s.wstore = opts.Wallet
 		s.abook = opts.AddressBook
+		s.capDB = opts.CapabilityDB
 		// Stays locked until handleIdentityUnlock runs successfully.
 	} else {
 		if opts.Identity == nil {
@@ -208,6 +212,7 @@ func New(opts Options) (*Server, error) {
 		s.alog = opts.Log
 		s.wstore = opts.Wallet         // optional — may be nil in demo mode
 		s.abook = opts.AddressBook     // optional — may be nil in demo mode
+		s.capDB = opts.CapabilityDB    // optional — may be nil in demo mode
 		s.unlocked.Store(true)
 	}
 	s.registerMethods()

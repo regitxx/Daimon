@@ -119,6 +119,24 @@ const (
 	// endpoint so operators can audit when federation listening was activated
 	// and on which address/port.
 	KindPeerListenStarted Kind = "peer.listen.started"
+
+	// v0.4 capability delegation kinds (SPEC §17 forthcoming).
+
+	// KindCapabilityIssued is written by the LOCAL daimon when it issues a
+	// root Biscuit token via daimon.capability.issue.
+	KindCapabilityIssued Kind = "capability.issued"
+
+	// KindCapabilityRevoked is written by the LOCAL daimon when it revokes
+	// a previously issued token via daimon.capability.revoke.
+	KindCapabilityRevoked Kind = "capability.revoked"
+
+	// KindCapabilityVerified is written by the SERVING daimon when an
+	// inbound peer verb carries a valid Biscuit token (phase 43+).
+	KindCapabilityVerified Kind = "capability.verified"
+
+	// KindCapabilityDenied is written by the SERVING daimon when an
+	// inbound capability token fails verification (phase 43+).
+	KindCapabilityDenied Kind = "capability.denied"
 )
 
 // Common errors.

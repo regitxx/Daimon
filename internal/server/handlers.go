@@ -78,6 +78,11 @@ func (s *Server) registerMethods() {
 		"daimon.peer.close":  s.handlePeerClose,
 		"daimon.peer.list":   s.handlePeerList,
 		"daimon.peer.invoke": s.handlePeerInvoke,
+		// v0.4 phase 42 — capability delegation
+		"daimon.capability.issue":     s.handleCapabilityIssue,
+		"daimon.capability.list":      s.handleCapabilityList,
+		"daimon.capability.revoke":    s.handleCapabilityRevoke,
+		"daimon.capability.attenuate": s.handleCapabilityAttenuate,
 	}
 }
 
