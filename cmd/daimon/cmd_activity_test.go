@@ -475,6 +475,80 @@ func TestSummarizeEntry_PerKindShapes(t *testing.T) {
 			payload: map[string]any{"version": "v0.1.0-dev", "did": "did:key:zABC"},
 			want:    "did=did:key:zABC",
 		},
+		// Peer + federation summaries — added after 2026-05-25 cross-Mac
+		// dogfood showed the SUMMARY column was blank for the listener-side
+		// rows that are the entire point of the audit log on that side.
+		{
+			name:    "peer_listen_started",
+			kind:    "peer.listen.started",
+			payload: map[string]any{"endpoint": "tcp://0.0.0.0:9999"},
+			want:    "endpoint=tcp://0.0.0.0:9999",
+		},
+		{
+			name: "peer_invoke_received_echo_with_did",
+			kind: "peer.invoke.received",
+			payload: map[string]any{
+				"method":     "peer.echo",
+				"caller_did": "did:key:zXYZ",
+				"message":    "hello from Mac A",
+			},
+			want: `method=peer.echo from=did:key:zXYZ message="hello from Mac A"`,
+		},
+		{
+			name: "peer_invoke_received_echo_anon",
+			kind: "peer.invoke.received",
+			payload: map[string]any{
+				"method":  "peer.echo",
+				"message": "ping",
+			},
+			want: `method=peer.echo message="ping"`,
+		},
+		{
+			name: "peer_invoke_served",
+			kind: "peer.invoke.served",
+			payload: map[string]any{
+				"provider":      "claude",
+				"model":         "claude-haiku-4-5",
+				"input_tokens":  float64(120),
+				"output_tokens": float64(45),
+				"peer_did":      "did:key:zABC",
+			},
+			want: "claude/claude-haiku-4-5 tokens=120→45 to=did:key:zABC",
+		},
+		{
+			name: "peer_payment_invoiced",
+			kind: "peer.payment.invoiced",
+			payload: map[string]any{
+				"service":    "peer.ask",
+				"amount":     "1000000",
+				"caller_did": "did:key:zABC",
+			},
+			want: "service=peer.ask amount=1000000 from=did:key:zABC",
+		},
+		{
+			name: "capability_issued",
+			kind: "capability.issued",
+			payload: map[string]any{
+				"token_id": "01KTOKEN",
+				"verbs":    []any{"peer.ask"},
+			},
+			want: "token_id=01KTOKEN verbs=[peer.ask]",
+		},
+		{
+			name:    "capability_revoked",
+			kind:    "capability.revoked",
+			payload: map[string]any{"token_id": "01KTOKEN"},
+			want:    "token_id=01KTOKEN",
+		},
+		{
+			name: "reputation_receipt_issued",
+			kind: "reputation.receipt.issued",
+			payload: map[string]any{
+				"receipt_id": "01KRECEIPT",
+				"verb":       "peer.ask",
+			},
+			want: "receipt_id=01KRECEIPT verb=peer.ask",
+		},
 		{
 			name:    "unrecognised_kind_is_empty",
 			kind:    "future.kind.we.dont.know",

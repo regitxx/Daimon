@@ -330,12 +330,28 @@ func (s *Server) handlePeerEcho(conn *transport.Conn, params json.RawMessage) (a
 
 	// Audit: peer.invoke.received (best-effort).
 	// We use a background context because dispatchPeer doesn't carry one.
+	//
+	// Dogfood finding (2026-05-25): the listener daemon serves the request
+	// silently — there's no terminal on this side, so the audit log IS the
+	// inbox. We include the echo message so `daimon activity query --kind
+	// peer.invoke.received --json` actually shows the caller what was said,
+	// and resolve the caller's DID from the address book when known so the
+	// payload is human-readable (peer_x25519 alone is just a hex blob).
 	if s.alog != nil {
+		callerDID := ""
+		if entry := s.lookupPeerByX25519(conn.PeerX25519); entry != nil {
+			callerDID = entry.DID
+		}
+		payload := map[string]any{
+			"method":      "peer.echo",
+			"peer_x25519": fmt.Sprintf("%x", conn.PeerX25519),
+			"message":     p.Message,
+		}
+		if callerDID != "" {
+			payload["caller_did"] = callerDID
+		}
 		go func() {
-			_, _ = s.alog.Append(context.Background(), activity.KindPeerInvokeReceived, map[string]any{
-				"method":      "peer.echo",
-				"peer_x25519": fmt.Sprintf("%x", conn.PeerX25519),
-			})
+			_, _ = s.alog.Append(context.Background(), activity.KindPeerInvokeReceived, payload)
 		}()
 	}
 
@@ -590,16 +606,26 @@ func (s *Server) handlePeerPayRequired(conn *transport.Conn, params json.RawMess
 
 	// Audit: peer.payment.invoiced — best-effort, async (dispatchPeer
 	// carries no context, and the audit must not block the response).
+	// As with peer.echo, resolve the caller's DID from the address book
+	// when known so the audit row is human-readable, not just a hex blob.
 	if s.alog != nil {
+		callerDID := ""
+		if entry := s.lookupPeerByX25519(conn.PeerX25519); entry != nil {
+			callerDID = entry.DID
+		}
+		payload := map[string]any{
+			"service":     p.Service,
+			"peer_x25519": fmt.Sprintf("%x", conn.PeerX25519),
+			"pay_to":      w.Address,
+			"amount":      defaultAmount,
+			"network":     "base-sepolia",
+			"asset":       usdcBaseSepolia,
+		}
+		if callerDID != "" {
+			payload["caller_did"] = callerDID
+		}
 		go func() {
-			_, _ = s.alog.Append(context.Background(), activity.KindPeerPaymentInvoiced, map[string]any{
-				"service":     p.Service,
-				"peer_x25519": fmt.Sprintf("%x", conn.PeerX25519),
-				"pay_to":      w.Address,
-				"amount":      defaultAmount,
-				"network":     "base-sepolia",
-				"asset":       usdcBaseSepolia,
-			})
+			_, _ = s.alog.Append(context.Background(), activity.KindPeerPaymentInvoiced, payload)
 		}()
 	}
 

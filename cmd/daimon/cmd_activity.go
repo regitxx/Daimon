@@ -280,6 +280,75 @@ func summarizeEntry(e activityEntry) string {
 		return "did=" + stringField(p, "did")
 	case "wallet.created":
 		return fmt.Sprintf("%s %s", stringField(p, "chain"), stringField(p, "address"))
+
+	// Peer + federation kinds (v0.3+). Added 2026-05-25 after first
+	// real two-Mac dogfood showed the SUMMARY column was blank for the
+	// listener-side audit rows that are the ENTIRE point of the audit
+	// log on that side (no terminal output, audit IS the inbox).
+	case "peer.listen.started":
+		if ep := stringField(p, "endpoint"); ep != "" {
+			return "endpoint=" + ep
+		}
+		return ""
+	case "peer.invoke.received":
+		// Listener side. Show what method was called + (if known) who
+		// called it. For peer.echo we also fold the message in — that's
+		// the actual content the user wants to see from `activity query`.
+		method := stringField(p, "method")
+		out := "method=" + method
+		if d := stringField(p, "caller_did"); d != "" {
+			out += " from=" + d
+		}
+		if method == "peer.echo" {
+			if msg := stringField(p, "message"); msg != "" {
+				out += fmt.Sprintf(" message=%q", msg)
+			}
+		}
+		return out
+	case "peer.invoke.served":
+		out := fmt.Sprintf("%s/%s tokens=%d→%d",
+			stringField(p, "provider"),
+			stringField(p, "model"),
+			intField(p, "input_tokens"),
+			intField(p, "output_tokens"),
+		)
+		if d := stringField(p, "peer_did"); d != "" {
+			out += " to=" + d
+		}
+		return out
+	case "peer.invoke.sent":
+		method := stringField(p, "method")
+		out := "method=" + method
+		if d := stringField(p, "peer_did"); d != "" {
+			out += " to=" + d
+		}
+		return out
+	case "peer.channel.opened":
+		return "peer_did=" + stringField(p, "peer_did")
+	case "peer.channel.closed":
+		return "channel_id=" + stringField(p, "channel_id")
+	case "peer.payment.invoiced":
+		out := fmt.Sprintf("service=%s amount=%s",
+			stringField(p, "service"), stringField(p, "amount"))
+		if d := stringField(p, "caller_did"); d != "" {
+			out += " from=" + d
+		}
+		return out
+
+	// v0.4 capability + reputation kinds.
+	case "capability.issued":
+		return fmt.Sprintf("token_id=%s verbs=%v", stringField(p, "token_id"), p["verbs"])
+	case "capability.revoked":
+		return "token_id=" + stringField(p, "token_id")
+	case "capability.verified":
+		return fmt.Sprintf("token_id=%s verb=%s", stringField(p, "token_id"), stringField(p, "verb"))
+	case "capability.denied":
+		return fmt.Sprintf("verb=%s reason=%s", stringField(p, "verb"), stringField(p, "reason"))
+	case "reputation.receipt.issued":
+		return fmt.Sprintf("receipt_id=%s verb=%s", stringField(p, "receipt_id"), stringField(p, "verb"))
+	case "reputation.receipt.received":
+		return fmt.Sprintf("receipt_id=%s verb=%s", stringField(p, "receipt_id"), stringField(p, "verb"))
+
 	default:
 		return ""
 	}
