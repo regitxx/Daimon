@@ -137,6 +137,18 @@ const (
 	// KindCapabilityDenied is written by the SERVING daimon when an
 	// inbound capability token fails verification (phase 43+).
 	KindCapabilityDenied Kind = "capability.denied"
+
+	// v0.4 reputation receipt kinds (SPEC §17, phase 44).
+
+	// KindReputationReceiptIssued is written by the SERVING daimon when
+	// it signs and returns a proof-of-service receipt in response to
+	// request_receipt=true in peer.ask.
+	KindReputationReceiptIssued Kind = "reputation.receipt.issued"
+
+	// KindReputationReceiptReceived is written by the CALLING daimon when
+	// it receives and stores a receipt returned by a remote peer.ask.
+	// (Reserved for the caller-side implementation in a future phase.)
+	KindReputationReceiptReceived Kind = "reputation.receipt.received"
 )
 
 // Common errors.

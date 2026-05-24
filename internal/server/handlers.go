@@ -83,6 +83,8 @@ func (s *Server) registerMethods() {
 		"daimon.capability.list":      s.handleCapabilityList,
 		"daimon.capability.revoke":    s.handleCapabilityRevoke,
 		"daimon.capability.attenuate": s.handleCapabilityAttenuate,
+		// v0.4 phase 44 — reputation receipts
+		"daimon.reputation.receipts": s.handleReputationReceipts,
 	}
 }
 

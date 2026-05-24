@@ -2,17 +2,21 @@ package server
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/regitxx/Daimon/internal/activity"
 	"github.com/regitxx/Daimon/internal/addressbook"
+	"github.com/regitxx/Daimon/internal/capability"
 	"github.com/regitxx/Daimon/internal/identity"
 	"github.com/regitxx/Daimon/internal/payment"
 	"github.com/regitxx/Daimon/internal/provider"
+	"github.com/regitxx/Daimon/internal/reputation"
 	"github.com/regitxx/Daimon/internal/transport"
 )
 
@@ -355,24 +359,32 @@ func (s *Server) handlePeerEcho(conn *transport.Conn, params json.RawMessage) (a
 // for revocation checking and call-count tracking — it is not embedded
 // in the Biscuit bytes themselves and may be omitted for attenuated tokens
 // whose ID the caller doesn't know.
+//
+// request_receipt=true requests a signed reputation receipt attached to
+// the response (phase 44).
 type peerAskParams struct {
 	Provider          string           `json:"provider"`
 	Request           provider.Request `json:"request"`
 	CapabilityToken   string           `json:"capability_token,omitempty"`
 	CapabilityTokenID string           `json:"capability_token_id,omitempty"`
+	RequestReceipt    bool             `json:"request_receipt,omitempty"`
 }
 
 // peerAskResult carries the provider response back to the calling peer.
+// Receipt is non-nil when the caller set request_receipt=true and the
+// serving daimon was able to sign a proof-of-service receipt.
 type peerAskResult struct {
-	Response *provider.Response `json:"response"`
+	Response *provider.Response  `json:"response"`
+	Receipt  *reputation.Receipt `json:"receipt,omitempty"`
 }
 
 // handlePeerAsk serves the peer.ask verb from inbound authorized peer connections.
-// Called by dispatchPeer AFTER it has confirmed the peer is in the address book
-// with HasVerb("peer.ask") — this handler does NOT re-check authorization.
+// Called by dispatchPeer AFTER it has confirmed authorization (address-book pin
+// or a valid Biscuit capability token) — this handler does NOT re-check auth.
 //
-// entry is the address book entry for the calling peer (already looked up and
-// verified by the dispatcher); it is used for the audit payload.
+// entry is the address book entry for the calling peer (already looked up by
+// the dispatcher); it may be nil when the caller authenticated via a capability
+// token only.  It is used for the audit payload and receipt caller_did.
 func (s *Server) handlePeerAsk(conn *transport.Conn, entry *addressbook.Entry, params json.RawMessage) (any, *RPCError) {
 	var p peerAskParams
 	if rpcErr := decodeParams(params, &p); rpcErr != nil {
@@ -399,17 +411,17 @@ func (s *Server) handlePeerAsk(conn *transport.Conn, entry *addressbook.Entry, p
 		return nil, newError(CodeInternalError, fmt.Sprintf("peer.ask: provider %s: %v", p.Provider, err))
 	}
 
-	// Audit: peer.invoke.served — the "I consumed my provider on behalf of a peer" row.
-	// Logged asynchronously (same pattern as peer.invoke.received) because
-	// dispatchPeer doesn't carry a context.
+	callerDID := ""
+	if entry != nil {
+		callerDID = entry.DID
+	}
+
+	// Audit: peer.invoke.served — logged asynchronously because dispatchPeer
+	// doesn't carry a context.
 	if s.alog != nil {
-		peerDID := ""
-		if entry != nil {
-			peerDID = entry.DID
-		}
 		go func() {
 			_, _ = s.alog.Append(context.Background(), activity.KindPeerInvokeServed, map[string]any{
-				"peer_did":      peerDID,
+				"peer_did":      callerDID,
 				"peer_x25519":   fmt.Sprintf("%x", conn.PeerX25519),
 				"provider":      p.Provider,
 				"model":         resp.Model,
@@ -421,8 +433,60 @@ func (s *Server) handlePeerAsk(conn *transport.Conn, entry *addressbook.Entry, p
 		}()
 	}
 
-	return peerAskResult{Response: resp}, nil
+	result := peerAskResult{Response: resp}
+
+	// Receipt: issue a signed proof-of-service when the caller requested one.
+	// Requires a loaded identity for signing; silently skips on failure so the
+	// provider response is never lost due to a receipt error.
+	if p.RequestReceipt && s.id != nil {
+		rc := &reputation.Receipt{
+			ReceiptID:    ulid.Make().String(),
+			ServedAt:     reputation.FormatTime(start.Add(elapsed)), // wall time at completion
+			Verb:         "peer.ask",
+			ServerDID:    s.id.DID(),
+			CallerDID:    callerDID,
+			Provider:     p.Provider,
+			Model:        resp.Model,
+			InputTokens:  int64(resp.Usage.InputTokens),
+			OutputTokens: int64(resp.Usage.OutputTokens),
+			DurationMS:   elapsed.Milliseconds(),
+		}
+		if signErr := reputation.Sign(s.id.PrivateKey(), rc); signErr == nil {
+			result.Receipt = rc
+
+			// Persist asynchronously so DB latency doesn't block the response.
+			if s.capDB != nil {
+				go func() {
+					sigBytes, _ := base64.RawURLEncoding.DecodeString(rc.Signature)
+					_ = s.capDB.RecordReceipt(context.Background(), capability.Receipt{
+						ReceiptID:    rc.ReceiptID,
+						Direction:    capability.ReceiptIssued,
+						ServedAt:     start.Add(elapsed),
+						ServedVerb:   rc.Verb,
+						CallerDID:    rc.CallerDID,
+						ServerDID:    rc.ServerDID,
+						Provider:     rc.Provider,
+						Model:        rc.Model,
+						InputTokens:  rc.InputTokens,
+						OutputTokens: rc.OutputTokens,
+						DurationMS:   rc.DurationMS,
+						Signature:    sigBytes,
+					})
+				}()
+			}
+
+			// Audit receipt issuance.
+			s.auditCapability(context.Background(), activity.KindReputationReceiptIssued, map[string]any{
+				"receipt_id": rc.ReceiptID,
+				"caller_did": rc.CallerDID,
+				"model":      rc.Model,
+			})
+		}
+	}
+
+	return result, nil
 }
+
 
 // --- peer.pay.required (inbound, universally available) ----------------------
 
