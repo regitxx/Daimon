@@ -1220,3 +1220,331 @@ v0.3.0 GA is gated on:
 4. SPEC §16 review and sign-off (this section).
 
 Current status: **phases 30–38 shipped, CI cross-daimon smoke planned, dogfood pending.**
+
+---
+
+## 17. Capability Delegation and Reputation (v0.4)
+
+v0.4 ships two related primitives that together form the foundation of the Daimon labor market:
+
+1. **Capability delegation** — a daimon can grant another agent time-bounded, call-capped, model-constrained authority to exercise a verb on its behalf, using Biscuit v3 cryptographic tokens.
+2. **Reputation receipts** — a serving daimon can attach a signed proof-of-service to `peer.ask` responses, giving callers verifiable evidence of reliable service.
+
+Both primitives reuse the Ed25519 keypair already present in every daimon's identity (§4). No new key infrastructure is required.
+
+### 17.1 Motivation
+
+v0.3 federation authorizes `peer.ask` at the DID level: Bob can call Alice's daimon if Bob is pinned in Alice's address book with `"peer.ask"` in `ApprovedVerbs`. This is binary and coarse-grained:
+
+- No **time-bounded** access (once pinned, always pinned).
+- No **call-count ceiling** (one entry authorizes unlimited calls).
+- No **model constraint** (any model Alice has configured may be requested).
+- No **delegation to sub-agents** (Alice's sub-agent cannot hold her authority).
+
+Capability tokens solve all four. They are cryptographically signed grants that embed arbitrary Datalog constraints, attenuatable offline by any holder, and verifiable by serving daimons without contacting the issuer.
+
+### 17.2 Capability token model
+
+#### 17.2.1 Token format: Biscuit v3
+
+Daimon uses [Biscuit v3](https://www.biscuitsec.org/) (Apache 2.0, `github.com/biscuit-auth/biscuit-go/v2`). A Biscuit token is a chain of signed Datalog blocks:
+
+- **Authority block**: signed by the issuer's Ed25519 private key. Contains capability facts and mandatory checks.
+- **Attenuation blocks**: appended offline by any holder. Each block adds tighter checks (never looser). Each block is signed by the holder's ephemeral key, chained to the previous signature.
+- **Authorizer**: built at verification time by the serving daimon. Injects ambient facts (current time, model in use, call count), evaluates all block checks, and runs allow policies.
+
+#### 17.2.2 Capability facts
+
+The authority block encodes grants as Datalog facts:
+
+```
+// Grant peer.ask rights to a specific serving daimon
+right("peer.ask", "did:key:z6MkAlice...");
+
+// Grant peer.ask rights to any daimon ("any" wildcard)
+right("peer.ask", "any");
+```
+
+#### 17.2.3 Mandatory checks
+
+The authority block may embed zero or more checks that the serving daimon's ambient context must satisfy:
+
+| Check | Datalog form | Semantics |
+|---|---|---|
+| Expiry | `check if time($t), $t <= 2026-12-31T00:00:00Z` | Token must not be used after `valid_until` |
+| Model constraint | `check if peer_ask_model($m), $m == "claude-haiku-4-5"` | Only the named model may be used |
+| Call ceiling | `check if calls_used($n), $n < 100` | Token may be used at most N times |
+
+Checks are conjunctive: ALL must pass for the token to be accepted. Attenuation blocks may add further checks (sub-sets of the authority-block grant, never extensions).
+
+#### 17.2.4 Ambient facts (serving daimon supplies at verification time)
+
+| Ambient fact | Source |
+|---|---|
+| `time(now)` | Current wall-clock time (UTC, truncated to second) |
+| `peer_ask_model(model)` | Model field from `peer.ask` request params |
+| `calls_used(n)` | Call counter from `capability.db → token_calls.calls_used` |
+
+The serving daimon MUST inject `calls_used(n)` even when `n == 0` so that a token whose authority block contains a `calls_used` ceiling check passes on its first invocation.
+
+#### 17.2.5 Allow policies
+
+The serving daimon adds two allow policies (first match wins):
+
+```
+allow if right("peer.ask", "did:key:zAlice...");  // specific DID
+allow if right("peer.ask", "any");                  // wildcard
+```
+
+If neither policy matches all block checks, the token is rejected.
+
+### 17.3 Token lifecycle
+
+#### 17.3.1 Issuance — `daimon.capability.issue`
+
+Parameters:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `verbs` | `[]string` | ✓ | Verbs to grant (e.g. `["peer.ask"]`) |
+| `grantee_did` | `string` | — | Intended recipient DID (informational; stored in capability.db but not embedded in the Biscuit token) |
+| `valid_until` | `string` | — | RFC3339 expiry; omit = no expiry |
+| `max_calls` | `int64` | — | Call ceiling; `0` = unlimited |
+| `model_constraint` | `string` | — | Restrict to one model |
+
+Response:
+
+| Field | Type | Description |
+|---|---|---|
+| `token_id` | `string` | ULID; used for revocation and call-count tracking |
+| `token` | `string` | base64url-encoded Biscuit token bytes |
+| `expires_at` | `string` | RFC3339; empty when no expiry |
+
+The issuer stores the record in `capability.db → issued_tokens` and appends `capability.issued` to the activity log.
+
+#### 17.3.2 Attenuation — `daimon.capability.attenuate`
+
+Any holder of a token may request the daemon to produce a more restricted version:
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | `string` | ✓ base64url input token |
+| `valid_until` | `string` | Tighter expiry (RFC3339) |
+| `max_calls` | `int64` | Tighter call ceiling |
+| `model_constraint` | `string` | Add or tighten model constraint |
+
+The returned token bytes are strictly larger than the input (one new Biscuit block appended). The operation is **offline** — no contact with the original issuer required. Attenuation MUST NOT relax existing checks; the Biscuit evaluator enforces this at verification time.
+
+#### 17.3.3 Verification — inbound `peer.ask`
+
+When a calling peer presents a `capability_token` in `peer.ask` params the serving daimon follows this check order (§6 of `design/v0.4-delegation.md`):
+
+1. **Blocked?** Peer is in address book but `peer.ask` is NOT in `ApprovedVerbs` → reject with `CodePeerUnauthorized`. A valid capability token cannot bypass an explicit denial.
+2. **Token valid?** Token present → decode → optional revocation check → `Verify(token, ownPublicKey, ctx)` → if valid, serve.
+3. **Pinned?** Peer is in address book with `peer.ask` in `ApprovedVerbs` → serve (no token needed).
+4. Reject with `CodePeerUnauthorized`.
+
+Verification details:
+
+- `rootPubKey` = the **serving daimon's own Ed25519 public key** (v0.4: self-issued tokens only; cross-issuer tokens are v0.5).
+- Ambient facts injected: `time(now)`, `peer_ask_model(request.model)`, `calls_used(capDB.CallsUsed(tokenID))`.
+- On success: `capDB.IncrementCalls(tokenID)`, log `capability.verified`.
+- On failure: log `capability.denied`, return `CodeCapabilityDenied`.
+
+`capability_token_id` is optional. If provided, the serving daimon checks `capDB.IsRevoked(tokenID)` before cryptographic verification and uses the persisted call count for `calls_used`. If omitted (e.g. the caller holds an attenuated token whose original ID is unknown), revocation checking and call counting are skipped.
+
+#### 17.3.4 Revocation — `daimon.capability.revoke`
+
+| Field | Type | Description |
+|---|---|---|
+| `token_id` | `string` | ✓ Token to revoke |
+
+Marks the token as revoked in `capability.db`. Idempotent. Subsequent inbound calls that present the token with this `token_id` are rejected at the revocation check step before cryptographic verification.
+
+**Revocation is advisory when `capability_token_id` is absent.** Holders of a token who do not transmit its `token_id` bypass the revocation check. This is an accepted trade-off in v0.4; full revocation (embedding a revocation hint in the token or using short-lived tokens) is v0.5.
+
+#### 17.3.5 Listing — `daimon.capability.list`
+
+| Field | Type | Description |
+|---|---|---|
+| `include_revoked` | `bool` | Include revoked tokens in results (default false) |
+
+Returns the list of tokens issued by this daimon. Each entry includes: `token_id`, `verbs`, `grantee_did`, `target_did`, `valid_until`, `max_calls`, `model_constraint`, `issued_at`, `revoked`, `revoked_at`. The raw token bytes are NOT returned (they are a secret held by the grantee).
+
+### 17.4 Wire format — `peer.ask` params (v0.4 additions)
+
+```json
+{
+  "provider": "claude",
+  "request": { "model": "claude-haiku-4-5", "messages": [...] },
+  "capability_token":    "<base64url Biscuit token>",
+  "capability_token_id": "<ULID, optional>",
+  "request_receipt":     true
+}
+```
+
+All three fields are optional. A `peer.ask` without `capability_token` follows the v0.3 address-book authorization path unchanged.
+
+### 17.5 Reputation receipts
+
+#### 17.5.1 Purpose
+
+A reputation receipt is a signed proof-of-service that the serving daimon attaches to a `peer.ask` response. It proves:
+
+- **Who** served the call (`server_did`).
+- **When** (wall-clock `served_at`).
+- **What** was served (`verb`, `model`, token counts, duration).
+- **For whom** (`caller_did`, if known from address book).
+
+Any third party holding the server's DID (and therefore its Ed25519 public key via did:key) can verify the signature without contacting the server.
+
+#### 17.5.2 Receipt schema
+
+```json
+{
+  "receipt_id":    "<ULID>",
+  "served_at":     "2026-05-24T12:00:00Z",
+  "verb":          "peer.ask",
+  "server_did":    "did:key:z6MkAlice...",
+  "caller_did":    "did:key:z6MkBob...",
+  "provider":      "claude",
+  "model":         "claude-haiku-4-5",
+  "input_tokens":  42,
+  "output_tokens": 7,
+  "duration_ms":   312,
+  "signature":     "<base64url Ed25519 signature>"
+}
+```
+
+The `signature` field is an Ed25519 signature (base64url-encoded) over the canonical JSON of all other fields, serialised in declaration order with no indentation and no trailing newline. Verifiers MUST reconstruct the canonical payload from the receipt fields (excluding `signature`) and verify using the server's Ed25519 public key (derivable from `server_did` via did:key).
+
+#### 17.5.3 Receipt request and response
+
+The calling peer requests a receipt by setting `request_receipt: true` in `peer.ask` params. The serving daimon extends its `peer.ask` response:
+
+```json
+{
+  "response": { "model": "...", "content": "...", ... },
+  "receipt": { ... }
+}
+```
+
+`receipt` is `null` (omitted) when `request_receipt` is false or omitted, or when the serving daimon has no loaded identity.
+
+#### 17.5.4 Receipt storage — `daimon.reputation.receipts`
+
+The serving daimon stores each issued receipt in `capability.db → receipts` with `direction = "issued"`. Callers may similarly store received receipts with `direction = "received"` (caller-side storage is a future feature).
+
+The `daimon.reputation.receipts` RPC returns stored receipts:
+
+| Field | Type | Description |
+|---|---|---|
+| `direction` | `string` | Filter: `"issued"` / `"received"` / omit for both |
+
+Response: `{ "receipts": [...] }` — newest-first.
+
+#### 17.5.5 Receipt verification
+
+Any verifier holding the `server_did` can:
+
+1. Decode the DID to extract the Ed25519 public key (did:key format).
+2. Reconstruct the canonical payload JSON (all receipt fields except `signature`, in declaration order).
+3. base64url-decode the `signature`.
+4. Call `ed25519.Verify(pubKey, canonicalJSON, signature)`.
+
+A valid signature proves the receipt was produced by the entity controlling that DID at the `served_at` time.
+
+### 17.6 Storage: `capability.db`
+
+All v0.4 persistent state lives in `$DAIMON_HOME/capability.db`, a SQLite 3 file. Four tables:
+
+| Table | Contents |
+|---|---|
+| `issued_tokens` | Tokens this daimon has issued (including revocation state) |
+| `received_tokens` | Tokens received from remote daimons (future: for caller-side tracking) |
+| `receipts` | Signed proof-of-service records, `direction ∈ {issued, received}` |
+| `token_calls` | Per-token call counter (drives the `calls_used` Datalog ambient fact) |
+
+`capability.db` contains no private key material. Biscuit tokens are cryptographic public objects (the signature is over public data; the private key is NOT stored). Receipt signatures are also public. Row-level encryption is therefore not applied in v0.4.
+
+### 17.7 New error codes (v0.4)
+
+| Code | Name | Condition |
+|---|---|---|
+| `-32014` | `CodeCapabilityDenied` | Token present but verification failed (revoked, expired, wrong verb, etc.) |
+| `-32015` | `CodeCapabilityRequired` | Token required but absent (reserved; unused in v0.4) |
+
+### 17.8 New activity log kinds (v0.4)
+
+| Kind | Written by | Condition |
+|---|---|---|
+| `capability.issued` | Local daimon | `daimon.capability.issue` succeeds |
+| `capability.revoked` | Local daimon | `daimon.capability.revoke` succeeds |
+| `capability.verified` | Serving daimon | Inbound token passes verification |
+| `capability.denied` | Serving daimon | Inbound token fails verification |
+| `reputation.receipt.issued` | Serving daimon | Signed receipt returned in `peer.ask` response |
+| `reputation.receipt.received` | Calling daimon | Receipt received and stored (future) |
+
+### 17.9 CLI surface (v0.4)
+
+```
+daimon capability issue   --verb <verb> [--verb ...]
+                          [--valid-until T] [--max-calls N]
+                          [--model M] [--grantee D] [--json]
+
+daimon capability list    [--all] [--json]
+
+daimon capability revoke  <token_id>
+
+daimon capability attenuate <token>
+                          [--valid-until T] [--max-calls N]
+                          [--model M] [--json]
+
+daimon reputation receipts
+                          [--direction issued|received] [--json]
+```
+
+### 17.10 Security properties
+
+**Offline verification.** The serving daimon verifies tokens against its own Ed25519 public key with no network round-trip. Tokens are valid for offline / air-gapped deployments.
+
+**Monotonic attenuation.** Biscuit's block structure guarantees that an attenuated token can only be MORE restrictive than its parent. A holder cannot extend a grant beyond what the issuer authorized.
+
+**Revocation advisory.** Revocation in v0.4 requires the caller to supply `capability_token_id`. A caller who withholds this field bypasses revocation. Mitigations: issue short-lived tokens; revoke the entire DID (out-of-band); upgrade to v0.5 full revocation.
+
+**Self-issued tokens only (v0.4).** The `rootPubKey` used for verification is the serving daimon's own public key. This means only tokens issued BY the serving daimon can be presented TO that daimon. Cross-issuer tokens (Carol's token presented to Alice) require Alice to trust Carol's public key — a trust federation mechanism deferred to v0.5.
+
+**Receipt non-repudiation.** The Ed25519 signature over the canonical receipt payload is unforgeable without the server's private key. Receipts accumulate into a verifiable reputation ledger. The serving daimon cannot deny having served a call for which it signed a receipt.
+
+**No key exposure.** `capability.db` stores only public data. The private key never leaves the identity keystore.
+
+### 17.11 Non-goals for v0.4
+
+- **Cross-issuer verification** — Alice cannot accept tokens issued by Carol without explicit trust configuration (v0.5).
+- **On-chain anchoring of receipts** — anchoring receipt hashes to an external ledger for tamper-evident public verifiability (v0.5).
+- **Automatic revocation** (OCSP-style) — the issuer is not consulted during verification (v0.5).
+- **Caller-side receipt storage** — storing receipts received from remote peers in the local daimon (future minor version).
+- **Receipt-gated `peer.ask`** — requiring a minimum reputation score before serving (v0.5 labor market).
+- **SDK wrappers** (Python / TypeScript) for `client.capability.*` and `client.reputation.*` (v0.4.x).
+
+### 17.12 Implementation reference
+
+| Phase | What shipped |
+|---|---|
+| 40 | `internal/capability` — Issue, Attenuate, Verify, Encode, Decode |
+| 41 | `internal/capability/db.go` — SQLite schema + CRUD |
+| 42 | `daimon.capability.*` RPC handlers + activity kinds + error codes |
+| 43 | `peer.ask` serving path — v0.4 check order, `verifyCapabilityToken()` |
+| 44 | `request_receipt`, `internal/reputation`, `daimon.reputation.receipts` |
+| 45 | CLI: `daimon capability` and `daimon reputation` subcommands |
+
+### 17.13 v0.4 GA criteria
+
+v0.4.0 GA is gated on:
+
+1. Phases 40–45 all green (shipped 2026-05-24 ✅).
+2. Cross-daimon capability smoke in CI: two daemon processes, A issues a token, B presents it on `peer.ask`, receipt verified (planned).
+3. Real-world delegation: one daimon issuing a capability token to a sub-agent that independently invokes `peer.ask` on a third daimon for one full session without manual intervention.
+4. SPEC §17 review and sign-off (this section).
+
+Current status: **phases 40–45 shipped 2026-05-24. CI smoke and dogfood pending.**
