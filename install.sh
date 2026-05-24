@@ -27,10 +27,18 @@
 #   1  unsupported platform / missing dependency
 #   2  download or checksum failure
 #
-# The installer makes ZERO modifications outside DAIMON_INSTALL_PREFIX. It
-# does NOT touch your shell rc files, env vars, or daimon home. If the
+# The installer drops binaries in DAIMON_INSTALL_PREFIX (or, by default,
+# /usr/local/bin — escalating via sudo if /usr/local/bin needs root —
+# falling back to $HOME/.local/bin only when neither option is available).
+# It does NOT touch your shell rc files, env vars, or daimon home. If the
 # install prefix isn't on your PATH the script prints the export line you
 # need to add yourself — you stay in control of your shell config.
+#
+# Sudo is only escalated to when stdout is a terminal (so curl|sh in an
+# interactive shell prompts once; CI / non-interactive runs never do)
+# and `sudo` is on PATH. The first sudo call is the directory mkdir,
+# which happens before the download — so you enter the password once,
+# up front, not partway through.
 
 set -eu
 
@@ -156,16 +164,40 @@ echo "${PROG}: target release = $TAG"
 echo "${PROG}: target platform = $PLAT"
 
 # --- Install prefix ---------------------------------------------------------
-
+#
+# Resolution order:
+#   1. $DAIMON_INSTALL_PREFIX if set       — explicit override; never sudos
+#   2. /usr/local/bin if writable          — Homebrew Macs, root, etc.
+#   3. /usr/local/bin via sudo             — fresh-device interactive path
+#   4. $HOME/.local/bin                    — last-resort fallback
+#
+# /usr/local/bin is on the default $PATH on macOS + Linux out of the box,
+# so landing the binary there means a fresh-device user doesn't have to
+# touch their shell rc. On a stock Mac /usr/local/bin needs root, so we
+# escalate to sudo only when stdout is a terminal AND sudo is on PATH —
+# CI runs / piped-to-non-tty contexts skip the prompt and keep the
+# $HOME/.local/bin fallback. The first sudo call is the directory
+# mkdir below, before any download — so the password prompt fires up
+# front, not partway through the install.
+SUDO=""
 if [ -n "${DAIMON_INSTALL_PREFIX:-}" ]; then
   PREFIX="$DAIMON_INSTALL_PREFIX"
 elif [ -w /usr/local/bin ] 2>/dev/null; then
   PREFIX=/usr/local/bin
+elif [ -t 1 ] && command -v sudo >/dev/null 2>&1; then
+  PREFIX=/usr/local/bin
+  SUDO="sudo"
+  echo "${PROG}: /usr/local/bin needs root — sudo will prompt for your password."
 else
   PREFIX="$HOME/.local/bin"
 fi
-mkdir -p "$PREFIX"
-echo "${PROG}: install prefix  = $PREFIX"
+# shellcheck disable=SC2086  # $SUDO is a deliberate optional prefix; want word-splitting
+$SUDO mkdir -p "$PREFIX"
+if [ -n "$SUDO" ]; then
+  echo "${PROG}: install prefix  = $PREFIX (via sudo)"
+else
+  echo "${PROG}: install prefix  = $PREFIX"
+fi
 echo
 
 # --- Download + verify ------------------------------------------------------
@@ -217,15 +249,20 @@ if [ ! -x "$STAGE/daimon" ] || [ ! -x "$STAGE/daimond" ]; then
 fi
 
 # Use `install` if available (preserves +x mode + atomic move); fall back
-# to cp + chmod on systems where `install` isn't on PATH.
+# to cp + chmod on systems where `install` isn't on PATH. Both paths
+# honour the optional $SUDO prefix set above when /usr/local/bin needs
+# root; with $SUDO empty (the common case) the behaviour is unchanged.
 copy_bin() {
   src="$1"
   dst="$2"
   if command -v install >/dev/null 2>&1; then
-    install -m 0755 "$src" "$dst"
+    # shellcheck disable=SC2086  # $SUDO is a deliberate optional prefix
+    $SUDO install -m 0755 "$src" "$dst"
   else
-    cp "$src" "$dst"
-    chmod 0755 "$dst"
+    # shellcheck disable=SC2086
+    $SUDO cp "$src" "$dst"
+    # shellcheck disable=SC2086
+    $SUDO chmod 0755 "$dst"
   fi
 }
 
