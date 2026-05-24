@@ -606,9 +606,18 @@ func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
 
 	case "peer.ask":
 		// peer.ask has economic implications (consumes the serving daimon's
-		// provider API credits). Requires an explicit address-book entry with
-		// "peer.ask" in ApprovedVerbs. When the address book is not configured
-		// (abook == nil), the verb is unavailable rather than silently-open.
+		// provider API credits). v0.4 check order (design/v0.4-delegation.md §6):
+		//
+		//   1. blocked?   — peer is known but explicitly NOT approved → reject
+		//                   (a valid capability token cannot override an explicit
+		//                   address-book denial)
+		//   2. token?     — valid Biscuit capability_token → allow
+		//   3. pinned?    — address-book entry with HasVerb("peer.ask") → allow
+		//   4.            — reject
+		//
+		// When the address book is not configured the verb is unavailable:
+		// there is nowhere to do the blocked check and no issuer identity
+		// to root-verify tokens against.
 		if s.abook == nil {
 			if req.IsNotification() {
 				return nil
@@ -616,21 +625,52 @@ func (s *Server) dispatchPeer(conn *transport.Conn, raw []byte) *Response {
 			return errorResponse(req.ID, newError(CodePeerProtocolUnsupported,
 				"peer.ask: address book not configured on this daimon"))
 		}
+
 		entry := s.lookupPeerByX25519(conn.PeerX25519)
-		if entry == nil {
-			if req.IsNotification() {
-				return nil
-			}
-			return errorResponse(req.ID, newError(CodePeerUnauthorized,
-				"peer.ask: peer not found in address book"))
-		}
-		if !entry.HasVerb("peer.ask") {
+
+		// 1. Blocked guard: peer is known but not approved for peer.ask.
+		//    A valid capability token cannot bypass an explicit denial.
+		if entry != nil && !entry.HasVerb("peer.ask") {
 			if req.IsNotification() {
 				return nil
 			}
 			return errorResponse(req.ID, newError(CodePeerUnauthorized,
 				"peer.ask: verb not authorized for this peer (use daimon.peer.address_book.pin)"))
 		}
+
+		// 2. Capability-token auth path.
+		// Peek at capability_token and the nested model (needed for Datalog
+		// model-constraint check) without fully parsing the params — handlePeerAsk
+		// re-parses them independently below.
+		var capPeek struct {
+			CapabilityToken   string `json:"capability_token"`
+			CapabilityTokenID string `json:"capability_token_id"`
+			Request           struct {
+				Model string `json:"model"`
+			} `json:"request"`
+		}
+		_ = json.Unmarshal(req.Params, &capPeek)
+
+		if capPeek.CapabilityToken != "" {
+			if rpcErr := s.verifyCapabilityToken(
+				capPeek.CapabilityToken, capPeek.CapabilityTokenID, capPeek.Request.Model,
+			); rpcErr != nil {
+				if req.IsNotification() {
+					return nil
+				}
+				return errorResponse(req.ID, rpcErr)
+			}
+			// Token verified → fall through to handlePeerAsk (entry may be nil).
+		} else if entry == nil {
+			// 3/4. No token, peer not pinned → unauthorized.
+			if req.IsNotification() {
+				return nil
+			}
+			return errorResponse(req.ID, newError(CodePeerUnauthorized,
+				"peer.ask: peer not found in address book"))
+		}
+		// else: entry != nil && HasVerb("peer.ask") — pinned, proceed without token.
+
 		result, rpcErr := s.handlePeerAsk(conn, entry, req.Params)
 		if req.IsNotification() {
 			return nil

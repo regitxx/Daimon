@@ -348,9 +348,18 @@ func (s *Server) handlePeerEcho(conn *transport.Conn, params json.RawMessage) (a
 // normalized provider.Request. inject_context is deliberately NOT supported
 // in peer.ask v0.3 — the peer should build its own retrieval context before
 // asking us to invoke the LLM.
+//
+// v0.4 adds optional capability-token fields. When capability_token is
+// present the serving daimon verifies it cryptographically (Biscuit v3)
+// before consulting the address book. capability_token_id is used only
+// for revocation checking and call-count tracking — it is not embedded
+// in the Biscuit bytes themselves and may be omitted for attenuated tokens
+// whose ID the caller doesn't know.
 type peerAskParams struct {
-	Provider string           `json:"provider"`
-	Request  provider.Request `json:"request"`
+	Provider          string           `json:"provider"`
+	Request           provider.Request `json:"request"`
+	CapabilityToken   string           `json:"capability_token,omitempty"`
+	CapabilityTokenID string           `json:"capability_token_id,omitempty"`
 }
 
 // peerAskResult carries the provider response back to the calling peer.

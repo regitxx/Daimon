@@ -284,6 +284,85 @@ func (s *Server) handleCapabilityAttenuate(_ context.Context, params json.RawMes
 }
 
 // ---------------------------------------------------------------------------
+// Token verification helper (called by dispatchPeer for inbound peer.ask)
+// ---------------------------------------------------------------------------
+
+// verifyCapabilityToken decodes, revocation-checks, and cryptographically
+// verifies a Biscuit v3 capability token presented alongside a peer.ask frame.
+// model is taken from request.model in the peer.ask params (may be "").
+// Returns nil on success; the caller must propagate the *RPCError on failure.
+//
+// Side-effects on success:
+//   - If tokenID != "" → IncrementCalls(tokenID)
+//   - Appends KindCapabilityVerified to the activity log
+//
+// Side-effects on failure:
+//   - Appends KindCapabilityDenied to the activity log
+func (s *Server) verifyCapabilityToken(token, tokenID, model string) *RPCError {
+	if s.capDB == nil {
+		return newError(CodeCapabilityDenied,
+			"capability token presented but no capability store on this daimon")
+	}
+	if s.id == nil {
+		return newError(CodeCapabilityDenied,
+			"capability token presented but identity is locked")
+	}
+
+	raw, err := capability.Decode(token)
+	if err != nil {
+		return newError(CodeCapabilityDenied,
+			fmt.Sprintf("capability_token: decode: %v", err))
+	}
+
+	// Revocation check — only when the caller supplied a token_id.
+	if tokenID != "" {
+		revoked, err := s.capDB.IsRevoked(context.Background(), tokenID)
+		if err != nil {
+			return newError(CodeInternalError,
+				fmt.Sprintf("capability_token: revocation check: %v", err))
+		}
+		if revoked {
+			s.auditCapability(context.Background(), activity.KindCapabilityDenied, map[string]any{
+				"token_id": tokenID,
+				"reason":   "revoked",
+			})
+			return newError(CodeCapabilityDenied, "capability_token: token has been revoked")
+		}
+	}
+
+	// Current call count for the calls_used Datalog ambient fact.
+	var callsUsed int64
+	if tokenID != "" {
+		callsUsed, _ = s.capDB.CallsUsed(context.Background(), tokenID)
+	}
+
+	vctx := capability.VerifyContext{
+		Verb:      "peer.ask",
+		TargetDID: s.id.DID(),
+		Now:       time.Now().UTC(),
+		Model:     model,
+		CallsUsed: callsUsed,
+	}
+	if err := capability.Verify(raw, s.id.PublicKey(), vctx); err != nil {
+		s.auditCapability(context.Background(), activity.KindCapabilityDenied, map[string]any{
+			"token_id": tokenID,
+			"reason":   err.Error(),
+		})
+		return newError(CodeCapabilityDenied, fmt.Sprintf("capability_token: %v", err))
+	}
+
+	// Verified: bump call counter and audit.
+	if tokenID != "" {
+		_, _ = s.capDB.IncrementCalls(context.Background(), tokenID)
+	}
+	s.auditCapability(context.Background(), activity.KindCapabilityVerified, map[string]any{
+		"token_id": tokenID,
+		"model":    model,
+	})
+	return nil
+}
+
+// ---------------------------------------------------------------------------
 // Audit helper (shared with future handlers)
 // ---------------------------------------------------------------------------
 

@@ -287,13 +287,16 @@ func Verify(token []byte, rootPubKey ed25519.PublicKey, ctx VerifyContext) error
 		authorizer.AddFact(modelFact)
 	}
 
-	if ctx.CallsUsed > 0 {
-		callsFact, err := parser.FromStringFact(fmt.Sprintf("calls_used(%d)", ctx.CallsUsed))
-		if err != nil {
-			return fmt.Errorf("capability: build calls_used fact: %w", err)
-		}
-		authorizer.AddFact(callsFact)
+	// Always inject calls_used — even when zero — so that a token whose
+	// authority block contains "check if calls_used($n), $n < N" passes on
+	// the very first invocation (callsUsed == 0 satisfies $n < N for any N > 0).
+	// Injecting the fact for tokens without a calls_used check is harmless:
+	// the fact simply goes unmatched.
+	callsFact, err := parser.FromStringFact(fmt.Sprintf("calls_used(%d)", ctx.CallsUsed))
+	if err != nil {
+		return fmt.Errorf("capability: build calls_used fact: %w", err)
 	}
+	authorizer.AddFact(callsFact)
 
 	// Policy: allow if right(verb, targetDID) OR right(verb, "any").
 	// We add two separate allow-policies; Biscuit stops at the first match.
