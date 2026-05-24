@@ -70,6 +70,10 @@ func main() {
 		exitOnErr(cmdPeer(args))
 	case "federation":
 		exitOnErr(cmdFederation(args))
+	case "capability":
+		exitOnErr(cmdCapability(args))
+	case "reputation":
+		exitOnErr(cmdReputation(args))
 	case "rotate-password":
 		exitOnErr(cmdRotatePassword(args))
 	case "backup":
@@ -274,6 +278,33 @@ Usage:
                             reports manifest) WITHOUT writing anything to
                             $DAIMON_HOME — useful for checking old backups
                             without committing to a restore. Offline.
+
+  daimon capability issue   Mint a new Biscuit v3 capability token.
+              --verb <v>    Verb to grant (e.g. peer.ask). Repeatable.
+              [--valid-until T]  Hard expiry (RFC3339).
+              [--max-calls N]    Per-token call ceiling.
+              [--model M]        Constrain token to one model.
+              [--grantee D]      Grantee DID; omit = any-target.
+              [--json]
+
+  daimon capability list    List capability tokens issued by this daimon.
+              [--all]       Include revoked tokens.
+              [--json]
+
+  daimon capability revoke  Revoke a previously issued token.
+              <token_id>
+
+  daimon capability attenuate
+              <token>       Add tighter constraints to a token (offline).
+              [--valid-until T]
+              [--max-calls N]
+              [--model M]
+              [--json]      Print attenuated base64url token.
+
+  daimon reputation receipts
+                            List signed proof-of-service receipts.
+              [--direction issued|received]  Filter by direction.
+              [--json]
 
   daimon completion <shell> Print a shell-completion script to stdout for
                             bash, zsh, or fish. Source from your shell rc
