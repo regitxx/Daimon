@@ -50,7 +50,7 @@ describe("client.capability.issue", () => {
     expect(result.token).toBe("base64urltoken");
     expect(result.expires_at).toBe("");
 
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.capability.issue");
     expect(last.params).toEqual({ verbs: ["peer.ask"] });
   });
@@ -70,7 +70,7 @@ describe("client.capability.issue", () => {
       granteeDID: "did:key:z6MkPeer",
     });
 
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.params).toEqual({
       verbs: ["peer.ask", "peer.echo"],
       valid_until: "2027-01-01T00:00:00Z",
@@ -116,11 +116,12 @@ describe("client.capability.list", () => {
     const tokens = await client.capability.list();
 
     expect(tokens).toHaveLength(1);
-    expect(tokens[0].token_id).toBe("01KTOKEN");
-    expect(tokens[0].verbs).toEqual(["peer.ask"]);
-    expect(tokens[0].revoked).toBe(false);
+    const t0 = tokens[0]!;
+    expect(t0.token_id).toBe("01KTOKEN");
+    expect(t0.verbs).toEqual(["peer.ask"]);
+    expect(t0.revoked).toBe(false);
 
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.capability.list");
     expect(last.params).toEqual({ include_revoked: false });
   });
@@ -128,7 +129,7 @@ describe("client.capability.list", () => {
   it("propagates includeRevoked: true", async () => {
     daemon.handle("daimon.capability.list", { tokens: [] });
     await client.capability.list({ includeRevoked: true });
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.params).toEqual({ include_revoked: true });
   });
 
@@ -164,7 +165,7 @@ describe("client.capability.revoke", () => {
     const result = await client.capability.revoke("01KTOKEN");
 
     expect(result).toBeUndefined();
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.capability.revoke");
     expect(last.params).toEqual({ token_id: "01KTOKEN" });
   });
@@ -198,7 +199,7 @@ describe("client.capability.attenuate", () => {
     });
 
     expect(out).toBe("tightertoken");
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.capability.attenuate");
     expect(last.params).toEqual({
       token: "originaltoken",
@@ -250,12 +251,13 @@ describe("client.reputation.receipts", () => {
     const receipts = await client.reputation.receipts();
 
     expect(receipts).toHaveLength(1);
-    expect(receipts[0].receipt_id).toBe("01KRECEIPT");
-    expect(receipts[0].direction).toBe("issued");
-    expect(receipts[0].verb).toBe("peer.ask");
-    expect(receipts[0].signature).toBe("base64sig");
+    const r0 = receipts[0]!;
+    expect(r0.receipt_id).toBe("01KRECEIPT");
+    expect(r0.direction).toBe("issued");
+    expect(r0.verb).toBe("peer.ask");
+    expect(r0.signature).toBe("base64sig");
 
-    const last = daemon.calls[daemon.calls.length - 1];
+    const last = daemon.calls[daemon.calls.length - 1]!;
     expect(last.method).toBe("daimon.reputation.receipts");
     expect(last.params).toEqual({});
   });
@@ -264,12 +266,12 @@ describe("client.reputation.receipts", () => {
     daemon.handle("daimon.reputation.receipts", { receipts: [] });
 
     await client.reputation.receipts({ direction: "issued" });
-    expect(daemon.calls[daemon.calls.length - 1].params).toEqual({
+    expect(daemon.calls[daemon.calls.length - 1]!.params).toEqual({
       direction: "issued",
     });
 
     await client.reputation.receipts({ direction: "received" });
-    expect(daemon.calls[daemon.calls.length - 1].params).toEqual({
+    expect(daemon.calls[daemon.calls.length - 1]!.params).toEqual({
       direction: "received",
     });
   });
