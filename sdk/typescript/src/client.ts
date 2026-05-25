@@ -174,15 +174,36 @@ export interface FederationConfig {
   federation_version: string;
 }
 
-/** Wire shape for one open outbound peer channel. */
+/**
+ * Wire shape for one open peer channel as returned by `daimon.peer.list`.
+ *
+ * v0.4 dogfood-polish: added `direction` and `peer_x25519`. Direction is
+ * `"outbound"` (this daimon dialed somewhere) or `"inbound"` (this daimon
+ * was dialed). `peer_x25519` is the remote's transport key as lowercase
+ * hex — useful as a stable identifier for first-contact peers whose DID
+ * isn't in the address book yet. `peer_did` is the empty string for
+ * unknown inbound peers; non-empty when the address book has a binding.
+ *
+ * `PeerDialResult` only sets `channel_id`, `peer_did`, `opened_at` — the
+ * dial result predates these fields and the daemon doesn't backfill the
+ * direction/x25519 there.
+ */
 export interface PeerChannel {
   channel_id: string;
   peer_did: string;
   opened_at: string;
+  /** Present on `peer.list` results (v0.4+). Always `"outbound"` or `"inbound"`. */
+  direction?: "outbound" | "inbound";
+  /** Present on `peer.list` results (v0.4+). Lowercase hex of the X25519 pubkey. */
+  peer_x25519?: string;
 }
 
 /** Returned by `client.peer.dial`. */
-export interface PeerDialResult extends PeerChannel {}
+export interface PeerDialResult {
+  channel_id: string;
+  peer_did: string;
+  opened_at: string;
+}
 
 /** One entry in the local address book. */
 export interface AddressBookEntry {

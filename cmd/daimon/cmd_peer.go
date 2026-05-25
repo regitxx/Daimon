@@ -158,11 +158,16 @@ func cmdPeerListen(args []string) error {
 // ---------------------------------------------------------------------------
 
 // peerChannelMeta mirrors the channel metadata returned by peer.dial and
-// peer.list (channel_id, peer_did, opened_at).
+// peer.list. v0.4 dogfood-polish added Direction + PeerX25519 to the
+// peer.list shape; peer.dial does NOT populate them (its result predates
+// the change), but a single struct with omitempty keeps the wire decode
+// path simple for both calls.
 type peerChannelMeta struct {
-	ChannelID string `json:"channel_id"`
-	PeerDID   string `json:"peer_did"`
-	OpenedAt  string `json:"opened_at"`
+	ChannelID  string `json:"channel_id"`
+	PeerDID    string `json:"peer_did"`
+	OpenedAt   string `json:"opened_at"`
+	Direction  string `json:"direction,omitempty"`
+	PeerX25519 string `json:"peer_x25519,omitempty"`
 }
 
 func cmdPeerDial(args []string) error {
@@ -254,10 +259,20 @@ func cmdPeerList(args []string) error {
 		return nil
 	}
 	tw := tabPrinter(os.Stdout)
-	fmt.Fprintln(tw, "CHANNEL ID\tPEER DID\tOPENED AT")
+	fmt.Fprintln(tw, "CHANNEL ID\tDIR\tPEER DID\tPEER X25519\tOPENED AT")
 	for _, ch := range result.Channels {
-		did := truncate(ch.PeerDID, 40)
-		fmt.Fprintf(tw, "%s\t%s\t%s\n", ch.ChannelID, did, ch.OpenedAt)
+		dir := ch.Direction
+		if dir == "" {
+			dir = "outbound" // pre-v0.4 daemons: default for back-compat
+		}
+		did := ch.PeerDID
+		if did == "" {
+			did = "(unknown)"
+		}
+		did = truncate(did, 40)
+		x25 := truncate(ch.PeerX25519, 12)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			ch.ChannelID, dir, did, x25, ch.OpenedAt)
 	}
 	return tw.Flush()
 }

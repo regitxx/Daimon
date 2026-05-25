@@ -87,13 +87,32 @@ type UnlockFunc func(ctx context.Context, password string) (
 	err error,
 )
 
-// peerChannel is an open, authenticated Noise IK channel to a remote daimon.
-// Stored in Server.peerChannels by channel ID (a ULID string).
+// peerChannel is an open, authenticated Noise IK channel to a remote daimon
+// that THIS daimon opened (outbound). Stored in Server.peerChannels by
+// channel ID (a ULID string the dialer generates).
 type peerChannel struct {
 	id       string
 	conn     *transport.Conn
 	peerDID  string // DID of the remote daimon, supplied by the dialing call
 	openedAt time.Time
+}
+
+// inboundChannel is an open Noise IK channel accepted from a remote daimon
+// (inbound). Stored in Server.inboundChannels by a server-generated ULID
+// that is private to this daimon (not exchanged with the dialer — the
+// dialer has its own independent channel ID for its outbound view).
+//
+// Added in v0.4 dogfood-polish to make `daimon peer list` symmetric: the
+// listener side now sees who's connected to it, not just the dialer side
+// seeing who it connected to. peerX25519 is the canonical identifier of
+// the remote daimon at the transport level; peerDID is resolved at
+// list-time from the address book and may be empty for first-contact
+// peers (matches the rest of the inbound-side audit conventions).
+type inboundChannel struct {
+	id         string
+	conn       *transport.Conn
+	peerX25519 [transport.X25519KeySize]byte
+	openedAt   time.Time
 }
 
 // Server is a JSON-RPC 2.0 endpoint that exposes the Daimon Protocol surface
@@ -157,7 +176,12 @@ type Server struct {
 	// peerChannels holds open outbound channels keyed by channel ID (ULID).
 	// Protected by peerMu. Written by handlePeerDial; read by handlePeer*.
 	peerChannels map[string]*peerChannel
-	peerMu       sync.Mutex
+	// inboundChannels holds open inbound (accepted) channels keyed by a
+	// server-generated ULID. Protected by the same peerMu so a single lock
+	// covers both views in handlePeerList. Written by servePeerListener on
+	// accept and deleted by handleInboundPeerConn on disconnect.
+	inboundChannels map[string]*inboundChannel
+	peerMu          sync.Mutex
 
 	// peerConns tracks live peer-accept goroutines so PeerListen's cleanup
 	// can wait for them before returning.
@@ -185,7 +209,8 @@ func New(opts Options) (*Server, error) {
 		providers:    opts.Providers,
 		creds:        opts.Credentials,
 		logger:       opts.Logger,
-		peerChannels: make(map[string]*peerChannel),
+		peerChannels:    make(map[string]*peerChannel),
+		inboundChannels: make(map[string]*inboundChannel),
 	}
 	if opts.Unlock != nil {
 		// Serve mode: trio + wallet may be nil; unlock callback populates them.
@@ -514,7 +539,10 @@ func (s *Server) PeerAddr() string {
 }
 
 // servePeerListener runs the accept loop for the TCP peer server. Each
-// accepted connection is handled in its own goroutine.
+// accepted connection is registered in inboundChannels (so the listener
+// can introspect its own open channels via daimon.peer.list) and then
+// handled in its own goroutine. The goroutine deregisters the channel
+// when the connection terminates (clean close or error).
 func (s *Server) servePeerListener(ln *transport.Listener) {
 	for {
 		conn, err := ln.Accept()
@@ -522,18 +550,40 @@ func (s *Server) servePeerListener(ln *transport.Listener) {
 			// Listener was closed (by Close) — exit cleanly.
 			return
 		}
+		// Register the inbound channel under a server-generated ULID
+		// BEFORE handing the connection off so a concurrent peer.list
+		// can't observe a "ghost" frame-served-but-not-listed state.
+		id := newChannelID()
+		ch := &inboundChannel{
+			id:         id,
+			conn:       conn,
+			peerX25519: conn.PeerX25519,
+			openedAt:   time.Now().UTC(),
+		}
+		s.peerMu.Lock()
+		s.inboundChannels[id] = ch
+		s.peerMu.Unlock()
+
 		s.peerConns.Add(1)
-		go func(c *transport.Conn) {
+		go func(c *transport.Conn, chID string) {
 			defer s.peerConns.Done()
+			defer func() {
+				s.peerMu.Lock()
+				delete(s.inboundChannels, chID)
+				s.peerMu.Unlock()
+			}()
 			s.handleInboundPeerConn(c)
-		}(conn)
+		}(conn, id)
 	}
 }
 
 // handleInboundPeerConn serves peer.* method calls over an already-handshaked
 // inbound Noise IK connection. Each frame is one JSON-RPC request; we send
 // one response frame per request. The connection is closed when the loop exits
-// (on read error, context cancel, or explicit close).
+// (on read error, context cancel, or explicit close). Channel-map cleanup
+// is handled by the calling goroutine in servePeerListener — keeping that
+// here would tightly couple this function to the registration machinery
+// and make it harder to test in isolation.
 func (s *Server) handleInboundPeerConn(conn *transport.Conn) {
 	defer conn.Close()
 	for {

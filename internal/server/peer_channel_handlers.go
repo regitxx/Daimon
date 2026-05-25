@@ -194,24 +194,63 @@ func (s *Server) handlePeerClose(ctx context.Context, params json.RawMessage) (a
 
 // --- daimon.peer.list --------------------------------------------------------
 
+// peerChannelWire is one row in the peer.list response.
+//
+// v0.4 dogfood-polish: added Direction + PeerX25519. Direction is
+// "outbound" (we dialed) or "inbound" (we accepted). PeerX25519 is
+// the transport public key as lowercase hex — always populated;
+// useful as a stable identifier for first-contact peers whose DID
+// hasn't been registered in the address book yet.
+//
+// peer_did is empty for inbound channels from unknown peers; the
+// dialer can self-announce a DID later (e.g. via peer.dial-equivalent
+// signalling), but in v0.3+ we just resolve via address book lookup.
 type peerChannelWire struct {
-	ChannelID string `json:"channel_id"`
-	PeerDID   string `json:"peer_did"`
-	OpenedAt  string `json:"opened_at"`
+	ChannelID  string `json:"channel_id"`
+	PeerDID    string `json:"peer_did"`
+	OpenedAt   string `json:"opened_at"`
+	Direction  string `json:"direction"`
+	PeerX25519 string `json:"peer_x25519"`
 }
 
 type peerListResult struct {
 	Channels []peerChannelWire `json:"channels"`
 }
 
+// handlePeerList returns both outbound channels (this daimon dialed
+// somewhere) and inbound channels (this daimon was dialed). v0.4
+// dogfood-polish: prior to this, inbound channels were invisible — the
+// listener could serve peer.echo + peer.ask + peer.pay.required just
+// fine, but had no way to answer "who's currently connected to me?",
+// which is the listener-side counterpart of the dialer's daimon peer
+// list. Now both sides are observable.
 func (s *Server) handlePeerList(_ context.Context, _ json.RawMessage) (any, *RPCError) {
 	s.peerMu.Lock()
-	out := make([]peerChannelWire, 0, len(s.peerChannels))
+	out := make([]peerChannelWire, 0, len(s.peerChannels)+len(s.inboundChannels))
 	for _, ch := range s.peerChannels {
 		out = append(out, peerChannelWire{
-			ChannelID: ch.id,
-			PeerDID:   ch.peerDID,
-			OpenedAt:  ch.openedAt.Format(time.RFC3339),
+			ChannelID:  ch.id,
+			PeerDID:    ch.peerDID,
+			OpenedAt:   ch.openedAt.Format(time.RFC3339),
+			Direction:  "outbound",
+			PeerX25519: fmt.Sprintf("%x", ch.conn.PeerX25519),
+		})
+	}
+	// Inbound channels: peer_did resolved from the address book when
+	// known (pinned/blocked/first_seen peers). Empty when the dialer
+	// hasn't been registered locally — peer_x25519 still uniquely
+	// identifies the transport endpoint either way.
+	for _, ch := range s.inboundChannels {
+		peerDID := ""
+		if entry := s.lookupPeerByX25519(ch.peerX25519); entry != nil {
+			peerDID = entry.DID
+		}
+		out = append(out, peerChannelWire{
+			ChannelID:  ch.id,
+			PeerDID:    peerDID,
+			OpenedAt:   ch.openedAt.Format(time.RFC3339),
+			Direction:  "inbound",
+			PeerX25519: fmt.Sprintf("%x", ch.peerX25519),
 		})
 	}
 	s.peerMu.Unlock()

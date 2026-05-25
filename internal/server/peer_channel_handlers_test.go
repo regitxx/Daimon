@@ -1048,6 +1048,104 @@ func TestFederationConfig_IncludesPeerPayRequired(t *testing.T) {
 
 // --- federation config: peer.ask in protocols --------------------------------
 
+// TestPeerList_DirectionAndInboundVisible verifies the v0.4 dogfood-polish
+// gap fix: BEFORE this, calling daimon.peer.list on the listener side
+// (Mac B) returned an empty list, even though a peer.echo had just been
+// served over the channel and the dialer (Mac A) saw the channel fine.
+// This test asserts the listener's peer.list now shows the inbound
+// channel with direction="inbound" and the dialer's transport pubkey.
+func TestPeerList_DirectionAndInboundVisible(t *testing.T) {
+	a := newPeerFixture(t)
+	b := newPeerFixture(t)
+
+	dial := a.callDial(t, b.id.DID(), b.peerAddr)
+
+	// Dialer side (A): one outbound channel, direction="outbound".
+	respA := a.call(t, "daimon.peer.list", nil)
+	if respA.Error != nil {
+		t.Fatalf("A peer.list error: %+v", respA.Error)
+	}
+	var listA peerListResult
+	resultAs(t, respA, &listA)
+	if len(listA.Channels) != 1 {
+		t.Fatalf("A: want 1 channel, got %d", len(listA.Channels))
+	}
+	if listA.Channels[0].Direction != "outbound" {
+		t.Errorf("A direction: got %q want %q", listA.Channels[0].Direction, "outbound")
+	}
+	if listA.Channels[0].ChannelID != dial.ChannelID {
+		t.Errorf("A channel id: got %q want %q", listA.Channels[0].ChannelID, dial.ChannelID)
+	}
+	if listA.Channels[0].PeerX25519 == "" {
+		t.Error("A peer_x25519 must not be empty for outbound channels")
+	}
+
+	// Listener side (B): one inbound channel. Poll briefly because the
+	// accept registration happens in a goroutine on B after the dial RPC
+	// returns on A — there's a small window where A is back but B hasn't
+	// quite finished its accept-side bookkeeping.
+	var listB peerListResult
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		respB := b.call(t, "daimon.peer.list", nil)
+		if respB.Error != nil {
+			t.Fatalf("B peer.list error: %+v", respB.Error)
+		}
+		resultAs(t, respB, &listB)
+		if len(listB.Channels) >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B: timed out waiting for inbound channel; got %d channels", len(listB.Channels))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if len(listB.Channels) != 1 {
+		t.Fatalf("B: want 1 channel, got %d", len(listB.Channels))
+	}
+	ib := listB.Channels[0]
+	if ib.Direction != "inbound" {
+		t.Errorf("B direction: got %q want %q", ib.Direction, "inbound")
+	}
+	if ib.PeerX25519 == "" {
+		t.Error("B peer_x25519 must not be empty for inbound channels")
+	}
+	if ib.OpenedAt == "" {
+		t.Error("B opened_at must not be empty")
+	}
+	// The two sides have INDEPENDENT channel IDs by design — B's view
+	// gets a server-generated ULID, A's view uses the dialer's ULID.
+	// They must not coincide (else the registration plumbing is wrong).
+	if ib.ChannelID == dial.ChannelID {
+		t.Errorf("B channel id %q should be independent of A's %q",
+			ib.ChannelID, dial.ChannelID)
+	}
+
+	// After A closes its end, B's inbound list should drain.
+	closeResp := a.call(t, "daimon.peer.close", map[string]any{"channel_id": dial.ChannelID})
+	if closeResp.Error != nil {
+		t.Fatalf("peer.close error: %+v", closeResp.Error)
+	}
+	// Same goroutine-cleanup window applies to deregistration.
+	deadline = time.Now().Add(2 * time.Second)
+	for {
+		respB := b.call(t, "daimon.peer.list", nil)
+		if respB.Error != nil {
+			t.Fatalf("B peer.list (after close) error: %+v", respB.Error)
+		}
+		resultAs(t, respB, &listB)
+		if len(listB.Channels) == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("B: inbound channel still listed after close: %d entries",
+				len(listB.Channels))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func TestFederationConfig_IncludesPeerAsk(t *testing.T) {
 	f := newPeerFixture(t)
 	resp := f.call(t, "daimon.federation.config", nil)
