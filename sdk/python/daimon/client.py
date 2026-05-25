@@ -750,6 +750,161 @@ class _PeerNamespace:
         return []
 
 
+class _CapabilityNamespace:
+    """Verbs under ``daimon.capability.*`` (v0.4, phase 42+).
+
+    Biscuit v3 capability tokens are Ed25519-rooted Datalog-attenuable
+    bearer credentials that grant a remote daimon the right to call
+    specific verbs on this daimon. The serving daimon verifies tokens
+    offline (no issuer contact) and enforces attached constraints —
+    time expiry, per-token call ceiling, model whitelist, target DID.
+
+    Typical flow::
+
+        # On the issuer:
+        issued = client.capability.issue(
+            verbs=["peer.ask"],
+            grantee_did=peer_did,
+            max_calls=10,
+        )
+        # share issued['token'] (base64url) with the peer out-of-band
+
+        # On the peer, presenting the token to the issuer's `peer.ask`:
+        client.peer.invoke(channel_id, "peer.ask", {
+            "provider": "claude",
+            "request": {...},
+            "capability_token": token,
+            "capability_token_id": token_id,
+        })
+
+        # Later, on the issuer:
+        client.capability.revoke(token_id)
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def issue(
+        self,
+        *,
+        verbs: list[str],
+        valid_until: str | None = None,
+        max_calls: int | None = None,
+        model_constraint: str | None = None,
+        grantee_did: str | None = None,
+    ) -> dict:
+        """Mint a new root capability token signed by this daimon's identity key.
+
+        ``verbs`` is required (at least one). All other arguments are
+        optional constraints embedded in the authority block:
+
+        - ``valid_until`` — RFC3339 hard expiry; absent means unlimited
+        - ``max_calls`` — per-token call ceiling (enforced via capDB)
+        - ``model_constraint`` — only allow ``peer.ask`` with this model
+        - ``grantee_did`` — who the token is for; absent = any-target
+
+        Returns ``{token_id, token, expires_at}``. Share ``token`` (a
+        base64url Biscuit blob) with the grantee.
+        """
+        if not verbs:
+            raise ValueError("capability.issue: verbs is required (non-empty)")
+        params: dict = {"verbs": verbs}
+        if valid_until is not None:
+            params["valid_until"] = valid_until
+        if max_calls is not None:
+            params["max_calls"] = max_calls
+        if model_constraint is not None:
+            params["model_constraint"] = model_constraint
+        if grantee_did is not None:
+            params["grantee_did"] = grantee_did
+        return self._c._call("daimon.capability.issue", params)
+
+    def list(self, *, include_revoked: bool = False) -> list[dict]:
+        """List tokens this daimon has issued.
+
+        By default revoked tokens are excluded. Pass ``include_revoked=True``
+        to see the full history (useful for audit reporting).
+        """
+        result = self._c._call(
+            "daimon.capability.list", {"include_revoked": include_revoked}
+        )
+        if result is None:
+            return []
+        return result.get("tokens", []) or []
+
+    def revoke(self, token_id: str) -> None:
+        """Revoke a previously issued token by ``token_id``.
+
+        Idempotent: revoking an already-revoked token is a no-op (no error).
+        After revocation, any peer presenting this token gets
+        ``CodeCapabilityDenied (-32014)`` instead of being served.
+        """
+        self._c._call("daimon.capability.revoke", {"token_id": token_id})
+
+    def attenuate(
+        self,
+        token: str,
+        *,
+        valid_until: str | None = None,
+        max_calls: int | None = None,
+        model_constraint: str | None = None,
+    ) -> str:
+        """Add tighter constraints to a token offline (no issuer contact).
+
+        Returns a NEW base64url token strictly more restrictive than the
+        input. Useful for sub-delegation: receive a broad token, narrow
+        it before passing along.
+
+        Only the listed parameters can be tightened — you cannot widen
+        an existing constraint. Attempting to do so produces a token
+        that the serving daimon will still reject (the original block's
+        check is still in force).
+        """
+        params: dict = {"token": token}
+        if valid_until is not None:
+            params["valid_until"] = valid_until
+        if max_calls is not None:
+            params["max_calls"] = max_calls
+        if model_constraint is not None:
+            params["model_constraint"] = model_constraint
+        result = self._c._call("daimon.capability.attenuate", params)
+        return result["token"]
+
+
+class _ReputationNamespace:
+    """Verbs under ``daimon.reputation.*`` (v0.4, phase 44).
+
+    Every served ``peer.ask`` (when the caller passes ``request_receipt:
+    true``) generates an Ed25519-signed proof-of-service receipt that any
+    third party can verify offline. Receipts are stored on both sides —
+    this namespace queries the local store.
+    """
+
+    def __init__(self, client: "Client") -> None:
+        self._c = client
+
+    def receipts(self, *, direction: str | None = None) -> list[dict]:
+        """Query the local receipt store.
+
+        Pass ``direction="issued"`` to see receipts we signed (= calls we
+        served), ``"received"`` for receipts other daimons gave us (= calls
+        they served for us), or omit for both directions combined.
+
+        Each returned dict has keys ``receipt_id``, ``direction``,
+        ``served_at``, ``verb``, ``server_did``, ``caller_did``,
+        ``provider``, ``model``, ``input_tokens``, ``output_tokens``,
+        ``duration_ms``, ``signature`` — mirroring
+        :class:`internal.reputation.Receipt`.
+        """
+        params: dict = {}
+        if direction is not None:
+            params["direction"] = direction
+        result = self._c._call("daimon.reputation.receipts", params)
+        if result is None:
+            return []
+        return result.get("receipts", []) or []
+
+
 class Client:
     """Synchronous Daimon client over the local Unix socket.
 
@@ -787,6 +942,8 @@ class Client:
         self.payment = _PaymentNamespace(self)
         self.federation = _FederationNamespace(self)
         self.peer = _PeerNamespace(self)
+        self.capability = _CapabilityNamespace(self)
+        self.reputation = _ReputationNamespace(self)
 
     @property
     def socket_path(self) -> Path:

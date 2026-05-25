@@ -219,6 +219,68 @@ export interface PaymentRequirement {
   extra?: unknown;
 }
 
+// --- v0.4 surface: capability + reputation ---------------------------------
+
+/** Returned by `client.capability.issue`. */
+export interface CapabilityIssueResult {
+  /** ULID identifier for the issued token. Used for revoke + list lookup. */
+  token_id: string;
+  /** Base64url-encoded Biscuit token bytes. Pass to a peer for them to use. */
+  token: string;
+  /** RFC3339 expiry; empty string when the token has no time bound. */
+  expires_at: string;
+}
+
+/** One row in `client.capability.list`. Mirrors `internal/capability/db.go`. */
+export interface CapabilityToken {
+  token_id: string;
+  /** Verbs granted by the authority block, e.g. `["peer.ask"]`. */
+  verbs: string[];
+  /** DID this token was issued to. Empty when the token is any-target. */
+  grantee_did?: string;
+  /** Audience daimon DID — this daimon's own DID when issued locally. */
+  target_did?: string;
+  /** RFC3339 expiry. Absent when the token has no time bound. */
+  valid_until?: string;
+  /** Maximum number of times the token can be invoked. Absent = unlimited. */
+  max_calls?: number;
+  /** Model whitelist for `peer.ask`. Absent = any model. */
+  model_constraint?: string;
+  issued_at: string;
+  revoked: boolean;
+  revoked_at?: string;
+}
+
+/**
+ * One signed proof-of-service receipt, as returned by
+ * `client.reputation.receipts` (and embedded in `peer.ask` responses
+ * when the caller sets `request_receipt: true`).
+ *
+ * Verifying party: Ed25519-verify `signature` (base64) against the
+ * canonical JSON of every field EXCEPT `signature`, in declaration
+ * order. Public key = server_did's z6Mk fragment (multibase Ed25519).
+ */
+export interface ReputationReceipt {
+  receipt_id: string;
+  /** `"issued"` — we served the call; `"received"` — remote served us. */
+  direction: string;
+  /** RFC3339. */
+  served_at: string;
+  /** Verb that was served, e.g. `"peer.ask"`. */
+  verb: string;
+  /** DID of the daimon that signed this receipt (= who served the call). */
+  server_did: string;
+  /** DID of the caller. Empty when caller authenticated via Biscuit only. */
+  caller_did?: string;
+  provider?: string;
+  model?: string;
+  input_tokens: number;
+  output_tokens: number;
+  duration_ms: number;
+  /** Base64-encoded Ed25519 signature over the canonical payload. */
+  signature?: string;
+}
+
 /** PAYMENT-RESPONSE structure parsed by the daemon. */
 export interface PaymentResponse {
   success: boolean;
@@ -743,6 +805,142 @@ class PeerNamespace {
   }
 }
 
+// --- v0.4 surface: capability + reputation namespaces ----------------------
+
+/**
+ * `client.capability.*` — Biscuit v3 capability tokens (v0.4, phase 42+).
+ *
+ * Tokens are Ed25519-rooted Datalog-attenuable bearer credentials that
+ * grant a remote daimon the right to call specific verbs on this daimon.
+ * The serving daimon can verify the token offline (no issuer contact
+ * needed) and enforce attached constraints — time expiry, per-token call
+ * ceiling, model whitelist, target DID.
+ *
+ * Typical flow:
+ *   1. `issue({verbs: ["peer.ask"], grantee_did: peer.did, max_calls: 10})`
+ *      → token string; share with the peer out-of-band
+ *   2. Peer presents `capability_token` field on `peer.ask`
+ *   3. This daimon verifies + increments calls_used; serves the call
+ *   4. `revoke(token_id)` if the relationship sours
+ */
+class CapabilityNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * Mint a new root capability token signed by this daimon's identity key.
+   *
+   * `verbs` is required (at least one). All other parameters are optional
+   * constraints that ride along in the authority block:
+   *   - `validUntil`: RFC3339 hard expiry (otherwise unlimited)
+   *   - `maxCalls`: per-token call ceiling (stateful, enforced via capDB)
+   *   - `modelConstraint`: only allow `peer.ask` with this model
+   *   - `granteeDID`: who the token is for. Omit = any-target.
+   *
+   * Returns `{token_id, token, expires_at}` — share `token` (base64url
+   * Biscuit bytes) with the grantee.
+   */
+  async issue(params: {
+    verbs: string[];
+    validUntil?: string;
+    maxCalls?: number;
+    modelConstraint?: string;
+    granteeDID?: string;
+  }): Promise<CapabilityIssueResult> {
+    const wire: JsonObject = { verbs: params.verbs };
+    if (params.validUntil !== undefined) wire["valid_until"] = params.validUntil;
+    if (params.maxCalls !== undefined) wire["max_calls"] = params.maxCalls;
+    if (params.modelConstraint !== undefined) wire["model_constraint"] = params.modelConstraint;
+    if (params.granteeDID !== undefined) wire["grantee_did"] = params.granteeDID;
+    return (await this.c._call(
+      "daimon.capability.issue",
+      wire,
+    )) as CapabilityIssueResult;
+  }
+
+  /**
+   * List tokens this daimon has issued.
+   *
+   * By default revoked tokens are excluded. Pass `{includeRevoked: true}`
+   * to see the full history (useful for audit reporting).
+   */
+  async list(opts: { includeRevoked?: boolean } = {}): Promise<CapabilityToken[]> {
+    const result = (await this.c._call("daimon.capability.list", {
+      include_revoked: opts.includeRevoked === true,
+    })) as { tokens?: CapabilityToken[] } | null;
+    return result?.tokens ?? [];
+  }
+
+  /**
+   * Revoke a previously issued token by `tokenId`.
+   *
+   * Idempotent: revoking an already-revoked token is a no-op (no error).
+   * After revocation, any peer presenting this token gets
+   * `CodeCapabilityDenied (-32014)` instead of being served.
+   */
+  async revoke(tokenId: string): Promise<void> {
+    await this.c._call("daimon.capability.revoke", { token_id: tokenId });
+  }
+
+  /**
+   * Add tighter constraints to a token offline (no issuer contact).
+   *
+   * Returns a NEW base64url token that is strictly more restrictive than
+   * the input. Useful for sub-delegation: receive a broad token, narrow
+   * it before passing along.
+   *
+   * Only the listed parameters can be tightened — you cannot widen an
+   * existing constraint (e.g. extend expiry, raise max_calls). Attempting
+   * to do so produces a token that the serving daimon will still reject.
+   */
+  async attenuate(
+    token: string,
+    params: {
+      validUntil?: string;
+      maxCalls?: number;
+      modelConstraint?: string;
+    } = {},
+  ): Promise<string> {
+    const wire: JsonObject = { token };
+    if (params.validUntil !== undefined) wire["valid_until"] = params.validUntil;
+    if (params.maxCalls !== undefined) wire["max_calls"] = params.maxCalls;
+    if (params.modelConstraint !== undefined) wire["model_constraint"] = params.modelConstraint;
+    const result = (await this.c._call(
+      "daimon.capability.attenuate",
+      wire,
+    )) as { token: string };
+    return result.token;
+  }
+}
+
+/**
+ * `client.reputation.*` — Ed25519-signed proof-of-service receipts
+ * (v0.4, phase 44).
+ *
+ * Every served `peer.ask` (when the caller asks for a receipt) gets a
+ * signed receipt that any third party can verify offline. Receipts are
+ * stored on both sides — this namespace queries the local store.
+ */
+class ReputationNamespace {
+  constructor(private readonly c: Client) {}
+
+  /**
+   * Query the local receipt store.
+   *
+   * Pass `direction = "issued"` to see receipts we signed (= calls we
+   * served), `"received"` for receipts other daimons gave us
+   * (= calls they served for us), or omit for both.
+   */
+  async receipts(opts: { direction?: "issued" | "received" } = {}): Promise<ReputationReceipt[]> {
+    const wire: JsonObject = {};
+    if (opts.direction !== undefined) wire["direction"] = opts.direction;
+    const result = (await this.c._call(
+      "daimon.reputation.receipts",
+      wire,
+    )) as { receipts?: ReputationReceipt[] } | null;
+    return result?.receipts ?? [];
+  }
+}
+
 // --- base64 helpers ---------------------------------------------------------
 // Node's Buffer is the canonical base64 path; using globalThis lookups so
 // the SDK doesn't import @types/node into its surface unconditionally.
@@ -780,6 +978,10 @@ export class Client {
   readonly federation: FederationNamespace;
   /** v0.3: peer channel management + address book (`daimon.peer.*`). */
   readonly peer: PeerNamespace;
+  /** v0.4: Biscuit capability tokens (`daimon.capability.*`). */
+  readonly capability: CapabilityNamespace;
+  /** v0.4: Ed25519 signed proof-of-service receipts (`daimon.reputation.*`). */
+  readonly reputation: ReputationNamespace;
 
   private readonly socket: string;
   private readonly timeoutMs?: number;
@@ -802,6 +1004,8 @@ export class Client {
     this.payment = new PaymentNamespace(this);
     this.federation = new FederationNamespace(this);
     this.peer = new PeerNamespace(this);
+    this.capability = new CapabilityNamespace(this);
+    this.reputation = new ReputationNamespace(this);
   }
 
   /** Resolved Unix-socket path the client dials. */
