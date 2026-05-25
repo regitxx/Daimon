@@ -59,20 +59,25 @@ docs/systemd.md for the recommended hosted-daimon pattern.`)
 	var pw []byte
 	if *passwordFile != "" {
 		// --password-file: non-interactive unlock for systemd / supervisor
-		// setups. Refuse to read a file with permissions broader than 0600
-		// because anyone who can read this file effectively owns the daimon.
-		// The owner check + perm check are belt-and-suspenders: the kernel
-		// already enforces ownership for read access, but bailing early
-		// with a friendly error is better than silently reading a file
-		// that other local users could also read.
+		// setups. The only security property we require is that no user
+		// OUTSIDE owner+group can read the file — i.e. world bits must
+		// be zero. Group-readable is explicitly allowed because the
+		// recommended hosted-daimon pattern (docs/systemd.md) is
+		// root:daimon 0640 so the daimon user can read it at runtime via
+		// group membership while root retains write authority.
+		//
+		// Bailing early with a friendly error here is belt-and-suspenders:
+		// the kernel already enforces ownership for read access, but a
+		// pre-flight check beats a confusing "permission denied" deep in
+		// the unlock path.
 		info, statErr := os.Stat(*passwordFile)
 		if statErr != nil {
 			return fmt.Errorf("--password-file: %w", statErr)
 		}
 		mode := info.Mode().Perm()
-		if mode&0o077 != 0 {
-			return fmt.Errorf("--password-file: %s has permissions %#o; must be 0600 or 0400 (chmod 600 to fix)",
-				*passwordFile, mode)
+		if mode&0o007 != 0 {
+			return fmt.Errorf("--password-file: %s has permissions %#o; world bits must be 0 (chmod o-rwx %s to fix)",
+				*passwordFile, mode, *passwordFile)
 		}
 		raw, readErr := os.ReadFile(*passwordFile)
 		if readErr != nil {
