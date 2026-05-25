@@ -42,7 +42,7 @@ prove the protocol works end-to-end:
 # Dial the public daimon
 daimon peer dial \
   --did did:key:z6Mkh7bW4iGukKYrgbtjki99sk2ZAyiP6mzcFSrS3DZus1Td \
-  --endpoint tcp://178.105.195.194:9999
+  --endpoint tcp://peer.daimonprotocol.com:9999
 
 # Copy the channel_id it prints, then:
 daimon peer echo <channel_id> "hello from anywhere"
