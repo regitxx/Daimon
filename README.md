@@ -31,6 +31,41 @@ The v0.1 surface (identity / memory / activity log / four streaming provider ada
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
 - [`JOURNAL.md`](./JOURNAL.md) — chronological build log
 
+## Try federation in 30 seconds (no setup beyond install)
+
+A public daimon is running on Hetzner Falkenstein, accepting Noise IK
+connections from anywhere on the internet. After installing daimon
+locally (one-liner below in [Try v0.1](#try-v01--memory--provider-routing)),
+prove the protocol works end-to-end:
+
+```sh
+# Dial the public daimon
+daimon peer dial \
+  --did did:key:z6Mkh7bW4iGukKYrgbtjki99sk2ZAyiP6mzcFSrS3DZus1Td \
+  --endpoint tcp://178.105.195.194:9999
+
+# Copy the channel_id it prints, then:
+daimon peer echo <channel_id> "hello from anywhere"
+```
+
+If you see your message echoed back with the public daimon's DID as
+sender, you just verified: a sovereign agent on your laptop talked to
+a sovereign agent in Falkenstein, identified each other by cryptographic
+keys (did:key), and exchanged a message over an end-to-end encrypted
+channel (Noise IK over TCP). No central server. No account. No login.
+Pure peer-to-peer.
+
+That's the email-standard moment for agents. The same channel pattern
+also carries `peer.ask` (delegate a question to another agent's
+provider), `peer.pay.required` (x402 price discovery), and v0.4's
+capability-token + signed-receipt flows.
+
+> The public daimon is run by [@regitxx](https://github.com/regitxx) as
+> infrastructure for the project. It accepts `peer.echo` from anyone
+> (no address-book pin required) and audits every request to its own
+> activity log. Don't send secrets through it — Noise IK protects the
+> wire, but the audit row sees method names + caller pubkeys.
+
 ## Try v0.1 — memory + provider routing
 
 ```sh
