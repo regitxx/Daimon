@@ -128,6 +128,40 @@ jobs:
           # any unrelated services bound to the typical 8xxx range.
           PORT: 18402
 
+  v04-cross-daimon-smoke:
+    name: v0.4 cross-daimon capability + reputation smoke
+    # Runs ONLY the TestV04CrossDaimonSmoke_EndToEnd integration test in
+    # verbose mode. The same test also runs as part of the main Go shard
+    # (it lives in internal/server, not behind a build tag) — this shard
+    # exists for visibility: its green badge means
+    # "cross-daimon capability delegation + reputation receipts work
+    # end-to-end over a real encrypted Noise IK channel".
+    #
+    # Why this matters as a separate shard:
+    #   1. Verbose output is preserved in the workflow log so a failure
+    #      is immediately legible (the main Go shard runs ALL tests and
+    #      a failure here would be buried in the firehose).
+    #   2. Independent timing — if cross-daimon scenarios slow down,
+    #      we see it here without it being masked by faster unit tests.
+    #   3. Future v0.4 narrative tests (e.g. cross-daimon receipt-as-
+    #      input for further peer.ask, multi-hop attenuation) land in
+    #      the same file and get the same visibility.
+    #
+    # This shard validates §17 GA criteria #2 (cross-daimon smoke in CI)
+    # for v0.4 — the analogue of TestFederationSmoke_EndToEnd for v0.3.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run v0.4 cross-daimon smoke (verbose)
+        run: |
+          go test -race -count=1 -v \
+            -run '^TestV04CrossDaimonSmoke_EndToEnd$' \
+            ./internal/server/
+
   install-script:
     name: install.sh — end-to-end against published release
     # The repo's `curl | sh` install path is a public-facing contract.
