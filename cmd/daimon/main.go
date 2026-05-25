@@ -102,13 +102,20 @@ Usage:
 
   daimon unlock             Load the keystore and unlock the daemon. Spawns
               [--peer-addr <a>] daimond automatically if it is not already
-                            running. Prompts for the keystore password.
+              [--password-file <p>] running. Prompts for the keystore password
+                            unless --password-file is set, in which case the
+                            password is read from that file (must be chmod
+                            0600 or 0400).
                             --peer-addr starts the inbound Noise IK TCP
                             listener immediately after unlock — equivalent
                             to following up with 'daimon peer listen
                             --addr <a>'. Useful when running a daimon that
                             should always accept inbound peer connections.
+                            --password-file enables non-interactive unlock
+                            for systemd / supervisor setups; see
+                            docs/systemd.md.
                             Example: --peer-addr tcp://0.0.0.0:9999
+                                     --password-file /etc/daimon/keystore-password
 
   daimon identity get       Print the principal's DID. Requires unlock.
 

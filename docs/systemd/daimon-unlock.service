@@ -1,0 +1,42 @@
+[Unit]
+# Oneshot that runs immediately after daimond.service starts. Reads the
+# keystore password from a chmod-0600 file owned by the daimon user, sends
+# daimon.identity.unlock over the local socket, then starts the inbound
+# peer listener on TCP 0.0.0.0:9999.
+#
+# This is the second half of the reboot-survival pattern: daimond.service
+# brings the JSON-RPC daemon up; this unit unlocks it + opens the port.
+# Both run as the unprivileged daimon user; root never touches the keystore.
+Description=Daimon keystore unlock + peer listener
+Documentation=https://github.com/regitxx/Daimon
+After=daimond.service
+Requires=daimond.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+
+User=daimon
+Group=daimon
+
+Environment=DAIMON_HOME=/home/daimon/.config/daimon
+
+# --- THE UNLOCK ---
+# /etc/daimon/keystore-password is the canonical path; the file must be:
+#   - owned by `daimon:daimon`
+#   - chmod 0600 (or 0400) — `daimon unlock --password-file` refuses
+#     anything more permissive and exits non-zero before reading.
+# --peer-addr starts the inbound Noise IK listener immediately after unlock
+# so a single boot brings the public daimon fully online without manual
+# intervention.
+ExecStart=/usr/local/bin/daimon unlock \
+    --password-file /etc/daimon/keystore-password \
+    --peer-addr tcp://0.0.0.0:9999
+
+# If the unlock fails (wrong password, corrupted keystore, port already in
+# use), exit non-zero — systemd will log the failure clearly and the unit
+# will appear in `systemctl --failed` rather than silently succeeding.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

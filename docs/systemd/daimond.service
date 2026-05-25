@@ -1,0 +1,57 @@
+[Unit]
+# Long-running daimon background daemon. Started before daimon-unlock.service
+# (which is the oneshot that actually unlocks the keystore + starts the peer
+# listener over the local socket). Two-unit split keeps responsibilities clean:
+# this one owns the JSON-RPC Unix socket; the other owns the auth + listener.
+Description=Daimon background daemon
+Documentation=https://github.com/regitxx/Daimon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- IDENTITY ---
+# Run as the unprivileged daimon user. NEVER root — daimond holds no
+# privileged resources and root would just enlarge the blast radius if
+# something compromised the daemon.
+User=daimon
+Group=daimon
+
+# --- HOME ---
+# DAIMON_HOME must be explicit because systemd doesn't inherit a login shell
+# environment. Adjust this path to match where you ran `daimon init`.
+# The default for a non-root user on Linux is $XDG_CONFIG_HOME/daimon, which
+# expands to ~/.config/daimon when XDG_CONFIG_HOME is unset.
+Environment=DAIMON_HOME=/home/daimon/.config/daimon
+
+ExecStart=/usr/local/bin/daimond serve
+
+# --- RESTART POLICY ---
+# Restart on any failure with a short backoff. The daemon is stateless from
+# the perspective of restart (the keystore on disk is the source of truth),
+# so cycling it is safe. After-restart unlock is handled by the oneshot.
+Restart=on-failure
+RestartSec=5
+
+# --- HARDENING (defense in depth) ---
+# These reduce the surface available to a compromised daimond. None of them
+# affect the protocol; they're systemd-level confinement only.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/daimon/.config/daimon
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,6 +26,14 @@ func cmdUnlock(args []string) error {
 unlock, e.g. "tcp://0.0.0.0:9999" or "127.0.0.1:0". Equivalent
 to running 'daimon peer listen --addr <a>' as a separate step.
 Omit to skip starting the listener (default behaviour).`)
+	passwordFile := fs.String("password-file", "", `Read the keystore password from this file
+(first line, trailing newline trimmed) instead of prompting.
+File MUST be chmod 0400 or 0600 and owned by the invoking user;
+the CLI refuses to read anything more permissive to avoid
+accidentally exposing the password to other local users.
+Intended for systemd / supervisor setups where 'daimon unlock'
+needs to run non-interactively on every boot — see
+docs/systemd.md for the recommended hosted-daimon pattern.`)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -47,9 +56,41 @@ Omit to skip starting the listener (default behaviour).`)
 		fmt.Fprintf(os.Stderr, "(socket fallback to %s — $DAIMON_HOME path too long for AF_UNIX)\n", socket)
 	}
 
-	pw, err := readPassword("Password: ")
-	if err != nil {
-		return err
+	var pw []byte
+	if *passwordFile != "" {
+		// --password-file: non-interactive unlock for systemd / supervisor
+		// setups. Refuse to read a file with permissions broader than 0600
+		// because anyone who can read this file effectively owns the daimon.
+		// The owner check + perm check are belt-and-suspenders: the kernel
+		// already enforces ownership for read access, but bailing early
+		// with a friendly error is better than silently reading a file
+		// that other local users could also read.
+		info, statErr := os.Stat(*passwordFile)
+		if statErr != nil {
+			return fmt.Errorf("--password-file: %w", statErr)
+		}
+		mode := info.Mode().Perm()
+		if mode&0o077 != 0 {
+			return fmt.Errorf("--password-file: %s has permissions %#o; must be 0600 or 0400 (chmod 600 to fix)",
+				*passwordFile, mode)
+		}
+		raw, readErr := os.ReadFile(*passwordFile)
+		if readErr != nil {
+			return fmt.Errorf("--password-file: %w", readErr)
+		}
+		// Trim a single trailing newline (the common case for files written
+		// by `echo "..." > file`). DO NOT trim arbitrary whitespace — the
+		// password might legitimately end in a space, and silently eating
+		// it would produce a wrong-password error with no clear cause.
+		pw = bytes.TrimRight(raw, "\n")
+		// Also handle CRLF if someone edited the file on Windows.
+		pw = bytes.TrimRight(pw, "\r")
+	} else {
+		var readErr error
+		pw, readErr = readPassword("Password: ")
+		if readErr != nil {
+			return readErr
+		}
 	}
 	if len(pw) == 0 {
 		return errors.New("password must not be empty")
