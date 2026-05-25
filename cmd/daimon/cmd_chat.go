@@ -44,6 +44,8 @@ func cmdChat(args []string) error {
 	once := fs.String("once", "", "one-shot mode: send <prompt|-> as a single turn, print response, exit")
 	noInject := fs.Bool("no-inject-context", false, "disable SPEC §11 memory retrieval (default: enabled)")
 	injectQuery := fs.String("inject-query", "", "explicit retrieval query (default: each user prompt)")
+	noAutoMemory := fs.Bool("no-auto-memory", false,
+		"disable post-turn fact extraction (default: enabled in REPL, disabled with --once)")
 	asJSON := fs.Bool("json", false, "emit each response envelope as JSON (one-shot only; ignored in REPL)")
 	// Tri-state flag: unset → mode-specific default (REPL on, --once off);
 	// explicit --stream / --stream=false honours the user's call. Implemented
@@ -100,6 +102,9 @@ func cmdChat(args []string) error {
 		inject:      !*noInject,
 		injectQuery: *injectQuery,
 		stream:      stream.resolve(*once == ""),
+		// Auto-memory default mirrors the stream default: on for REPL,
+		// off for --once. Both can be overridden via --no-auto-memory.
+		autoMemory: !*noAutoMemory && *once == "",
 	}
 
 	f, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
@@ -145,6 +150,13 @@ type chatConfig struct {
 	inject      bool
 	injectQuery string
 	stream      bool
+	// autoMemory: after each successful turn, ask the same provider to
+	// extract any persistent autobiographical facts the user just revealed
+	// and write them to memory automatically. Default on for the REPL
+	// (killer feature: daimon gets smarter with every conversation
+	// without the user typing `daimon memory write`). Default off for
+	// `--once` to avoid surprising script consumers with a 2× token bill.
+	autoMemory bool
 }
 
 // streamFlag is a tri-state stdlib-flag value: when the user does not pass
@@ -460,6 +472,13 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 		if cfg.inject {
 			announceInject(cfg, prompt, injected)
 		}
+		// Auto-memory fires LAST so the assistant's content is already on
+		// stdout + injection details are on stderr by the time the
+		// extraction summary prints. Order: answer → memory recalled →
+		// memory learned. Reads like a coherent post-turn report.
+		if resp != nil {
+			runAutoMemoryExtraction(cfg, prompt, resp.Content)
+		}
 		return nil
 	}
 	resp, injected, raw, err := runTurn(w, history, cfg, prompt)
@@ -476,6 +495,9 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 	fmt.Println(resp.Content)
 	if cfg.inject {
 		announceInject(cfg, prompt, injected)
+	}
+	if resp != nil {
+		runAutoMemoryExtraction(cfg, prompt, resp.Content)
 	}
 	return nil
 }
@@ -577,6 +599,9 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 			if cfg.inject {
 				announceInject(cfg, line, injected)
 			}
+			if resp != nil {
+				runAutoMemoryExtraction(cfg, line, resp.Content)
+			}
 			continue
 		}
 		resp, injected, _, err := runTurn(w, history, cfg, line)
@@ -592,6 +617,9 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 		fmt.Printf("[%s]: %s\n", tag, resp.Content)
 		if cfg.inject {
 			announceInject(cfg, line, injected)
+		}
+		if resp != nil {
+			runAutoMemoryExtraction(cfg, line, resp.Content)
 		}
 	}
 }
