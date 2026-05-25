@@ -162,6 +162,11 @@ type providerResponse struct {
 type providerInvokeResult struct {
 	Response          *providerResponse `json:"response"`
 	InjectedMemoryIDs []string          `json:"injected_memory_ids,omitempty"`
+	// InjectedContext mirrors the server's wire field added 2026-05-25. It's
+	// the rendered "[i] (kind) content" block the daimon prepended to the
+	// system prompt. The chat REPL surfaces it inline so the user can SEE
+	// what daimon recalled, instead of just a "matched=N" count.
+	InjectedContext string `json:"injected_context,omitempty"`
 }
 
 // cmdProviderInvoke calls daimon.provider.invoke and prints the assistant's

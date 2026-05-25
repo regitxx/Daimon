@@ -536,6 +536,13 @@ type providerInvokeParams struct {
 type providerInvokeResult struct {
 	Response          *provider.Response `json:"response"`
 	InjectedMemoryIDs []string           `json:"injected_memory_ids,omitempty"`
+	// InjectedContext is the rendered context block (the same string that was
+	// prepended to the system prompt). Added 2026-05-25 so chat clients can
+	// SHOW the user what daimon recalled, not just a count. Empty when no
+	// inject_context was requested OR retrieval matched nothing. Carries no
+	// secrets: this is the same string the LLM just saw and is about to
+	// respond to — surfacing it to the human caller is privacy-neutral.
+	InjectedContext string `json:"injected_context,omitempty"`
 }
 
 func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessage) (any, *RPCError) {
@@ -556,6 +563,7 @@ func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessag
 
 	req := p.Request
 	var injectedIDs []string
+	var injectedContext string
 	if p.InjectContext != nil {
 		// Run the SPEC §11 retrieval, then prepend the formatted block to
 		// the system prompt — daimon's job is to enrich the prompt before
@@ -571,6 +579,7 @@ func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessag
 				req.System = ctxResult.Context
 			}
 			injectedIDs = ctxResult.MemoryIDs
+			injectedContext = ctxResult.Context
 		}
 	}
 
@@ -603,7 +612,11 @@ func (s *Server) handleProviderInvoke(ctx context.Context, params json.RawMessag
 		s.logf("activity append (provider.invoke %s): %v", p.Provider, err)
 	}
 
-	return providerInvokeResult{Response: resp, InjectedMemoryIDs: injectedIDs}, nil
+	return providerInvokeResult{
+		Response:          resp,
+		InjectedMemoryIDs: injectedIDs,
+		InjectedContext:   injectedContext,
+	}, nil
 }
 
 // --- daimon.provider.stream --------------------------------------------------
@@ -670,6 +683,7 @@ func (s *Server) handleProviderStream(ctx context.Context, enc *json.Encoder, he
 
 	req := p.Request
 	var injectedIDs []string
+	var injectedContext string
 	if p.InjectContext != nil {
 		ctxResult, rpcErr := s.runContextRetrieval(ctx, p.InjectContext.Query, p.InjectContext.MaxTokens, p.InjectContext.Kinds)
 		if rpcErr != nil {
@@ -682,6 +696,7 @@ func (s *Server) handleProviderStream(ctx context.Context, enc *json.Encoder, he
 				req.System = ctxResult.Context
 			}
 			injectedIDs = ctxResult.MemoryIDs
+			injectedContext = ctxResult.Context
 		}
 	}
 
@@ -754,7 +769,11 @@ func (s *Server) handleProviderStream(ctx context.Context, enc *json.Encoder, he
 		s.logf("activity append (provider.stream %s): %v", p.Provider, err)
 	}
 
-	return enc.Encode(successResponse(head.ID, providerInvokeResult{Response: res.resp, InjectedMemoryIDs: injectedIDs}))
+	return enc.Encode(successResponse(head.ID, providerInvokeResult{
+		Response:          res.resp,
+		InjectedMemoryIDs: injectedIDs,
+		InjectedContext:   injectedContext,
+	}))
 }
 
 // streamNotification is the wire shape for a server-pushed JSON-RPC

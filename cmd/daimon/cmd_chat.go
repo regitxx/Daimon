@@ -303,25 +303,25 @@ func renderResumedHistory(history []chatTurn) {
 // prompt via inject_context (nil/empty when retrieval ran but matched
 // nothing, or when inject_context was not set). The REPL's post-RPC
 // `[inject_context: query=... matched=N]` line uses this length.
-func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*providerResponse, []string, json.RawMessage, error) {
+func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*providerResponse, injectInfo, json.RawMessage, error) {
 	userTurn, params := buildTurnRequest(*history, cfg, prompt)
 
 	var raw json.RawMessage
 	if err := daemonCall("daimon.provider.invoke", params, &raw); err != nil {
-		return nil, nil, nil, err
+		return nil, injectInfo{}, nil, err
 	}
 	var env providerInvokeResult
 	if err := json.Unmarshal(raw, &env); err != nil {
-		return nil, nil, nil, fmt.Errorf("parse response: %w", err)
+		return nil, injectInfo{}, nil, fmt.Errorf("parse response: %w", err)
 	}
 	if env.Response == nil {
-		return nil, nil, nil, fmt.Errorf("daemon returned envelope with no response")
+		return nil, injectInfo{}, nil, fmt.Errorf("daemon returned envelope with no response")
 	}
 
 	if err := persistTurnPair(w, history, userTurn, env.Response, cfg.provider); err != nil {
-		return nil, nil, nil, err
+		return nil, injectInfo{}, nil, err
 	}
-	return env.Response, env.InjectedMemoryIDs, raw, nil
+	return env.Response, injectInfo{ids: env.InjectedMemoryIDs, context: env.InjectedContext}, raw, nil
 }
 
 // runTurnStream mirrors runTurn but invokes daimon.provider.stream and calls
@@ -334,20 +334,29 @@ func runTurn(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string) (*
 // canonical message), runTurnStream surfaces a sentinel that the caller can
 // translate into a transparent fallback to runTurn — the locked decision
 // puts the fallback choice in the CLI, not the server.
-func runTurnStream(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, []string, error) {
+func runTurnStream(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, injectInfo, error) {
 	userTurn, params := buildTurnRequest(*history, cfg, prompt)
 
 	var env providerInvokeResult
 	if err := daemonStream("daimon.provider.stream", params, onDelta, &env); err != nil {
-		return nil, nil, err
+		return nil, injectInfo{}, err
 	}
 	if env.Response == nil {
-		return nil, nil, fmt.Errorf("daemon returned envelope with no response")
+		return nil, injectInfo{}, fmt.Errorf("daemon returned envelope with no response")
 	}
 	if err := persistTurnPair(w, history, userTurn, env.Response, cfg.provider); err != nil {
-		return nil, nil, err
+		return nil, injectInfo{}, err
 	}
-	return env.Response, env.InjectedMemoryIDs, nil
+	return env.Response, injectInfo{ids: env.InjectedMemoryIDs, context: env.InjectedContext}, nil
+}
+
+// injectInfo bundles the two outputs of inject_context retrieval that the
+// REPL surfaces to the user after a successful turn. Kept as a small struct
+// instead of separate return params so the REPL plumbing doesn't need to
+// thread two values everywhere.
+type injectInfo struct {
+	ids     []string
+	context string // the rendered "[i] (kind) content" block, or "" when nothing matched
 }
 
 // buildTurnRequest produces the user turn and the provider invoke params for
@@ -449,7 +458,7 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 		_ = resp
 		fmt.Println()
 		if cfg.inject {
-			announceInject(cfg, prompt, len(injected))
+			announceInject(cfg, prompt, injected)
 		}
 		return nil
 	}
@@ -466,7 +475,7 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 	}
 	fmt.Println(resp.Content)
 	if cfg.inject {
-		announceInject(cfg, prompt, len(injected))
+		announceInject(cfg, prompt, injected)
 	}
 	return nil
 }
@@ -476,18 +485,18 @@ func runChatTurnOnce(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt st
 // streaming, drop to runTurn transparently after a one-line stderr note.
 // Buffered output happens after the announcement so the user sees the same
 // content shape in both modes.
-func runTurnStreamWithFallback(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, []string, error) {
+func runTurnStreamWithFallback(w io.Writer, history *[]chatTurn, cfg chatConfig, prompt string, onDelta func(string)) (*providerResponse, injectInfo, error) {
 	resp, injected, err := runTurnStream(w, history, cfg, prompt, onDelta)
 	if err == nil {
 		return resp, injected, nil
 	}
 	if !isStreamUnsupported(err) {
-		return nil, nil, err
+		return nil, injectInfo{}, err
 	}
 	fmt.Fprintf(os.Stderr, "[stream: %s does not support streaming, falling back to invoke]\n", cfg.provider)
 	r, injected, _, err := runTurn(w, history, cfg, prompt)
 	if err != nil {
-		return nil, nil, err
+		return nil, injectInfo{}, err
 	}
 	// Replay the buffered content through onDelta so the caller's stdout
 	// rendering still produces the assistant turn.
@@ -566,7 +575,7 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 			// the model.)
 			_ = resp
 			if cfg.inject {
-				announceInject(cfg, line, len(injected))
+				announceInject(cfg, line, injected)
 			}
 			continue
 		}
@@ -582,7 +591,7 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 		}
 		fmt.Printf("[%s]: %s\n", tag, resp.Content)
 		if cfg.inject {
-			announceInject(cfg, line, len(injected))
+			announceInject(cfg, line, injected)
 		}
 	}
 }
@@ -605,18 +614,36 @@ func handleSlash(line string, history []chatTurn) (bool, error) {
 	}
 }
 
-// announceInject prints the retrieval query and match count to stderr after
-// a successful turn so the user knows when memory was folded into the prompt
-// AND how many memories the daimon actually found. The count comes from the
-// daimon.provider.invoke envelope's injected_memory_ids field (session 24
-// surface). matched=0 still prints — the user asked for retrieval, ran it,
-// and got nothing; that's a real signal worth surfacing. Failure paths skip
-// the announce entirely; the RPC error message itself describes what went
-// wrong, no need to prepend a query line that suggests retrieval succeeded.
-func announceInject(cfg chatConfig, prompt string, matched int) {
+// announceInject prints the retrieval query, count, and (since 2026-05-25)
+// the actual recalled content to stderr after a successful turn — so the
+// user can SEE what daimon told the LLM about them, not just a cryptic
+// "matched=N" tally. The content comes from the InjectedContext field on
+// the provider.invoke envelope; matched=0 still prints (the user asked for
+// retrieval, ran it, got nothing; that's a real signal worth surfacing).
+//
+// Failure paths skip the announce entirely; the RPC error message itself
+// describes what went wrong, no need to prepend a query line that suggests
+// retrieval succeeded.
+//
+// Why stderr: the assistant's answer goes to stdout, so `daimon chat ... |
+// pbcopy` still copies just the answer. The recall meta is for the human
+// in the terminal, not the downstream pipe.
+func announceInject(cfg chatConfig, prompt string, info injectInfo) {
 	q := cfg.injectQuery
 	if q == "" {
 		q = prompt
 	}
-	fmt.Fprintf(os.Stderr, "[inject_context: query=%q matched=%d]\n", truncate(q, 80), matched)
+	matched := len(info.ids)
+	if matched == 0 {
+		fmt.Fprintf(os.Stderr, "[memory: nothing recalled for %q]\n", truncate(q, 80))
+		return
+	}
+	fmt.Fprintf(os.Stderr, "[memory: %d recalled for %q]\n", matched, truncate(q, 80))
+	if info.context != "" {
+		// runContextRetrieval formats lines as "[i] (kind) content"; indent
+		// them for visual separation from the assistant turn above.
+		for _, line := range strings.Split(strings.TrimRight(info.context, "\n"), "\n") {
+			fmt.Fprintf(os.Stderr, "  %s\n", line)
+		}
+	}
 }

@@ -334,6 +334,97 @@ func TestListByKindAndLimit(t *testing.T) {
 	}
 }
 
+// TestSearch_KeywordFallback_MultiTokenScoring pins the keyword fallback
+// behaviour that replaced the strict whole-string substring match (2026-05-25).
+//
+// Before: search("What kind of code should I write today?") against
+//   "When writing code, I like type-safe Go and TypeScript"
+//   returned ZERO matches because the entire query string wasn't a
+//   substring of any fact. Surfaced in dogfood as the killer-feature
+//   demo silently failing for everyone without Ollama configured.
+//
+// After: query tokenizes to [kind, code, write, today] (stopwords dropped),
+// matches against content tokens via exact-or-substring, score = fraction.
+// The fact above matches via "code" (exact) and "write"⊂"writing" → 2/4 = 0.5.
+func TestSearch_KeywordFallback_MultiTokenScoring(t *testing.T) {
+	store, _ := newTestStore(t, nil) // NullEmbedder
+	ctx := context.Background()
+	facts := []string{
+		"I'm the creator of Daimon",
+		"I prefer concise technical explanations, no fluff",
+		"When writing code, I like type-safe Go and TypeScript",
+	}
+	for _, f := range facts {
+		if _, err := store.Write(ctx, WriteRequest{Kind: KindFact, Content: f}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := store.Search(ctx, "What kind of code should I write today?", SearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("expected at least one keyword match for code/write query; got 0 — the killer demo will fail")
+	}
+	// The Go-and-TypeScript fact has the highest token overlap (code + write).
+	if !strings.Contains(results[0].Memory.Content, "TypeScript") {
+		t.Errorf("top result should be the writing-code fact; got %q", results[0].Memory.Content)
+	}
+	if results[0].Score == 0 {
+		t.Error("top result score must be > 0")
+	}
+}
+
+// TestSearch_KeywordFallback_EmptyAfterStopwords verifies that a query
+// composed entirely of stopwords ("Who am I?", "What's up?") falls back
+// to returning recent facts rather than zero results. Without this, the
+// LLM gets no context for the most common opening question users ask.
+func TestSearch_KeywordFallback_EmptyAfterStopwords(t *testing.T) {
+	store, _ := newTestStore(t, nil) // NullEmbedder
+	ctx := context.Background()
+	for _, f := range []string{
+		"I live in Berlin",
+		"I work on Daimon",
+		"My favourite colour is blue",
+	} {
+		if _, err := store.Write(ctx, WriteRequest{Kind: KindFact, Content: f}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := store.Search(ctx, "Who am I?", SearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) == 0 {
+		t.Fatal("queries that reduce to no useful tokens must return recent facts, not nothing")
+	}
+	// All three should come back since we asked for limit 5 and have 3.
+	if len(results) != 3 {
+		t.Errorf("want 3 recent facts surfaced for empty-token query, got %d", len(results))
+	}
+}
+
+// TestSearch_KeywordFallback_NoMatches verifies that truly unrelated
+// queries return empty, NOT all-results. The empty-after-stopwords path
+// only fires when the query had no useful tokens to begin with — a query
+// with content-bearing tokens that just don't match anything still
+// returns empty.
+func TestSearch_KeywordFallback_NoMatches(t *testing.T) {
+	store, _ := newTestStore(t, nil)
+	ctx := context.Background()
+	_, _ = store.Write(ctx, WriteRequest{Kind: KindFact, Content: "I like pasta"})
+
+	results, err := store.Search(ctx, "quantum computing algorithms", SearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("unrelated query should return 0 matches, got %d", len(results))
+	}
+}
+
 func TestSearchSubstringFallback(t *testing.T) {
 	store, _ := newTestStore(t, nil) // NullEmbedder → substring path
 	ctx := context.Background()

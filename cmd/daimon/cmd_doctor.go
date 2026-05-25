@@ -585,6 +585,26 @@ func renderDoctorText(w io.Writer, r doctorReport) error {
 		// already implied by the Daemon section above.
 	}
 
+	// Memory retrieval mode — surfaces whether semantic search is available.
+	// Added 2026-05-25 because the killer-feature demo was silently degrading
+	// to "matched=0 for everything" when Ollama wasn't running, with the only
+	// signal being a one-line warning in daimond's stderr that nobody reads.
+	// Now `daimon doctor` says it explicitly: ollama+nomic = semantic, no
+	// ollama = keyword fallback (which is improved enough to be usable, but
+	// less smart than embeddings).
+	fmt.Fprintf(tw, "Memory retrieval\n")
+	switch {
+	case !r.Runtimes.Ollama.Reachable:
+		fmt.Fprintln(tw, "  mode\tkeyword fallback (Ollama not running)")
+		fmt.Fprintln(tw, "  upgrade\t`brew install ollama && ollama serve && ollama pull nomic-embed-text` for semantic search")
+	case !runtimeHasModel(r.Runtimes.Ollama, "nomic-embed-text", "mxbai-embed-large", "all-minilm"):
+		fmt.Fprintln(tw, "  mode\tkeyword fallback (Ollama running, no embedding model pulled)")
+		fmt.Fprintln(tw, "  upgrade\t`ollama pull nomic-embed-text` for semantic search")
+	default:
+		fmt.Fprintln(tw, "  mode\tsemantic (Ollama embedder active)")
+	}
+	fmt.Fprintln(tw)
+
 	// Provider env (presence only — never the value, so doctor is safe to
 	// share screenshots from)
 	fmt.Fprintf(tw, "Provider env (presence only)\n")
@@ -607,6 +627,29 @@ func renderDoctorText(w io.Writer, r doctorReport) error {
 	fmt.Fprintf(tw, "  LM Studio (any)\t%s\n", readiness(r.Runtimes.LMStudio.Reachable, "LM Studio server"))
 
 	return tw.Flush()
+}
+
+// runtimeHasModel reports whether any of the candidate model names appears
+// in the runtime's pulled-models list. Used by the Memory section of the
+// doctor output to detect "Ollama running, but no embedding model"
+// independently of "Ollama not running at all" — those are different fixes
+// and the user gets different remediation text.
+//
+// Substring match because Ollama's model list often has a ":latest" or
+// version suffix (e.g. "nomic-embed-text:latest") and exact comparison
+// would miss it.
+func runtimeHasModel(r runtimeStat, candidates ...string) bool {
+	if !r.Reachable {
+		return false
+	}
+	for _, m := range r.Models {
+		for _, c := range candidates {
+			if strings.Contains(m, c) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func renderFileStat(s fileStat, absent string) string {
