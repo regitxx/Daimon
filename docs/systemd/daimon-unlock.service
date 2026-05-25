@@ -21,11 +21,28 @@ Group=daimon
 
 Environment=DAIMON_HOME=/home/daimon/.config/daimon
 
+# --- WAIT FOR DAIMOND'S SOCKET ---
+# `Type=simple` on daimond.service means systemd marks it Active the instant
+# ExecStart starts, NOT when daimond has actually bound the Unix socket.
+# Without this wait-loop, `daimon unlock` below can run before daimond is
+# ready, miss the socket, and AUTO-SPAWN ITS OWN DAIMOND — at which point
+# you have two processes racing for the same socket and the canonical one
+# (daimond.service) enters a crash loop. Surfaced this on the first
+# hosted-daimon deploy (2026-05-25): restart counter hit 24 in ~2 minutes.
+#
+# The loop bails after 30s so a genuinely-broken daimond.service doesn't
+# produce a hung unit, and the timeout error in journalctl points clearly
+# at the upstream service rather than at unlock itself.
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 300); do [ -S /home/daimon/.config/daimon/daimon.sock ] && exit 0; sleep 0.1; done; echo "daimon-unlock: daimond socket never appeared after 30s" >&2; exit 1'
+
 # --- THE UNLOCK ---
-# /etc/daimon/keystore-password is the canonical path; the file must be:
-#   - owned by `daimon:daimon`
-#   - chmod 0600 (or 0400) — `daimon unlock --password-file` refuses
-#     anything more permissive and exits non-zero before reading.
+# /etc/daimon/keystore-password is the canonical path; the file must be
+# readable by the daimon user but NOT world-readable. The two patterns
+# the unlock CLI accepts are:
+#   - chown daimon:daimon + chmod 0600  (owner-only)
+#   - chown root:daimon   + chmod 0640  (root writes, daimon group reads)
+# Either is fine; --password-file rejects only world-readable files.
+#
 # --peer-addr starts the inbound Noise IK listener immediately after unlock
 # so a single boot brings the public daimon fully online without manual
 # intervention.
