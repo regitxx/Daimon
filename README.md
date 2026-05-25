@@ -31,15 +31,52 @@ The v0.1 surface (identity / memory / activity log / four streaming provider ada
 - [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
 - [`JOURNAL.md`](./JOURNAL.md) — chronological build log
 
-## Try federation in 30 seconds (no setup beyond install)
+## Try the killer feature in 60 seconds — provider-portable memory
 
-A public daimon is running on Hetzner Falkenstein, accepting Noise IK
-connections from anywhere on the internet. After installing daimon
-locally (one-liner below in [Try v0.1](#try-v01--memory--provider-routing)),
-prove the protocol works end-to-end:
+The day-one promise: tell daimon something about yourself ONCE; every AI
+provider you use afterwards knows it. Switch from Claude to GPT to local
+Llama without re-explaining who you are. Your memory lives on YOUR
+machine, encrypted, owned by you.
 
 ```sh
-# Dial the public daimon
+# Install (one-liner; SHA-256 verified)
+curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
+daimon init    # choose a password
+daimon unlock  # enter it
+
+# Tell daimon a few things about yourself (or skip this — see auto-memory below)
+daimon memory write --kind fact "I'm a software engineer working on Daimon"
+daimon memory write --kind preference "I prefer concise technical explanations"
+
+# Now chat — `daimon chat` auto-picks a provider you've configured an API key for.
+# Notice it KNOWS YOU on the first message. The "[memory: ... recalled]" line
+# shows exactly what daimon told the LLM about you.
+daimon chat --once "What kind of code should I write today?"
+
+# Switch providers — same memory, no re-explaining:
+daimon chat --provider openai --once "What kind of code should I write today?"
+daimon chat --provider ollama --once "What kind of code should I write today?"
+```
+
+**Auto-memory:** in REPL mode (`daimon chat` with no `--once`), every
+turn the daimon asks the same LLM to extract any persistent facts you
+revealed and writes them down for you. So you never have to type
+`daimon memory write` again — just chat normally and watch the daimon
+get smarter about you. See `[auto-memory: learned N new facts]` after
+each turn. Disable with `--no-auto-memory` if you want full control.
+
+**No API keys configured?** `daimon doctor` shows what's available. The
+free path: install [Ollama](https://ollama.com), `ollama pull llama3.2`,
+then `daimon chat --provider ollama` runs entirely locally — no
+account, no cloud, no money. The same memory works there too.
+
+## Try cross-device federation (the substrate)
+
+A public daimon is running on Hetzner Falkenstein, accepting Noise IK
+connections from anywhere on the internet. After install, prove the
+protocol works end-to-end across two real machines:
+
+```sh
 daimon peer dial \
   --did did:key:z6Mkh7bW4iGukKYrgbtjki99sk2ZAyiP6mzcFSrS3DZus1Td \
   --endpoint tcp://peer.daimonprotocol.com:9999
@@ -48,25 +85,22 @@ daimon peer dial \
 daimon peer echo <channel_id> "hello from anywhere"
 ```
 
-If you see your message echoed back with the public daimon's DID as
-sender, you just verified: a sovereign agent on your laptop talked to
-a sovereign agent in Falkenstein, identified each other by cryptographic
-keys (did:key), and exchanged a message over an end-to-end encrypted
-channel (Noise IK over TCP). No central server. No account. No login.
-Pure peer-to-peer.
-
-That's the email-standard moment for agents. The same channel pattern
-also carries `peer.ask` (delegate a question to another agent's
+If you see your message echoed back, you've verified the protocol works
+peer-to-peer: encrypted (Noise IK), cryptographically identified
+(did:key), no central server, no account, no login. Same channel
+pattern carries `peer.ask` (delegate a question to another daimon's
 provider), `peer.pay.required` (x402 price discovery), and v0.4's
 capability-token + signed-receipt flows.
 
+That's the substrate the rest of the network value emerges from.
+
 > The public daimon is run by [@regitxx](https://github.com/regitxx) as
-> infrastructure for the project. It accepts `peer.echo` from anyone
-> (no address-book pin required) and audits every request to its own
+> project infrastructure. It accepts `peer.echo` from anyone (no
+> address-book pin required) and audits every request to its own
 > activity log. Don't send secrets through it — Noise IK protects the
 > wire, but the audit row sees method names + caller pubkeys.
 
-## Try v0.1 — memory + provider routing
+## Reference details — v0.1 memory + provider routing
 
 ```sh
 # Install (one-line, no Go required, SHA-256 verified):

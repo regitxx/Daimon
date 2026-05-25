@@ -55,8 +55,22 @@ func cmdChat(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// Auto-pick when --provider is omitted: ask the daemon which
+	// providers are configured + reachable, pick the first one in a
+	// stable preference order. The user can always override with
+	// --provider. Without this, the empty-state was a hard error
+	// ("--provider is required") which doesn't help a fresh-install
+	// user figure out what to do next — surfaced 2026-05-25.
 	if *providerName == "" {
-		return fmt.Errorf("--provider is required")
+		picked, hint, err := pickDefaultProvider()
+		if err != nil {
+			return err
+		}
+		if picked == "" {
+			return fmt.Errorf("no provider configured. %s\nrun `daimon doctor` for a checklist, then pass --provider <name>", hint)
+		}
+		*providerName = picked
+		fmt.Fprintf(os.Stderr, "[chat: auto-selected --provider %s (override with --provider <name>)]\n", picked)
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("daimon chat takes no positional arguments (use --once for one-shot)")
@@ -539,18 +553,12 @@ func runChatREPL(w io.Writer, history *[]chatTurn, cfg chatConfig, sessionPath s
 	// Auto-render prior history when the named session has any: the user is
 	// continuing a conversation, the past should be visible.
 	renderResumedHistory(*history)
-	fmt.Fprintf(os.Stderr, "daimon chat — provider=%s session=%s\n", cfg.provider, filepath.Base(sessionPath))
-	if cfg.inject {
-		fmt.Fprintln(os.Stderr, "inject_context: on (memory retrieval before each call) — pass --no-inject-context to disable")
-	} else {
-		fmt.Fprintln(os.Stderr, "inject_context: off")
-	}
-	if cfg.stream {
-		fmt.Fprintln(os.Stderr, "stream: on (token-by-token rendering) — pass --stream=false to disable")
-	} else {
-		fmt.Fprintln(os.Stderr, "stream: off")
-	}
-	fmt.Fprintln(os.Stderr, "Ctrl+D to exit, /help for commands.")
+	// Single-line status banner (added 2026-05-25). Compact view of the
+	// active config so a returning user can see at a glance: which
+	// provider, how much memory the daimon has, whether inject/auto-memory
+	// are on. Multi-line breakdown lives behind `daimon doctor`.
+	printChatBanner(cfg)
+	fmt.Fprintf(os.Stderr, "session=%s · Ctrl+D to exit · /help for commands\n", filepath.Base(sessionPath))
 
 	sc := bufio.NewScanner(os.Stdin)
 	sc.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
@@ -674,4 +682,94 @@ func announceInject(cfg chatConfig, prompt string, info injectInfo) {
 			fmt.Fprintf(os.Stderr, "  %s\n", line)
 		}
 	}
+}
+
+// pickDefaultProvider asks the daemon which providers are configured and
+// returns the first one in a fixed preference order. The order is:
+// claude > openai > ollama > lmstudio > others. Returns ("", hint, nil)
+// when no provider is configured — caller surfaces the hint to the user
+// with a "run `daimon doctor`" pointer.
+//
+// Added 2026-05-25 so `daimon chat` (no flags) works on a fresh install
+// where the user has set up at least one provider key. The empty-state
+// error message names the exact missing config, not a generic
+// "--provider required" — matters for first-30-seconds UX.
+func pickDefaultProvider() (string, string, error) {
+	var entries []providerListEntry
+	if err := daemonCall("daimon.provider.list", nil, &entries); err != nil {
+		return "", "", fmt.Errorf("provider list: %w", err)
+	}
+	// Preference order: hosted-API providers first (Claude, OpenAI), then
+	// local runtimes (Ollama, LM Studio). Within each tier we honour the
+	// daemon's enumeration order as a stable tiebreak.
+	priority := map[string]int{
+		"claude":   0,
+		"openai":   1,
+		"ollama":   2,
+		"lmstudio": 3,
+	}
+	best := ""
+	bestRank := 100
+	for _, e := range entries {
+		if !e.Configured {
+			continue
+		}
+		rank, ok := priority[e.Name]
+		if !ok {
+			rank = 99 // unknown providers go after every named one but stay reachable
+		}
+		if rank < bestRank {
+			best = e.Name
+			bestRank = rank
+		}
+	}
+	if best != "" {
+		return best, "", nil
+	}
+	// No configured provider — return a hint listing what's available so the
+	// user knows what to fix. "Available but not configured" means the
+	// adapter is compiled in but missing its key / runtime.
+	var available []string
+	for _, e := range entries {
+		available = append(available, e.Name)
+	}
+	hint := "providers compiled in: " + strings.Join(available, ", ") + "."
+	return "", hint, nil
+}
+
+// printChatBanner emits a one-line status header at REPL startup so the
+// user can see the active config without `daimon doctor`. Format:
+//
+//   chat ▸ provider=claude ▸ memory=12 ▸ inject=on ▸ auto-memory=on
+//
+// Goes to stderr (the assistant content goes to stdout). Tolerant to RPC
+// failures — degraded values print as "?" so a daemon hiccup doesn't
+// prevent the REPL from starting.
+func printChatBanner(cfg chatConfig) {
+	memCount := "?"
+	if list, err := callMemoryList(); err == nil {
+		memCount = fmt.Sprintf("%d", len(list))
+	}
+	onOff := func(b bool) string {
+		if b {
+			return "on"
+		}
+		return "off"
+	}
+	fmt.Fprintf(os.Stderr, "chat ▸ provider=%s ▸ memory=%s ▸ inject=%s ▸ auto-memory=%s\n",
+		cfg.provider, memCount, onOff(cfg.inject), onOff(cfg.autoMemory))
+}
+
+// callMemoryList is a thin client over daimon.memory.list used by the chat
+// banner. Kept here (not in cmd_memory.go) because the wire shape we need
+// is a slim subset — just the count — and pulling in the full memoryListWire
+// struct would force a cross-file dependency for a one-line banner.
+func callMemoryList() ([]struct{}, error) {
+	var resp struct {
+		Memories []struct{} `json:"memories"`
+	}
+	if err := daemonCall("daimon.memory.list", map[string]any{"limit": 1000}, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Memories, nil
 }
