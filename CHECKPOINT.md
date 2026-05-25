@@ -2,8 +2,8 @@
 
 > **Read this first at conversation start.** Full chronological detail is in [JOURNAL.md](./JOURNAL.md).
 
-**Last updated:** 2026-05-24
-**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phases 40–47 shipped: Biscuit capability delegation, reputation receipts, full CLI surface, SPEC §17. v0.4.0-dev.1 binary pre-release live.**
+**Last updated:** 2026-05-25
+**Phase:** Day Zero — v0.1 GA shipped on PyPI + npm; v0.2 pre-release across SDKs + binaries; v0.2.0 GA gated on phase 40.4 (live Base Sepolia settlement). v0.3 phases 30–38 shipped + **SPEC §16 v0.3 federation formal specification written**. **v0.4 phases 40–47 shipped: Biscuit capability delegation, reputation receipts, full CLI surface, SDK wrappers (phase 46), SPEC §17. v0.4.0-dev.2 binary pre-release live with dogfood-polish from first real two-Mac federation test.**
 
 ---
 
@@ -11,7 +11,7 @@
 
 | Channel | Command | Version |
 |---|---|---|
-| Binary one-liner | `curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh \| sh` | v0.4.0-dev.1 (binary) |
+| Binary one-liner | `curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh \| sh` | v0.4.0-dev.2 (binary) |
 | PyPI (pre-release) | `pip install --pre daimon-protocol` | 0.2.0.dev2 |
 | npm (pre-release) | `npm install @daimon-protocol/sdk@dev` | 0.2.0-dev.2 |
 | PyPI (stable) | `pip install daimon-protocol` | 0.1.0 |
@@ -61,7 +61,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 
 **CLI peer + federation surface (phases 37–38):** `daimon federation config` + `daimon peer listen/dial/close/list/echo/invoke/pay-required` + `daimon peer address-book list/add/pin/block/unblock/remove`. Full --json escape-hatch; bash/zsh/fish completion updated. `daimon peer listen` starts the inbound Noise IK TCP listener after unlock.
 
-**Tests:** 580 Go race+vet + 84 pytest + 85 vitest = **749 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
+**Tests:** 583 Go race+vet + 96 pytest + 96 vitest = **775 tests, all green on every push**. Plus 8 Go benchmarks runnable via `make bench` (not in CI; see [docs/perf.md](./docs/perf.md) for measured baselines).
 
 **Repo:** https://github.com/regitxx/Daimon.git (public). Apache 2.0.
 
@@ -74,7 +74,7 @@ End-to-end walkthrough: [QUICKSTART.md](./QUICKSTART.md) (zero → paid x402 res
 | v0.1 | months 0–2 | daimon-core + CLI + Python/TS SDKs + 4 streaming providers + chat REPL | ✅ **GA 2026-05-12** |
 | v0.2 | months 2–4 | wallet + x402 payments + full seed lifecycle | ✅ **pre-release** — GA gated on 40.4 |
 | v0.3 | months 4–6 | A2A discovery, federation across machines, Noise IK encrypted channels, did:key transport, daimon as payment recipient | **phases 30–38 shipped 2026-05-21** (discovery, TCP+Noise transport, address book, peer.echo, peer.ask, peer.pay.required, SDK wrappers, CLI commands, peer.listen RPC). **SPEC §16 written 2026-05-21.** Design doc: [`design/v0.3-federation.md`](./design/v0.3-federation.md) |
-| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **✅ phases 40–47 shipped 2026-05-24.** Issue/Attenuate/Verify (Biscuit v3), capability.db (4 tables), 4 capability RPCs, peer.ask capability gate (blocked→token→pinned→reject), Ed25519 reputation receipts, daimon.reputation.receipts RPC, CLI surface, SPEC §17. **v0.4.0-dev.1 pre-release binary live.** 567 → 580 Go total. |
+| v0.4 | months 6–9 | Biscuit-token capability delegation, reputation primitive | **✅ phases 40–47 + 46 SDKs shipped 2026-05-24/25.** Issue/Attenuate/Verify (Biscuit v3), capability.db (4 tables), 4 capability RPCs, peer.ask capability gate (blocked→token→pinned→reject), Ed25519 reputation receipts, daimon.reputation.receipts RPC, CLI surface, SPEC §17, Python+TS SDK wrappers. **v0.4.0-dev.2 pre-release binary live with dogfood polish (audit content + sudo install + peer.list inbound visibility).** 775 tests total. |
 | v0.5 | months 9–12 | First labor-market wedge: post-task / agent-bid / escrow | not started |
 | v1.0 | months 12+ | Foundation handoff conversation, governance | aspirational |
 
@@ -198,3 +198,6 @@ Detailed chronological entries live in JOURNAL.md. One-liner summaries here for 
 | 93 | 2026-05-24 | **v0.4 phase 45**: CLI — `cmd/daimon/cmd_capability.go` (issue/list/revoke/attenuate, multiVerb flag) + `cmd_reputation.go` (receipts). `main.go` dispatch + usage extended. No new tests. |
 | 94 | 2026-05-24 | **v0.4 phase 47**: SPEC §17 — formal specification for capability delegation + reputation (330 lines). Token anatomy, right facts, optional checks, lifecycle, peer.ask check order, revocation, receipt format+signing, RPC surface, activity kinds, error codes, security considerations. |
 | 95 | 2026-05-24 | **v0.4.0-dev.1 pre-release**: pushed tag, GitHub Actions release.yml succeeded. 4 platform tarballs (darwin/linux × amd64/arm64) + checksums.txt on GitHub Releases. `install.sh` one-liner live. 580 Go + 84 pytest + 85 vitest = 749 tests total. |
+| 96 | 2026-05-25 | **First two-Mac dogfood + audit polish**: huckgod ran `peer.echo` between MacBook-Pro and Host-002 over real LAN Noise IK TCP — federation works on real hardware. Found 3 audit gaps: `peer.invoke.received` missing `message` content + `caller_did`; SUMMARY column blank for all peer/capability/reputation kinds. Fixed in `peer_channel_handlers.go` (handlePeerEcho, handlePeerPayRequired) + `cmd_activity.go` (10 new `summarizeEntry` cases + 8 tests). 580 → 588 Go total. |
+| 97 | 2026-05-25 | **install.sh sudo escalation**: fresh-Mac install (no Homebrew = `/usr/local/bin` not writable) silently fell back to `~/.local/bin` (not on PATH). Added sudo escalation when stdout is TTY + sudo on PATH. CI shard unaffected (uses `DAIMON_INSTALL_PREFIX` explicit override). |
+| 98 | 2026-05-25 | **Phase 46 SDK wrappers + peer.list inbound + v0.4.0-dev.2 release**: Python `_CapabilityNamespace`/`_ReputationNamespace`, TypeScript `CapabilityNamespace`/`ReputationNamespace` at full RPC parity (+12 pytest, +11 vitest). Server now tracks inbound channels in parallel `inboundChannels` map; `peer.list` returns both sides with `direction` + `peer_x25519` fields. CLI table widens to show DIR + PEER X25519. New `TestPeerList_DirectionAndInboundVisible` 2-daimon integration test. Cut annotated `v0.4.0-dev.2` tag — release pipeline picks it up cleanly. **583 Go + 96 pytest + 96 vitest = 775 tests total.** |

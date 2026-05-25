@@ -4467,3 +4467,86 @@ or download directly from https://github.com/regitxx/Daimon/releases/tag/v0.4.0-
 - Dogfood: two daimons on separate machines
 
 ---
+
+## 2026-05-25 — Session 96: dogfood-polish — listener-side audit
+
+**Trigger:** First real two-Mac cross-device federation test exposed three observability gaps on the listener (Mac B) side of a `peer.echo`. None had been caught by 700+ unit/integration tests.
+
+**What ships:**
+
+**`internal/server/peer_channel_handlers.go`** —
+- `handlePeerEcho`: previously the `peer.invoke.received` audit payload only recorded `peer_x25519` (hex blob); now also includes the echo `message` (the audit log IS the inbox on the listener side since daimond has no terminal attached) and the `caller_did` looked up via `lookupPeerByX25519` when known.
+- `handlePeerPayRequired`: same `caller_did` resolution added for symmetry.
+
+**`cmd/daimon/cmd_activity.go`** —
+- `summarizeEntry` learned 10 new kinds: `peer.listen.started`, `peer.invoke.{received,served,sent}`, `peer.channel.{opened,closed}`, `peer.payment.invoiced`, `capability.{issued,revoked,verified,denied}`, `reputation.receipt.{issued,received}`.
+- Before this, the SUMMARY column was blank for every peer.* and capability.* / reputation.* audit row — making `daimon activity query` useless on the listener side.
+- After this, on the listener: `method=peer.echo from=did:key:zABC message="hello from Mac A"` rendered in one line.
+
+**`cmd/daimon/cmd_activity_test.go`** — 8 new test cases pinning the one-liner shape for the new kinds.
+
+**Test count:** 580 → 588 Go (8 new `summarizeEntry` cases).
+
+**Real-world note:** The dogfood test ran on huckgod's MacBook-Pro + Host-002 over Noise IK TCP. Found gaps in 30 minutes of actual use that 700+ tests missed. Validates the v1.0 strategy of building before formalizing governance — you can't see what's broken until people use it.
+
+---
+
+## 2026-05-25 — Session 97: install.sh sudo escalation
+
+**Trigger:** Same dogfood test surfaced an install-UX hole: on a fresh Mac (no Homebrew), `/usr/local/bin` needs sudo. The old `install.sh` silently fell back to `~/.local/bin`, which is NOT on macOS's default `$PATH` — requiring a manual `~/.zshrc` edit before `daimon` worked.
+
+**What ships:** `install.sh` resolution order extended:
+
+| Order | Path | Trigger |
+|---|---|---|
+| 1 | `$DAIMON_INSTALL_PREFIX` | env var set (CI, explicit override) |
+| 2 | `/usr/local/bin` | writable (Homebrew Macs, root) |
+| 3 | `/usr/local/bin` via `sudo` | **NEW** — stdout is a TTY AND `sudo` on PATH |
+| 4 | `$HOME/.local/bin` | last-resort fallback |
+
+Sudo is only escalated to when stdout is a terminal (so `curl | sh` from an interactive shell prompts once; CI / non-TTY runs never do). First sudo call is the directory `mkdir` BEFORE any download — password prompt fires up front, not partway through.
+
+The CI install-script shard sets `DAIMON_INSTALL_PREFIX` to a tempdir explicitly, so it bypasses the sudo branch entirely — CI matrix unchanged.
+
+---
+
+## 2026-05-25 — Session 98: Phase 46 SDK wrappers + peer.list inbound
+
+**Trigger:** Roadmap-next after dev.1 dogfood polish.
+
+**What ships:**
+
+**Phase 46 — Python + TypeScript SDK wrappers for capability + reputation:**
+
+- `sdk/python/daimon/client.py` adds `_CapabilityNamespace` (issue / list / revoke / attenuate, snake_case keyword args, ValueError client-side guard on empty `verbs`) and `_ReputationNamespace` (receipts with optional direction filter). Both wired into `Client.__init__` as `client.capability` / `client.reputation`.
+
+- `sdk/typescript/src/client.ts` adds `CapabilityIssueResult`, `CapabilityToken`, `ReputationReceipt` interfaces mirroring the wire types from `internal/server/{capability,reputation}_handlers.go`. `CapabilityNamespace` + `ReputationNamespace` classes with camelCase API (`granteeDID`, `validUntil`, `maxCalls`, `modelConstraint`, `includeRevoked`) → snake_case wire payloads.
+
+- Tests: `sdk/python/tests/test_capability_reputation.py` (12 cases) + `sdk/typescript/test/capability_reputation.test.ts` (11 cases). Paired byte-for-byte across the two SDKs so wire-shape drift surfaces immediately in CI. Covers happy path, snake_case mapping for every option, empty-response normalisation, direction-filter propagation, and the `CodeCapabilityDenied (-32014)` error path surfacing as `RPCError`.
+
+**`peer.list` inbound visibility (dogfood-polish gap closure):**
+
+The dogfood test showed Mac B's `daimon peer list` returned empty even while actively serving requests over an open channel from Mac A. Root cause: `servePeerListener` accepted connections but never registered them in any listable map; `handlePeerList` only iterated outbound (`peerChannels`).
+
+Fix:
+- New `inboundChannels` map on `Server`, parallel to `peerChannels`, same `peerMu` mutex.
+- New `inboundChannel` struct tracking server-generated ULID + peer X25519 pubkey + openedAt.
+- `servePeerListener` registers BEFORE spawning the handler goroutine; defers unregister on disconnect.
+- `peerChannelWire` extended with `Direction` (`"outbound"`|`"inbound"`) and `PeerX25519` (lowercase hex). Always set on `peer.list` results; absent on `peer.dial` results (back-compat).
+- `handlePeerList` iterates both maps. Inbound `peer_did` resolved via `lookupPeerByX25519`; empty for first-contact peers.
+- CLI `daimon peer list` table widens to show DIR + PEER X25519 columns.
+- TypeScript SDK `PeerChannel` interface extended with optional `direction` + `peer_x25519`.
+
+Test: `TestPeerList_DirectionAndInboundVisible` — two-daimon integration. A sees outbound, B sees inbound, channel IDs are independent across the two views, B's inbound list drains after A closes its end.
+
+**Channel ID design note:** dialer + listener have independent channel-ID namespaces by design. A's outbound ULID and B's inbound ULID are NEVER equal; correlation is via the shared `peer_x25519`, not the `channel_id`.
+
+**Cut tag `v0.4.0-dev.2`** with everything from this session + sessions 96–97. Annotated tag → workflow uses `--notes-from-tag` cleanly.
+
+**Test counts:** 580 → 583 Go (3 new: peer.list direction/inbound + cleanup), 84 → 96 pytest (+12), 85 → 96 vitest (+11). **775 total tests, all green on push.**
+
+**What's next (open):**
+- Phase 40.4: live Base Sepolia USDC settlement (needs faucet USDC + ETH)
+- v0.4 CI cross-daimon capability smoke shard
+- Continued multi-day dogfood across two machines
+
