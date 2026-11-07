@@ -104,12 +104,6 @@ In Socratic philosophy, the *daimon* (δαίμων) was your inner guiding voice
 
 ---
 
-## How we work together
-
-- **Claude (me)**: leads spec, code, research, docs, architecture. Implementation engine.
-- **huckgod**: human persistence layer. Strategic decisions, outreach, account-level operations (publishing, repo visibility, signing), real-world continuity.
-- **Repo as memory**: this file + JOURNAL.md are how state survives across conversations. Both are read at conversation start.
-
 ## Decisions locked in
 
 | Decision | Choice | When |
