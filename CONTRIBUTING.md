@@ -53,12 +53,12 @@ For the SDKs:
 # Python SDK
 cd sdk/python
 pip install -e .[dev]
-pytest -q               # 65 cases
+pytest -q               # 96 cases
 
 # TypeScript SDK
 cd sdk/typescript
 npm install
-npm test                # 65 cases via vitest
+npm test                # 96 cases via vitest
 ```
 
 The full QUICKSTART walks the same flow plus the live x402 + audit chain
@@ -71,9 +71,11 @@ parity. CI runs it on every push.
 ### Small fixes (typos, single-file improvements, obvious bugs)
 
 Open a PR directly against `main`. Keep the title short, explain the *why*
-in the description. The CI matrix runs Go (vet + race tests + build), four
-Python versions (3.10–3.13), three Node versions (18, 20, 22), and the x402
-cross-language smoke. All 9 shards must pass before merge.
+in the description. CI runs Go (vet + race tests + build), four Python versions
+(3.10–3.13), three Node versions (18, 20, 22), the x402 cross-language smoke,
+the v0.4 cross-daimon capability + reputation smoke, and `install.sh` end-to-end
+against the published release on Ubuntu and macOS. All jobs must pass before
+merge.
 
 ### Larger changes (new RPC verbs, new chains, new SDK surface)
 
@@ -120,11 +122,6 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/) if
 you want, but it's not enforced. The repo's existing commit history is
 prose-style with a clear subject line + a body that explains the *why*.
 Match that.
-
-PRs from AI-assisted workflows: surface the assistance honestly. The
-reference daemon and SDKs were built with extensive AI pairing; we
-don't pretend otherwise. Co-authorship trailers are up to you and your
-co-author.
 
 ## Releases
 
