@@ -15,29 +15,23 @@ A person who uses an AI accrues value in two directions: context they have given
 
 ```mermaid
 flowchart TB
-    subgraph CLIENT["Client processes"]
-        CLI["daimon CLI"]
-        SDKPY["Python SDK<br/>daimon-protocol"]
-        SDKTS["TypeScript SDK<br/>daimon-protocol/sdk"]
-    end
+    CLI[daimon CLI]
+    SDKPY[Python SDK]
+    SDKTS[TypeScript SDK]
 
-    subgraph DAEMON["daimond (local daemon)"]
-        RPC["JSON-RPC 2.0<br/>Unix socket, mode 0600"]
-        ID["Identity<br/>Ed25519 did:key<br/>Argon2id keystore"]
-        MEM["Memory<br/>SQLite + AES-256-GCM<br/>per-row AAD binding"]
-        LOG["Activity log<br/>BLAKE3 hash chain<br/>Ed25519 signed"]
-        WAL["Wallet<br/>BIP-39 + BIP-32<br/>EVM secp256k1"]
-        PAY["Payments<br/>x402 / EIP-3009<br/>pre-sign ceiling"]
-        AB["Address book<br/>TOFU pinning<br/>per-verb grants"]
-        CAP["Capability tokens<br/>Biscuit v3<br/>Datalog checks"]
-        REP["Reputation receipts<br/>Ed25519 signed"]
-    end
+    RPC[JSON-RPC 2.0 over Unix socket]
+    ID[Identity: Ed25519, did-key, Argon2id keystore]
+    MEM[Memory: SQLite, per-row AES-256-GCM]
+    LOG[Activity log: BLAKE3 chain, Ed25519 signed]
+    WAL[Wallet: BIP-39 and BIP-32, EVM secp256k1]
+    PAY[Payments: x402 and EIP-3009, pre-sign ceiling]
+    AB[Address book: TOFU pinning, per-verb grants]
+    CAP[Capability tokens: Biscuit v3, Datalog checks]
+    REP[Reputation receipts: Ed25519 signed]
 
-    subgraph NETWORK["Network"]
-        PROV["LLM providers<br/>Claude, OpenAI, Ollama, LM Studio"]
-        PEER["Peer daimons<br/>Noise IK over TCP"]
-        CHAIN["EVM chains<br/>Base, Base Sepolia"]
-    end
+    PROV[LLM providers]
+    PEER[Peer daimons over Noise IK TCP]
+    CHAIN[EVM chains]
 
     CLI --> RPC
     SDKPY --> RPC
@@ -50,12 +44,12 @@ flowchart TB
     RPC --> AB
     RPC --> CAP
     RPC --> REP
-    WAL -. signs .-> PAY
-    PAY -. EIP-3009 .-> CHAIN
-    RPC -. provider.invoke .-> PROV
-    AB -. peer.ask .-> PEER
-    CAP -. gates .-> AB
-    REP -. returned by .-> PEER
+    WAL --> PAY
+    PAY --> CHAIN
+    RPC --> PROV
+    AB --> PEER
+    CAP --> AB
+    REP --> PEER
 ```
 
 Three things to hold in mind while reading the rest:
