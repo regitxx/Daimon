@@ -1,210 +1,263 @@
 # Daimon
 
 [![CI](https://github.com/regitxx/Daimon/actions/workflows/ci.yml/badge.svg)](https://github.com/regitxx/Daimon/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](./LICENSE)
 
-> One sovereign agent. For life. Owned by you.
+A protocol and reference implementation for a single, lifelong personal agent that holds its principal's identity, memory, reputation, and money. The agent runs as a local daemon. Its data is encrypted at rest under keys derived from a password the principal alone knows. Any LLM provider becomes interchangeable underneath: switching from Claude to OpenAI to a local Ollama model preserves the relationship.
 
-**Daimon is a protocol giving every human one personal AI agent that holds their memory, identity, reputation, and money — portable across any AI provider, encrypted, owned entirely by them.**
+The name comes from the Socratic *daimon* (δαίμων) — the inner guiding voice. The double reading as a Unix daemon is deliberate.
 
-In Socratic philosophy, your *daimon* (δαίμων) was your inner guiding voice — uniquely yours. The double meaning is intentional: at the technical layer, your daimon literally runs as a daemon on your machine.
+## Problem
 
-This is not a chatbot. This is not a wrapper around Claude or GPT. This is the substrate.
+A person who uses an AI accrues value in two directions: context they have given the model, and context the model has learned about them. Today that value is pinned to whichever provider they happen to be using, and switching models restarts the relationship from zero. The commercial incentives of the providers run directly against portability: Anthropic, OpenAI, and Google each profit when the memory lives with them. The result is that the layer which should be most personal — one's own agent — is the layer least owned by the person it represents. Daimon separates the person-owned layer from the provider: one daimon per principal, running on their machine, holding identity (Ed25519 under `did:key`), memory (SQLite with per-row AES-256-GCM), a tamper-evident activity log (BLAKE3-chained and Ed25519-signed), an HD wallet (BIP-39 / BIP-32) that signs x402 payments against a pre-signing ceiling, and from v0.3 an opt-in federation surface over Noise IK. The protocol is Apache 2.0, extraplatform, and designed so no implementer, including the reference one, can hold user data hostage.
 
----
+## Architecture
 
-## Why
+```mermaid
+flowchart TB
+    subgraph client["Client processes"]
+        CLI["daimon CLI"]
+        SDKPY["Python SDK<br/>daimon-protocol"]
+        SDKTS["TypeScript SDK<br/>@daimon-protocol/sdk"]
+    end
 
-Today, your "AI relationship" belongs to OpenAI or Anthropic. Switch providers and you lose everything: your context, your memory, your history, your accumulated identity. You start over.
+    subgraph daemon["daimond — local daemon"]
+        RPC["JSON-RPC 2.0<br/>Unix socket, mode 0600"]
+        ID["Identity<br/>Ed25519 did:key<br/>Argon2id keystore"]
+        MEM["Memory<br/>SQLite + AES-256-GCM<br/>per-row AAD binding"]
+        LOG["Activity log<br/>BLAKE3 hash chain<br/>Ed25519 signed"]
+        WAL["Wallet<br/>BIP-39 + BIP-32<br/>EVM secp256k1"]
+        PAY["Payments<br/>x402 / EIP-3009<br/>pre-sign ceiling"]
+        AB["Address book<br/>TOFU pinning<br/>per-verb grants"]
+        CAP["Capability tokens<br/>Biscuit v3<br/>Datalog checks"]
+        REP["Reputation receipts<br/>Ed25519 signed"]
+    end
 
-The current generation of agent protocols — MCP, A2A, AGNTCY, x402 — solve real problems. None of them solves *this* one: a personal, portable, user-owned identity and memory layer that no provider controls.
+    subgraph net["Network"]
+        PROV["LLM providers<br/>Claude · OpenAI · Ollama · LM Studio"]
+        PEER["Peer daimons<br/>Noise IK over TCP"]
+        CHAIN["EVM chains<br/>Base · Base Sepolia"]
+    end
 
-Anthropic, OpenAI, and Google cannot build this. It cannibalizes their lock-in. The gap is permanent. We are filling it.
+    CLI --> RPC
+    SDKPY --> RPC
+    SDKTS --> RPC
+    RPC --> ID
+    RPC --> MEM
+    RPC --> LOG
+    RPC --> WAL
+    RPC --> PAY
+    RPC --> AB
+    RPC --> CAP
+    RPC --> REP
+    WAL -. signs .-> PAY
+    PAY -. EIP-3009 .-> CHAIN
+    RPC -. provider.invoke .-> PROV
+    AB -. peer.ask .-> PEER
+    CAP -. gates .-> AB
+    REP -. returned by .-> PEER
+```
+
+Three things to hold in mind while reading the rest:
+
+1. The daemon is single-tenant. One daimon, one principal. Multi-principal is explicitly deferred — it is a different security model, not a feature.
+2. Every piece of persistent state is encrypted at rest under a key derived from the user's password via Argon2id. The daemon never writes the key to disk; it holds it in memory only while unlocked.
+3. The activity log is append-only, hash-chained with BLAKE3, and signed with the identity Ed25519 key. Every action the daimon takes writes a row. The chain is walkable end-to-end by `daimon activity verify`; tampering with a row or a hash is detected deterministically.
+
+For the deeper architectural picture, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). For the threat model, cryptographic choices, and known limitations, read [docs/SECURITY.md](docs/SECURITY.md). The formal protocol specification is [SPEC.md](SPEC.md) (17 sections, versioned from v0.1 through v0.4).
+
+## Security and design decisions
+
+The short version of the threat model, with the full form in [docs/SECURITY.md](docs/SECURITY.md).
+
+| Layer | Primitive | Why |
+|---|---|---|
+| Identity signatures | Ed25519 | Small keys, fast verification, no ambient configuration. Pairs with `did:key` for a self-contained DID. |
+| Password → KEK | Argon2id, ≥64 MiB memory, ≥3 iterations, ≥4 parallelism | Memory-hard, resistant to GPU and ASIC attack, parameters above OWASP's 2024 floor. |
+| Key material at rest | AES-256-GCM under `internal/secretbox` | AEAD with per-value random nonce. Authenticated — a tampered keystore fails to open. |
+| Memory row encryption | AES-256-GCM + per-row AAD = `"daimon-memory-row-v1" \|\| row_id \|\| field_name` | Prevents silently moving a ciphertext onto a different row or into a different column. |
+| Activity payload encryption | AES-256-GCM + per-entry AAD = `"daimon-activity-payload-v1" \|\| entry_id \|\| "payload"` | Same construction as memory, bound to the entry id so a ciphertext cannot be reparented. |
+| Subkey derivation | HKDF-SHA256 with domain-separated info labels | Independent subkeys for memory, activity, and future stores derive from one Ed25519 seed with no on-disk key material. |
+| Content hashing | BLAKE3 | Fast on commodity hardware, drop-in replacement for SHA-2, extensively analyzed. |
+| Wallet seed | BIP-39 (24 words, 256 bits of entropy) + BIP-32 HD derivation along `m/44'/60'/0'/0/i` | Interoperable with MetaMask, Rabby, and every standard EVM wallet. Users can reconstruct their wallet from the seed phrase alone, on paper. |
+| Payment signatures | EIP-712 typed data for EIP-3009 `transferWithAuthorization` | Standard x402 facilitator path. The per-call ceiling is enforced *before* signing, so an over-budget authorisation never produces a signature on the wire. |
+| Federation channel | Noise IK over TCP | Mutual authentication with known responder, forward secrecy. The same Ed25519 identity key authenticates the channel (converted to X25519). |
+| Capability delegation | Biscuit v3 tokens with Datalog checks | Offline attenuation: a delegator can tighten a token further without contacting the issuer. Verification uses ambient facts (time, model, call count). |
+
+Verification you can run yourself:
+
+```sh
+# Walk the local activity log end-to-end.
+daimon activity verify
+# Output: "verified N entries — chain ok" (or a precise failure point).
+
+# Confirm the wallet derivation matches the BIP-39 canonical test vector.
+go test ./internal/wallet -run TestDerive_EVMAddressMatchesPublishedVector
+# Expects m/44'/60'/0'/0/0 of "abandon abandon ... about" → 0x9858EfFD232B4033E47d90003D41EC34EcaEda94.
+
+# Confirm the EIP-712 domain and transferWithAuthorization typehashes.
+go test ./internal/payment -run TestTypehash
+```
+
+The two pinned EIP-712 typehashes (`0x8b73c3c6…` for the domain, `0x7c7c6cdb…` for `transferWithAuthorization`) and the BIP-39 derivation vector are part of the protocol's published surface and do not change without a major version bump. They are also restated in [docs/SECURITY.md](docs/SECURITY.md) as cryptographic anchors.
+
+## Install and quickstart
+
+The quickstart below is lifted from [QUICKSTART.md](QUICKSTART.md) and every command has been run in CI.
+
+```sh
+# Install (one-liner with SHA-256 verification against the published checksums.txt)
+curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
+
+daimon init           # choose a password; generates Ed25519 identity, provisions keystore
+daimon unlock         # enter it; auto-spawns daimond on the Unix socket
+
+# Write a few things to memory.
+daimon memory write --kind fact       "I work on protocol design."
+daimon memory write --kind preference "Prefer short, technical explanations."
+
+# Chat with any provider you have an API key configured for.
+# The daimon injects relevant memory into the prompt before calling the provider;
+# the stderr line "[memory: 2 recalled]" shows what was injected.
+daimon chat --once "What should I work on today?"
+
+# Same memory, different provider, no re-explaining.
+daimon chat --provider openai --once "What should I work on today?"
+daimon chat --provider ollama --once "What should I work on today?"
+
+# Build from source instead:
+git clone https://github.com/regitxx/Daimon.git
+cd Daimon
+make build            # produces bin/daimon + bin/daimond
+
+# Run the full suite locally (mirrors CI minus the install-script shard).
+make ci-local
+```
+
+A local Ollama server gives the daimon a free, offline provider: `ollama pull llama3.2`, then `daimon chat --provider ollama` runs entirely on-device.
+
+## SDKs
+
+Both SDKs are at full RPC parity with the daemon and support native streaming.
+
+```sh
+# Python (import name stays `daimon`)
+pip install daimon-protocol               # v0.1.0 (GA)
+pip install --pre daimon-protocol         # v0.2.0.dev2 (wallet + payments)
+
+# TypeScript
+npm install @daimon-protocol/sdk          # v0.1.0 (GA)
+npm install @daimon-protocol/sdk@dev      # v0.2.0-dev.2 (wallet + payments)
+```
+
+Minimal usage is in [sdk/python/README.md](sdk/python/README.md) and [sdk/typescript/README.md](sdk/typescript/README.md). Cross-language reference code for streaming and x402 payments is in [examples/streaming](examples/streaming) and [examples/x402-smoke](examples/x402-smoke). The x402 smoke harness is run end-to-end on every CI push and asserts byte-for-byte wire parity between the two SDKs against a real-network mock facilitator that cryptographically verifies the EIP-3009 signatures.
+
+## Testing
+
+All three suites are green as of 2026-11-07 on a local run.
+
+| Suite | Count | How to run |
+|---|---|---|
+| Go (daemon + CLI + internal packages) | 589 top-level test functions across 112 files | `go test -race -count=1 ./...` |
+| Python SDK | 96 | `cd sdk/python && pytest -q` |
+| TypeScript SDK | 96 | `cd sdk/typescript && npm test` |
+| **Total** | **781** | `make ci-local` |
+
+The CI matrix on every push and pull request runs: Go vet + race + build, Python 3.10 / 3.11 / 3.12 / 3.13, Node 18 / 20 / 22, the x402 cross-language live smoke, the v0.4 cross-daimon capability + reputation smoke, and `install.sh` end-to-end on both Ubuntu and macOS against the published release. Failures block merge.
+
+Measured performance baselines for the CPU-bound paths (Argon2id, AEAD, BIP-32 derivation, EIP-712 hashing) live in [docs/perf.md](docs/perf.md) and can be reproduced with `make bench`.
 
 ## Status
 
-**Phase**: Day Zero — v0.1.0 GA shipped on both registries; v0.2.0-dev.3 pre-release with **pre-built binaries** on [GitHub Releases](https://github.com/regitxx/Daimon/releases/latest) (`curl | sh` one-liner installer in the next section, or `pip install --pre daimon-protocol` / `npm install @daimon-protocol/sdk@dev` for the SDKs).
+What is in tree, grounded in the SPEC sections it conforms to.
 
-The v0.1 surface (identity / memory / activity log / four streaming provider adapters / conversational chat REPL) is feature-complete and published as `daimon-protocol 0.1.0` on PyPI and `@daimon-protocol/sdk 0.1.0` on npm. The v0.2 surface (BIP-39/BIP-32 HD wallet + x402 payments + full seed lifecycle — show-mnemonic, recover, derive) is in tree, CI-protected, and published as a pre-release on both registries + as platform binaries on GitHub Releases. 356 Go test pass-lines + 65 pytest cases + 65 vitest cases run on every commit, plus a 9th CI shard that runs both SDKs end-to-end against a real-network mock x402 server (cryptographically verifies EIP-3009 signature recovery + asserts `wallet.derive` parity between both SDKs).
-
-- **[`QUICKSTART.md`](./QUICKSTART.md)** — zero-to-paid-x402-resource in ~30 minutes, the whole v0.1 + v0.2 surface end-to-end
-- [`SPEC.md`](./SPEC.md) — the protocol document (v0.1 + v0.2)
-- [`CHECKPOINT.md`](./CHECKPOINT.md) — current state, decisions, next actions
-- [`JOURNAL.md`](./JOURNAL.md) — chronological build log
-
-## Try the killer feature in 60 seconds — provider-portable memory
-
-The day-one promise: tell daimon something about yourself ONCE; every AI
-provider you use afterwards knows it. Switch from Claude to GPT to local
-Llama without re-explaining who you are. Your memory lives on YOUR
-machine, encrypted, owned by you.
-
-```sh
-# Install (one-liner; SHA-256 verified)
-curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
-daimon init    # choose a password
-daimon unlock  # enter it
-
-# Tell daimon a few things about yourself (or skip this — see auto-memory below)
-daimon memory write --kind fact "I'm a software engineer working on Daimon"
-daimon memory write --kind preference "I prefer concise technical explanations"
-
-# Now chat — `daimon chat` auto-picks a provider you've configured an API key for.
-# Notice it KNOWS YOU on the first message. The "[memory: ... recalled]" line
-# shows exactly what daimon told the LLM about you.
-daimon chat --once "What kind of code should I write today?"
-
-# Switch providers — same memory, no re-explaining:
-daimon chat --provider openai --once "What kind of code should I write today?"
-daimon chat --provider ollama --once "What kind of code should I write today?"
-```
-
-**Auto-memory:** in REPL mode (`daimon chat` with no `--once`), every
-turn the daimon asks the same LLM to extract any persistent facts you
-revealed and writes them down for you. So you never have to type
-`daimon memory write` again — just chat normally and watch the daimon
-get smarter about you. See `[auto-memory: learned N new facts]` after
-each turn. Disable with `--no-auto-memory` if you want full control.
-
-**No API keys configured?** `daimon doctor` shows what's available. The
-free path: install [Ollama](https://ollama.com), `ollama pull llama3.2`,
-then `daimon chat --provider ollama` runs entirely locally — no
-account, no cloud, no money. The same memory works there too.
-
-## Try cross-device federation (the substrate)
-
-A public daimon is running on Hetzner Falkenstein, accepting Noise IK
-connections from anywhere on the internet. After install, prove the
-protocol works end-to-end across two real machines:
-
-```sh
-daimon peer dial \
-  --did did:key:z6Mkh7bW4iGukKYrgbtjki99sk2ZAyiP6mzcFSrS3DZus1Td \
-  --endpoint tcp://peer.daimonprotocol.com:9999
-
-# Copy the channel_id it prints, then:
-daimon peer echo <channel_id> "hello from anywhere"
-```
-
-If you see your message echoed back, you've verified the protocol works
-peer-to-peer: encrypted (Noise IK), cryptographically identified
-(did:key), no central server, no account, no login. Same channel
-pattern carries `peer.ask` (delegate a question to another daimon's
-provider), `peer.pay.required` (x402 price discovery), and v0.4's
-capability-token + signed-receipt flows.
-
-That's the substrate the rest of the network value emerges from.
-
-> The public daimon is run by [@regitxx](https://github.com/regitxx) as
-> project infrastructure. It accepts `peer.echo` from anyone (no
-> address-book pin required) and audits every request to its own
-> activity log. Don't send secrets through it — Noise IK protects the
-> wire, but the audit row sees method names + caller pubkeys.
-
-## Reference details — v0.1 memory + provider routing
-
-```sh
-# Install (one-line, no Go required, SHA-256 verified):
-curl -fsSL https://raw.githubusercontent.com/regitxx/Daimon/main/install.sh | sh
-
-daimon init              # once — choose a password
-daimon unlock            # auto-spawns daimond
-daimon memory write --kind fact "the sky is blue"
-daimon memory list       # search needs Ollama for embeddings
-```
-
-Or build from source: `git clone https://github.com/regitxx/Daimon.git && cd Daimon && make build`.
-Full walkthrough including v0.2 wallet + x402 payments: [QUICKSTART.md](./QUICKSTART.md).
-
-Or use one of the SDKs:
-
-- [`sdk/python`](./sdk/python) — `pip install daimon-protocol`, then `from daimon import Client`
-- [`sdk/typescript`](./sdk/typescript) — `npm install @daimon-protocol/sdk`, then `import { Client } from "@daimon-protocol/sdk"`
-- [`examples/streaming`](./examples/streaming) — cross-language streaming reference: both SDKs round-trip token deltas through the same daemon, audit chain verified three ways
-
-## Try v0.2 — wallet + x402 payments (pre-release)
-
-The v0.2 surface adds a wallet the daimon holds + signs with, and end-to-end x402 payment handling. Default `pip install daimon-protocol` and `npm install @daimon-protocol/sdk` still resolve to v0.1.0 stable; opt into the v0.2 surface via the pre-release channels:
-
-```sh
-# Pin the SDK pre-release
-pip install --pre daimon-protocol         # or @dev on npm:
-npm install @daimon-protocol/sdk@dev
-
-# With a `daimon` binary on PATH (one-liner install above):
-daimon unlock                       # auto-creates wallet keystore + surfaces 24-word mnemonic ONCE
-daimon wallet create --chain evm:base
-daimon payment pay --ceiling-usd 0.10 https://example.com/paid
-
-# Forgot to write the mnemonic down? Re-display it (password-gated):
-daimon wallet show-mnemonic
-# Already have a 24-word backup elsewhere? Use THAT seed instead (offline, before first unlock):
-daimon wallet recover
-```
-
-The seed lifecycle is fully under user control. `show-mnemonic` re-runs the full Argon2id KDF + AES-GCM-decrypt against the on-disk keystore (NOT the in-memory unlocked state), so the operation is a genuine "prove you know the password right now" attestation — wrong password surfaces a typed `-32008 CodeWrongPassword` distinct from "daemon is locked." `recover` is offline-only and refuses to overwrite a non-empty keystore, so an existing wallet can never be silently orphaned. The same canonical 12-word BIP-39 test vector (`abandon ... about` → `0x9858EfFD…EcaEda94`) that every external derivation tool (iancoleman.io/bip39, MetaMask, Phantom) produces is pinned in `internal/wallet`'s tests as an interop fixture.
-
-[`examples/x402-smoke`](./examples/x402-smoke) — cross-language x402 reference: both SDKs pay a mock x402 server through one daimon; mock server cryptographically verifies the EIP-3009 signature recovers to the wallet's address (same property a real facilitator checks before settling on-chain). Run end-to-end in 30 seconds with `./examples/x402-smoke/run.sh`.
-
-v0.2.0 GA cuts once live Base Sepolia settlement against a real x402-protected endpoint is verified (phase 40.4). Cryptographic surface is already self-tested by the CI smoke shard.
-
-## What composes with what
-
-Daimon does not compete with the existing protocol stack. It sits *above* it as the user-owned layer.
-
-| Existing standard | Role in Daimon |
-|---|---|
-| MCP (Model Context Protocol) | Tool calls flow through daimon-core |
-| W3C DID + Verifiable Credentials | Identity primitives (did:key, did:ion) |
-| x402 | v0.2: agent-native payments |
-| A2A | v0.3: agent-to-agent communication |
-| Biscuit tokens | v0.4: capability delegation |
-| MLS / Noise | v0.3: encrypted agent channels |
-
-## v0.1 scope — local sovereign agent
-
-A single daimon running on your machine. Holds your identity and memory. Routes requests to any LLM provider. Logs every action you can verify.
-
-- DID identity (`did:key`, with `did:ion` anchor reserved for v0.1.x)
-- Encrypted persistent memory — application-level AES-256-GCM rows under an identity-bound HKDF key (no SQLCipher, no CGO)
-- Hash-chained, Ed25519-signed activity log walkable end-to-end via `daimon activity verify`
-- Provider adapters: Claude, OpenAI, Ollama, LM Studio — all four also stream token-by-token
-- First-party SDKs in Python and TypeScript at full RPC parity, both with native streaming surfaces
-- **Single-player killer feature**: switch providers without losing context, memory, or identity
-
-## v0.2 scope — the daimon holds its own money
-
-Everything in v0.1, plus the wallet + payments primitive that makes "your agent acts on your behalf" real:
-
-- **BIP-39/BIP-32 HD wallet** (24-word mnemonic, MetaMask-compatible). One seed per principal, N derived keypairs per chain. v0.2 ships EVM chains only (Base + Base-Sepolia in the chain registry); SLIP-10 / Ed25519 chains (Solana, Stellar) deferred to v0.2.x.
-- **x402 payment client** — daimon parses HTTP 402 responses, signs EIP-3009 `transferWithAuthorization` against the matching wallet, retries with `PAYMENT-SIGNATURE`. Ceiling enforced **before** signing (over-budget 402s never produce a signature on the wire). Typed RPC error codes (`-32006 CodePaymentCeiling`, `-32007 CodePaymentUnsupported`) propagate to both SDKs.
-- **Full seed lifecycle**: `daimon wallet show-mnemonic` (password-gated re-display, distinct typed `-32008 CodeWrongPassword`); `daimon wallet recover` (offline import from a 12- or 24-word phrase, refuses if a keystore already exists, cross-checks against identity keystore password); `daimon wallet derive` (read-only "what address would I get?" verification, no persistence); `daimon rotate-password` (change the at-rest password on both keystores in lockstep, preserves DID + mnemonic + audit chain). Recovery's success block displays the derived index-0 EVM address so users catch typos BEFORE any state change.
-- **Audit chain extends naturally**: same Ed25519-signed hash chain as v0.1's memory rows now also carries `wallet.created` + `payment.signed` + `payment.settled` + `payment.failed` kinds.
-- **SDK parity** in both Python and TypeScript: `client.wallet.{list, create, address, sign, derive, show_mnemonic}` + `client.payment.pay({url, ceilingSmallestUnit, …})`, byte-for-byte mirroring the daemon's wire shape.
-- **`daimon doctor` Wallet section** surfaces the running daemon's wallet RPC surface state, with actionable remediation on the silent password-mismatch failure mode.
-
-GA blocked on phase 40.4: live Base Sepolia settlement against a real x402-protected endpoint with a real facilitator (the cryptographic surface is self-tested end-to-end via the CI x402-smoke shard, but the on-chain settle step needs an external endpoint).
-
-## Roadmap
-
-| Phase | Months | Ships |
+| Component | SPEC | State |
 |---|---|---|
-| v0.1 | 0–2 | daimon-core daemon, CLI, Python+TS SDKs, 4 provider adapters ✅ **shipped GA 2026-05-12** |
-| v0.2 | 2–4 | x402 payment integration, agent wallet, full seed lifecycle ✅ **pre-release on PyPI `--pre` / npm `@dev` 2026-05-18, pre-built binaries on GitHub Releases 2026-05-20** (`v0.2.0-dev.3`); GA blocked on live Base Sepolia settlement |
-| v0.3 | 4–6 | A2A discovery, federation, encrypted channels |
-| v0.4 | 6–9 | Biscuit-token capability delegation, reputation primitive |
-| v0.5 | 9–12 | First labor-market wedge: post-task / agent-bid / escrow |
-| v1.0 | 12+ | Foundation handoff conversation |
+| Ed25519 `did:key` identity, Argon2id + AES-GCM keystore | §4, §9.3 | shipped v0.1.0 (GA) |
+| Memory: SQLite, per-row AES-GCM, HKDF subkey, AAD binding | §5, §9.3 | shipped v0.1.0 (GA) |
+| Activity log: BLAKE3 chain, Ed25519 signatures, AEAD payloads | §8 | shipped v0.1.0 (GA) |
+| Provider adapters: Claude, OpenAI, Ollama, LM Studio (+ streaming) | §7 | shipped v0.1.0 (GA) |
+| Conversational chat REPL with retrieval over memory | §6, §11 | shipped v0.1.0 (GA) |
+| Python + TypeScript SDKs at full RPC parity | §6, §13 | shipped v0.1.0 (GA) |
+| HD wallet: BIP-39 (24 words), BIP-32 EVM secp256k1 derivation | §14 | shipped v0.2 (pre-release) |
+| x402 payments: EIP-3009, ceiling-before-signing, typed errors | §15 | shipped v0.2 (pre-release) |
+| Seed lifecycle: `show-mnemonic` / `recover` / `derive` / `rotate-password` | §14.6 | shipped v0.2 (pre-release) |
+| Backup / restore (whole-daimon encrypted snapshot) | §14.7 | shipped v0.2 (pre-release) |
+| `did:web` resolver and `DaimonEndpoint` signing | §16.1 | shipped v0.3 (pre-release) |
+| Noise IK over TCP, Ed25519 → X25519 transport authentication | §16.2 | shipped v0.3 (pre-release) |
+| Address book with TOFU pinning and per-verb authorization | §16.4 | shipped v0.3 (pre-release) |
+| Peer verbs: `peer.echo`, `peer.ask`, `peer.pay.required` | §16.5 | shipped v0.3 (pre-release) |
+| Biscuit v3 capability tokens: issue / attenuate / verify | §17.2–§17.4 | shipped v0.4 (pre-release) |
+| Reputation receipts (Ed25519-signed, returned by `peer.ask`) | §17.5 | shipped v0.4 (pre-release) |
+| v0.2.0 GA: live Base Sepolia settlement against a real facilitator | §15 phase 40.4 | in progress, external resources gate |
+| `did:ion` anchoring for key rotation | §4.1 | specified, not implemented |
+| SLIP-10 / Ed25519 wallet chains (Solana, Stellar) | §14.1 | not started |
+| NAT traversal / relay for non-publicly-addressable daimons | §16 (deferred) | not started |
+| MLS group channels (multi-party sessions) | §9.3 (future) | not started |
+| Public daimon directory / DHT discovery | §12 | not started |
+| Labor-market wedge: post-task / agent-bid / escrow | §1 (v0.5) | not started |
+
+## Roadmap and open research questions
+
+The next six concrete milestones follow from the SPEC's open phases and the gaps in the current test surface. Three are implementation; three are research.
+
+1. **v0.2.0 GA.** Run a live Base Sepolia settlement against a real x402-protected endpoint with a working facilitator. The cryptographic surface is self-tested via the CI smoke shard; the remaining gap is external infrastructure. Unblocks the stable tag for the wallet and payments surface and moves `daimon-protocol` 0.2.0 from pre-release to GA on both PyPI and npm.
+
+2. **`did:ion` identity method.** `did:key` is self-contained but cannot rotate — a new key is a new identity. `did:ion` (Sidetree over Bitcoin) gives key rotation under a stable DID without reintroducing a vendor. Implementation gap. UX question: what is the right flow for a principal who rotates, and how does the address-book TOFU pin (§16.4) react when the DID stays stable but the transport pubkey has changed. This is partially a human-factors question, not only a cryptographic one.
+
+3. **Relay for mobile daimons.** v0.3 assumes both ends of a channel bind a listener. A daimon running on a phone cannot. The natural fit is a Noise-IK-authenticated store-and-forward relay, but the design question is whether the relay operator can be reduced to a passive mix (seeing only encrypted payloads and unlinkable identifiers) without introducing unacceptable latency.
+
+4. **Private preference prediction.** v0.1 records what the principal *states* about themselves (`memory write --kind preference "…"`). The next capability is predicting preferences they have not stated, from observed behavior across providers, without any single provider seeing enough to reconstruct the model. The open questions are: (a) what statistical model fits a few-shot personal preference learner that trains on the daimon side rather than the provider side, (b) how to export learned preferences to a new provider as context without leaking the training set, (c) whether differential privacy adds anything meaningful at the single-user scale where there is no population to hide in.
+
+5. **Verifiable memory integrity across time.** Each memory row is signed; each activity entry is hash-chained. A third party cannot currently verify non-tamper without the principal's cooperation. Open question: what minimal public anchor (periodic hash commitment to an EVM contract? a Sigsum-style transparency log?) preserves the principal's privacy while giving an external verifier deterministic proof over a stated time window. The privacy-functional trade-off is the interesting part.
+
+6. **Capability composition algebra.** Biscuit v3 tokens attenuate offline — a holder can add further restrictions without contacting the issuer, and the verifier runs a Datalog authorizer against ambient facts. The open question is what *algebra* of rights composes cleanly when a daimon chains delegations across three or four hops, with heterogeneous Datalog checks at each layer. The current implementation handles the single-hop case robustly; the multi-hop case is specified but under-tested.
+
+## Repository layout
+
+```
+.
+├── SPEC.md                   formal protocol spec (17 sections)
+├── docs/
+│   ├── ARCHITECTURE.md       data flows, component boundaries
+│   ├── SECURITY.md           threat model, cryptographic anchors, limitations
+│   ├── perf.md               measured benchmarks
+│   └── systemd.md            running daimond under systemd
+├── cmd/
+│   ├── daimond/              the daemon process
+│   ├── daimon/               CLI client
+│   └── x402-mock-server/     test facilitator for the smoke suite
+├── internal/
+│   ├── identity/             Ed25519 did:key, keystore
+│   ├── secretbox/            AES-256-GCM AEAD and envelope
+│   ├── memory/               SQLite-backed encrypted store + retrieval
+│   ├── activity/             BLAKE3-chained signed log
+│   ├── provider/             Claude, OpenAI, Ollama, LM Studio adapters
+│   ├── wallet/               BIP-39 / BIP-32 HD wallet
+│   ├── payment/              EIP-712 / EIP-3009 payment client
+│   ├── server/               JSON-RPC 2.0 verb surface
+│   ├── did/web/              did:web resolver and endpoint signing
+│   ├── transport/            Noise IK over TCP
+│   ├── addressbook/          peer DID registry with TOFU pinning
+│   ├── capability/           Biscuit v3 capability tokens
+│   └── reputation/           Ed25519-signed receipts
+├── sdk/
+│   ├── python/               daimon-protocol on PyPI
+│   └── typescript/           @daimon-protocol/sdk on npm
+├── examples/
+│   ├── streaming/            cross-language streaming reference
+│   └── x402-smoke/           cross-language x402 payment reference
+├── design/                   per-version design proposals (v0.2, v0.3, v0.4)
+├── install.sh                one-liner installer with SHA-256 verification
+├── Makefile                  build / test / ci-local / bench targets
+├── QUICKSTART.md             zero-to-paid-x402 walkthrough
+└── CHECKPOINT.md             current project state
+```
 
 ## License
 
-[Apache 2.0](./LICENSE).
-
-## Governance
-
-No VC. No commercial pressure. Foundation- and grant-funded (NLnet NGI Zero, Sovereign Tech Fund). Long-term target: Linux Foundation handoff once adoption justifies it.
-
-The protocol is the public good. Anyone can implement it. No party owns it.
+Apache 2.0. See [LICENSE](LICENSE).
 
 ## Author
 
-Created by **Johannes Christian Koeleman** ([@regitxx](https://github.com/regitxx)) — 2026.
+Johannes Christian Koeleman ([@regitxx](https://github.com/regitxx)). Spec, reference implementation, SDKs, and all documentation in this repository. See the commit log for a precise accounting.
