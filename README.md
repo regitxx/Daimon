@@ -15,13 +15,13 @@ A person who uses an AI accrues value in two directions: context they have given
 
 ```mermaid
 flowchart TB
-    subgraph client["Client processes"]
+    subgraph CLIENT["Client processes"]
         CLI["daimon CLI"]
         SDKPY["Python SDK<br/>daimon-protocol"]
-        SDKTS["TypeScript SDK<br/>@daimon-protocol/sdk"]
+        SDKTS["TypeScript SDK<br/>daimon-protocol/sdk"]
     end
 
-    subgraph daemon["daimond — local daemon"]
+    subgraph DAEMON["daimond (local daemon)"]
         RPC["JSON-RPC 2.0<br/>Unix socket, mode 0600"]
         ID["Identity<br/>Ed25519 did:key<br/>Argon2id keystore"]
         MEM["Memory<br/>SQLite + AES-256-GCM<br/>per-row AAD binding"]
@@ -33,10 +33,10 @@ flowchart TB
         REP["Reputation receipts<br/>Ed25519 signed"]
     end
 
-    subgraph net["Network"]
-        PROV["LLM providers<br/>Claude · OpenAI · Ollama · LM Studio"]
+    subgraph NETWORK["Network"]
+        PROV["LLM providers<br/>Claude, OpenAI, Ollama, LM Studio"]
         PEER["Peer daimons<br/>Noise IK over TCP"]
-        CHAIN["EVM chains<br/>Base · Base Sepolia"]
+        CHAIN["EVM chains<br/>Base, Base Sepolia"]
     end
 
     CLI --> RPC
